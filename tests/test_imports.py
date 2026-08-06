@@ -50,6 +50,10 @@ class PackageImportTests(unittest.TestCase):
             assert module.EventEngine.__name__ == 'EventEngine'
             assert module.AsyncEventEngine.__name__ == 'AsyncEventEngine'
             assert module.MissionEngine is mission.MissionEngine
+            assert module.MissionLifecycle is mission.MissionLifecycle
+            assert module.MissionScheduler is mission.MissionScheduler
+            assert not issubclass(mission.MissionEngine, mission.MissionLifecycle)
+            assert not issubclass(mission.MissionEngine, mission.MissionScheduler)
             assert mavlink.MavlinkEndpoint.udp('127.0.0.1', 14550).uri == 'udp:127.0.0.1:14550'
             assert mavlink.MavlinkRuntime.__name__ == 'MavlinkRuntime'
             """

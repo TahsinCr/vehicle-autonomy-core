@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.1] - 2026-08-06
+
+### Added
+
+- Added `MissionLifecycle` as a ready-to-use component for pause, resume, stop,
+  cancel, completion, failure, progress, checkpoints and mission transitions.
+- Added `MissionScheduler` as a ready-to-use component for launch, parallel
+  execution, queues, resource conflicts, prerequisites, retries and mission
+  chains.
+- Added `lifecycle=` and `scheduler=` options to `MissionEngine`, allowing an
+  application to pass focused subclasses without replacing the complete engine.
+- Added tests for default component binding, custom lifecycle and scheduler
+  subclasses, ownership rules and package-level exports.
+
+### Changed
+
+- Replaced the mission engine's lifecycle and scheduling mixin inheritance with
+  explicit composition. `MissionEngine` now inherits only from `Service` and
+  exposes its active components through `engine.lifecycle` and
+  `engine.scheduler`.
+- Kept the existing `MissionEngine` facade intact. Calls such as `launch()`,
+  `run_parallel()`, `pause()`, `complete()` and `wait()` now delegate to the
+  corresponding component.
+- Renamed `mission/scheduling.py` to `mission/scheduler.py` so the module name
+  matches the concrete `MissionScheduler` class it provides.
+- Exported `MissionLifecycle` and `MissionScheduler` from both `src.core` and
+  `src.core.mission`.
+- Updated the English and Turkish mission documentation with the component
+  boundary, default setup and a small customization example.
+- Updated package metadata to version `1.1.0`.
+
 ## [v1.0] - 2026-08-06
 
 ### Added
@@ -118,4 +149,5 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
+[v1.1]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/compare/v1.0...v1.1
 [v1.0]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/releases/tag/v1.0

@@ -37,11 +37,13 @@ from .mission import (
     MissionEventQuery,
     MissionEventType,
     MissionEngine,
+    MissionLifecycle,
     MissionManagerSnapshot,
     MissionPhase,
     MissionPrerequisitePolicy,
     MissionPriority,
     MissionSnapshot,
+    MissionScheduler,
 )
 
 __all__ = [
@@ -72,11 +74,13 @@ __all__ = [
     "MissionEventQuery",
     "MissionEventType",
     "MissionEngine",
+    "MissionLifecycle",
     "MissionManagerSnapshot",
     "MissionPhase",
     "MissionPrerequisitePolicy",
     "MissionPriority",
     "MissionSnapshot",
+    "MissionScheduler",
     "MemoryEventHistory",
     "Model",
     "Service",

@@ -9,6 +9,8 @@ else:
     from .base import Mission
     from .controller import MissionController
     from .engine import MissionEngine
+    from .lifecycle import MissionLifecycle
+    from .scheduler import MissionScheduler
     from .enums import (
         MissionConflictPolicy,
         MissionEventLevel,
@@ -48,6 +50,7 @@ else:
         MissionController,
         MissionError,
         MissionEngine,
+        MissionLifecycle,
         MissionEvent,
         MissionEventLevel,
         MissionEventQuery,
@@ -61,6 +64,7 @@ else:
         MissionRegistrationError,
         MissionRetryPolicy,
         MissionSnapshot,
+        MissionScheduler,
         MissionTransition,
         MissionTransitionError,
         MissionTimeoutError,
@@ -79,6 +83,7 @@ else:
         "MissionController",
         "MissionError",
         "MissionEngine",
+        "MissionLifecycle",
         "MissionEvent",
         "MissionEventLevel",
         "MissionEventQuery",
@@ -92,6 +97,7 @@ else:
         "MissionRegistrationError",
         "MissionRetryPolicy",
         "MissionSnapshot",
+        "MissionScheduler",
         "MissionTransition",
         "MissionTransitionError",
         "MissionTimeoutError",

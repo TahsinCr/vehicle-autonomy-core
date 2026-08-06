@@ -9,11 +9,14 @@ from src.core.mission import (
     MissionChain,
     MissionConflictPolicy,
     MissionEngine,
+    MissionLifecycle,
     MissionPermissionError,
     MissionPhase,
     MissionPrerequisitePolicy,
     MissionPriority,
     MissionRetryPolicy,
+    MissionScheduler,
+    MissionSnapshot,
     MissionTimeoutError,
 )
 
@@ -129,6 +132,90 @@ class StuckMission(Mission):
 
     def stop(self) -> None:
         pass
+
+
+class RecordingLifecycle(MissionLifecycle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.progress_values: list[float] = []
+
+    def progress(
+        self,
+        mission: Mission | int,
+        value: float,
+        *,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        self.progress_values.append(value)
+        return super().progress(mission, value, reason=reason)
+
+
+class RecordingScheduler(MissionScheduler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.launched: list[int] = []
+
+    def launch(
+        self,
+        mission: Mission | int,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        mission_id = mission.id if isinstance(mission, Mission) else mission
+        self.launched.append(mission_id)
+        return super().launch(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+
+class MissionComponentTests(unittest.TestCase):
+    def test_engine_uses_ready_components_without_mixin_inheritance(self) -> None:
+        lifecycle = RecordingLifecycle()
+        scheduler = RecordingScheduler()
+        engine = MissionEngine(
+            lifecycle=lifecycle,
+            scheduler=scheduler,
+            scheduler_interval=0.001,
+        )
+        mission = CompletingMission()
+        try:
+            self.assertNotIsInstance(engine, MissionLifecycle)
+            self.assertNotIsInstance(engine, MissionScheduler)
+            self.assertIs(engine.lifecycle, lifecycle)
+            self.assertIs(engine.scheduler, scheduler)
+            self.assertIs(lifecycle.engine, engine)
+            self.assertIs(scheduler.engine, engine)
+
+            engine.launch(mission)
+            result = engine.wait(mission, timeout=1.0)
+
+            self.assertEqual(result.phase, MissionPhase.SUCCEEDED)
+            self.assertEqual(scheduler.launched, [mission.id])
+            self.assertEqual(lifecycle.progress_values, [0.5])
+        finally:
+            engine.close()
+
+    def test_components_require_one_explicit_engine_owner(self) -> None:
+        lifecycle = MissionLifecycle()
+        scheduler = MissionScheduler()
+        with self.assertRaisesRegex(RuntimeError, "not bound"):
+            _ = lifecycle.engine
+        with self.assertRaisesRegex(RuntimeError, "not bound"):
+            _ = scheduler.engine
+
+        first = MissionEngine(lifecycle=lifecycle, scheduler=scheduler)
+        second = MissionEngine()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "another engine"):
+                lifecycle.bind(second)
+            with self.assertRaisesRegex(RuntimeError, "another engine"):
+                scheduler.bind(second)
+        finally:
+            first.close()
+            second.close()
 
 
 class MissionEngineLifecycleTests(unittest.TestCase):

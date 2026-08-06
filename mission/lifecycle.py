@@ -1,4 +1,4 @@
-"""Mission lifecycle commands shared by the concrete engine."""
+"""Ready-to-use mission lifecycle component."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import Mission
 from .enums import MissionEventType, MissionPhase, ensure_mission_transition
@@ -14,11 +14,44 @@ from .errors import MissionTimeoutError, MissionTransitionError
 from .models import MissionSnapshot, MissionTransition
 from .runtime import MissionRuntime
 
+if TYPE_CHECKING:
+    from .engine import MissionEngine
+
 
 MissionReference = Mission | int
 
 
-class MissionLifecycleMixin:
+class MissionLifecycle:
+    """Manage mission commands and transitions for one bound engine.
+
+    ``MissionEngine`` creates and binds this component by default. Applications
+    can pass a subclass instance to the engine when lifecycle behavior needs a
+    focused extension without subclassing the complete engine.
+    """
+
+    def __init__(self, engine: "MissionEngine | None" = None) -> None:
+        self._engine: MissionEngine | None = None
+        if engine is not None:
+            self.bind(engine)
+
+    @property
+    def engine(self) -> "MissionEngine":
+        if self._engine is None:
+            raise RuntimeError("Mission lifecycle is not bound to an engine")
+        return self._engine
+
+    def bind(self, engine: "MissionEngine") -> "MissionLifecycle":
+        """Bind this component to one engine; repeated binding is idempotent."""
+
+        from .engine import MissionEngine
+
+        if not isinstance(engine, MissionEngine):
+            raise TypeError("Mission lifecycle requires a MissionEngine")
+        if self._engine is not None and self._engine is not engine:
+            raise RuntimeError("Mission lifecycle is already bound to another engine")
+        self._engine = engine
+        return self
+
     def pause(
         self,
         mission: MissionReference,
@@ -26,9 +59,9 @@ class MissionLifecycleMixin:
         requester_id: int | None = None,
         reason: str = "",
     ) -> MissionSnapshot:
-        runtime = self._runtime(mission)
-        with self._condition:
-            self._authorize_locked(requester_id, runtime)
+        runtime = self.engine._runtime(mission)
+        with self.engine._condition:
+            self.engine._authorize_locked(requester_id, runtime)
             if runtime.snapshot.phase is MissionPhase.PAUSED:
                 return runtime.snapshot
             self._transition_locked(
@@ -41,7 +74,7 @@ class MissionLifecycleMixin:
             runtime.mission.pause()
         except Exception as exc:
             return self.fail(runtime.mission.id, str(exc))
-        with self._condition:
+        with self.engine._condition:
             return self._transition_locked(
                 runtime,
                 MissionPhase.PAUSED,
@@ -56,9 +89,9 @@ class MissionLifecycleMixin:
         requester_id: int | None = None,
         reason: str = "",
     ) -> MissionSnapshot:
-        runtime = self._runtime(mission)
-        with self._condition:
-            self._authorize_locked(requester_id, runtime)
+        runtime = self.engine._runtime(mission)
+        with self.engine._condition:
+            self.engine._authorize_locked(requester_id, runtime)
             if runtime.snapshot.phase is MissionPhase.RUNNING:
                 return runtime.snapshot
             if runtime.snapshot.phase is not MissionPhase.PAUSED:
@@ -67,7 +100,7 @@ class MissionLifecycleMixin:
             runtime.mission.resume()
         except Exception as exc:
             return self.fail(runtime.mission.id, str(exc))
-        with self._condition:
+        with self.engine._condition:
             return self._transition_locked(
                 runtime,
                 MissionPhase.RUNNING,
@@ -108,8 +141,8 @@ class MissionLifecycleMixin:
         mission: MissionReference,
         result: Mapping[str, Any] | None = None,
     ) -> MissionSnapshot:
-        runtime = self._runtime(mission)
-        with self._condition:
+        runtime = self.engine._runtime(mission)
+        with self.engine._condition:
             if runtime.snapshot.phase is MissionPhase.SUCCEEDED:
                 return runtime.snapshot
             if runtime.snapshot.phase.terminal:
@@ -119,7 +152,7 @@ class MissionLifecycleMixin:
             self._cleanup_runtime(runtime)
         except Exception as exc:
             return self.fail(runtime.mission.id, f"Mission cleanup failed: {exc}")
-        with self._condition:
+        with self.engine._condition:
             if runtime.snapshot.phase is MissionPhase.STOPPING:
                 return runtime.snapshot
             snapshot = self._transition_locked(
@@ -129,7 +162,7 @@ class MissionLifecycleMixin:
                 progress=1.0,
                 reason="Mission completed",
             )
-        self._after_terminal(runtime.mission.id, succeeded=True)
+        self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=True)
         return snapshot
 
     def fail(
@@ -139,9 +172,9 @@ class MissionLifecycleMixin:
         *,
         retryable: bool = False,
     ) -> MissionSnapshot:
-        runtime = self._runtime(mission)
+        runtime = self.engine._runtime(mission)
         failure_reason = str(reason).strip() or "Mission failed"
-        with self._condition:
+        with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
             runtime.stop_event.set()
@@ -149,7 +182,7 @@ class MissionLifecycleMixin:
             self._cleanup_runtime(runtime)
         except Exception as exc:
             failure_reason = f"{failure_reason}; cleanup failed: {exc}"
-        with self._condition:
+        with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
             snapshot = self._transition_locked(
@@ -167,15 +200,15 @@ class MissionLifecycleMixin:
                     next_retry_at=time.time() + runtime.mission.retry.delay,
                 )
         if not should_retry:
-            self._after_terminal(runtime.mission.id, succeeded=False)
+            self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
         else:
-            self._emit(
+            self.engine._emit(
                 MissionEventType.RETRY,
                 "Mission retry scheduled",
                 mission_id=runtime.mission.id,
                 fields={"attempt": snapshot.attempt, "at": snapshot.next_retry_at},
             )
-            self._scheduler_wake.set()
+            self.engine._scheduler_wake.set()
         return snapshot
 
     def progress(
@@ -188,14 +221,14 @@ class MissionLifecycleMixin:
         value = float(value)
         if not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError("Mission progress must be between zero and one")
-        with self._condition:
-            runtime = self._runtime_locked(self._mission_id(mission))
+        with self.engine._condition:
+            runtime = self.engine._runtime_locked(self.engine._mission_id(mission))
             if not runtime.snapshot.phase.active:
                 raise MissionTransitionError("Inactive mission progress cannot change")
             runtime.snapshot = runtime.snapshot.evolve(progress=value, reason=reason)
             snapshot = runtime.snapshot
-            self._condition.notify_all()
-        self._emit(
+            self.engine._condition.notify_all()
+        self.engine._emit(
             MissionEventType.PROGRESS,
             reason or f"Mission progress: {value:.0%}",
             mission_id=snapshot.mission_id,
@@ -213,14 +246,14 @@ class MissionLifecycleMixin:
         name = str(name).strip()
         if not name:
             raise ValueError("Mission checkpoint name cannot be empty")
-        with self._condition:
-            runtime = self._runtime_locked(self._mission_id(mission))
+        with self.engine._condition:
+            runtime = self.engine._runtime_locked(self.engine._mission_id(mission))
             checkpoints = dict(runtime.snapshot.checkpoints)
             checkpoints[name] = dict(values or {})
             runtime.snapshot = runtime.snapshot.evolve(checkpoints=checkpoints)
             snapshot = runtime.snapshot
-            self._condition.notify_all()
-        self._emit(
+            self.engine._condition.notify_all()
+        self.engine._emit(
             MissionEventType.CHECKPOINT,
             f"Mission checkpoint: {name}",
             mission_id=snapshot.mission_id,
@@ -234,14 +267,14 @@ class MissionLifecycleMixin:
         mission: MissionReference,
         timeout: float | None = None,
     ) -> MissionSnapshot | None:
-        mission_id = self._mission_id(mission)
-        with self._condition:
-            self._runtime_locked(mission_id)
-            ready = self._condition.wait_for(
-                lambda: self._runtime_locked(mission_id).snapshot.phase.terminal,
+        mission_id = self.engine._mission_id(mission)
+        with self.engine._condition:
+            self.engine._runtime_locked(mission_id)
+            ready = self.engine._condition.wait_for(
+                lambda: self.engine._runtime_locked(mission_id).snapshot.phase.terminal,
                 timeout=timeout,
             )
-            return self._runtime_locked(mission_id).snapshot if ready else None
+            return self.engine._runtime_locked(mission_id).snapshot if ready else None
 
     def stop_matching(
         self,
@@ -252,7 +285,11 @@ class MissionLifecycleMixin:
     ) -> tuple[MissionSnapshot, ...]:
         """Let one mission stop authorized active work without direct references."""
 
-        targets = self._matching_active(requester_id, tags=tags, resources=resources)
+        targets = self.engine._matching_active(
+            requester_id,
+            tags=tags,
+            resources=resources,
+        )
         return tuple(
             self.stop_mission(
                 mission_id,
@@ -263,10 +300,10 @@ class MissionLifecycleMixin:
         )
 
     def _run_mission(self, mission_id: int, generation: int) -> None:
-        runtime = self._runtime(mission_id)
+        runtime = self.engine._runtime(mission_id)
         started = time.monotonic()
         try:
-            with self._condition:
+            with self.engine._condition:
                 if (
                     runtime.snapshot.generation != generation
                     or runtime.snapshot.phase is not MissionPhase.STARTING
@@ -275,7 +312,7 @@ class MissionLifecycleMixin:
                 self._transition_locked(runtime, MissionPhase.RUNNING)
             runtime.mission.start()
             while not runtime.stop_event.wait(runtime.mission.tick_interval):
-                with self._condition:
+                with self.engine._condition:
                     snapshot = runtime.snapshot
                 if snapshot.generation != generation or snapshot.phase.terminal:
                     break
@@ -298,9 +335,9 @@ class MissionLifecycleMixin:
         requester_id: int | None,
         reason: str,
     ) -> MissionSnapshot:
-        runtime = self._runtime(mission)
-        with self._condition:
-            self._authorize_locked(requester_id, runtime)
+        runtime = self.engine._runtime(mission)
+        with self.engine._condition:
+            self.engine._authorize_locked(requester_id, runtime)
             current = runtime.snapshot.phase
             if current is terminal:
                 return runtime.snapshot
@@ -333,12 +370,12 @@ class MissionLifecycleMixin:
             except Exception as exc:
                 return self.fail(runtime.mission.id, str(exc))
             if worker is not None and worker is not threading.current_thread():
-                worker.join(self._stop_timeout)
+                worker.join(self.engine._stop_timeout)
                 if worker.is_alive():
                     raise MissionTimeoutError(
                         f"Mission {runtime.mission.id} did not stop in time"
                     )
-            with self._condition:
+            with self.engine._condition:
                 if runtime.snapshot.phase is MissionPhase.STOPPING:
                     snapshot = self._transition_locked(
                         runtime,
@@ -348,8 +385,8 @@ class MissionLifecycleMixin:
                     )
                 else:
                     snapshot = runtime.snapshot
-        self._after_terminal(runtime.mission.id, succeeded=False)
-        self._scheduler_wake.set()
+        self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
+        self.engine._scheduler_wake.set()
         return snapshot
 
     @staticmethod
@@ -404,9 +441,9 @@ class MissionLifecycleMixin:
             requester_id,
             reason,
         )
-        self._condition.notify_all()
-        self.transitions.publish(transition)
-        self._emit(
+        self.engine._condition.notify_all()
+        self.engine.transitions.publish(transition)
+        self.engine._emit(
             MissionEventType.TRANSITION,
             f"Mission {previous.value} -> {current.value}",
             mission_id=runtime.mission.id,
@@ -435,5 +472,5 @@ class MissionLifecycleMixin:
         if next_retry_at is not None:
             runtime.snapshot = snapshot.evolve(next_retry_at=next_retry_at)
             snapshot = runtime.snapshot
-        self._scheduler_wake.set()
+        self.engine._scheduler_wake.set()
         return snapshot

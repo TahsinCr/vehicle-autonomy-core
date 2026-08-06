@@ -145,9 +145,9 @@ changing the source.
 | `events/errors.py` | event bus exceptions |
 | `mission/base.py` | base class for application-defined missions |
 | `mission/controller.py` | abstract control boundary exposed to a mission |
-| `mission/engine.py` | registry, state, lifecycle and public mission facade |
-| `mission/lifecycle.py` | pause, resume, stop, progress, checkpoint and completion |
-| `mission/scheduling.py` | queues, conflicts, priority, retries and chains |
+| `mission/engine.py` | registry, shared state and the public mission facade |
+| `mission/lifecycle.py` | ready-to-use pause, resume, stop, progress and completion component |
+| `mission/scheduler.py` | ready-to-use queue, conflict, priority, retry and chain component |
 | `mission/runtime.py` | engine-owned state and bound mission controller |
 | `mission/models.py` | snapshots, events, retry policy and chain models |
 | `mission/enums.py` | phases, priorities, policies and transition rules |
@@ -166,11 +166,11 @@ changing the source.
 | `mavlink/runtime.py` | high-level lifecycle and messaging facade |
 | `mavlink/protocols.py` | structural types for compatible MAVLink messages |
 
-Files such as `annotations.py`, `resolution.py`, `lifecycle.py` and
-`mission/runtime.py` are implementation modules. Most applications should use
-the public exports from `src.core`, `src.core.dependency`, `src.core.events`,
-`src.core.mission` and `src.core.mavlink` instead of importing those files
-directly.
+Files such as `dependency/annotations.py`, `dependency/resolution.py`,
+`dependency/lifecycle.py` and `mission/runtime.py` are implementation modules.
+Most applications should use the public exports from `src.core`,
+`src.core.dependency`, `src.core.events`, `src.core.mission` and
+`src.core.mavlink` instead of importing those files directly.
 
 ## Core contracts
 
@@ -462,8 +462,9 @@ offers the same model with awaitable operations and `AsyncEventBus` channels.
 ## Missions
 
 The mission package separates vehicle behavior from orchestration. Applications
-implement `Mission`; `MissionEngine` owns registration, threads, transitions,
-queues and observable state.
+implement `Mission`; `MissionEngine` owns registration, threads and observable
+state. Lifecycle and scheduling behavior is provided by two ready-to-use
+components rather than hidden mixin inheritance.
 
 ### Defining a mission
 
@@ -555,8 +556,8 @@ authorized active work without requiring direct references to those missions.
 
 `snapshot()`, `snapshots()` and `manager_snapshot()` provide frozen runtime
 records detached from caller-owned mappings. `events` and `transitions` are
-normal `EventBus` instances. Historical
-events can be filtered with `MissionEventQuery`:
+normal `EventBus` instances. Historical events can be filtered with
+`MissionEventQuery`:
 
 ```python
 from src.core.mission import MissionEventLevel, MissionEventQuery
@@ -566,6 +567,38 @@ important = engine.query_events(
     MissionEventQuery(minimum_level=MissionEventLevel.WARNING, limit=50)
 )
 ```
+
+### Lifecycle and scheduler components
+
+`MissionEngine()` creates `MissionLifecycle` and `MissionScheduler`
+automatically, so normal usage does not require any extra setup. The same
+classes are public when an application wants to use them directly or extend one
+focused part of the engine:
+
+```python
+from src.core import MissionEngine, MissionLifecycle, MissionScheduler
+
+
+class ObservedLifecycle(MissionLifecycle):
+    def progress(self, mission, value, *, reason=""):
+        print(f"mission progress: {value:.0%}")
+        return super().progress(mission, value, reason=reason)
+
+
+lifecycle = ObservedLifecycle()
+scheduler = MissionScheduler()
+engine = MissionEngine(lifecycle=lifecycle, scheduler=scheduler)
+
+assert engine.lifecycle is lifecycle
+assert engine.scheduler is scheduler
+```
+
+The engine binds each component to one owner. Existing calls such as
+`engine.launch()`, `engine.pause()` and `engine.wait()` remain the main facade
+and delegate to these components. The same operations are also available
+through `engine.scheduler` and `engine.lifecycle` when direct component access
+is useful. A custom component subclasses only the behavior it needs; the engine
+itself no longer uses multiple inheritance.
 
 ### Mission chains
 

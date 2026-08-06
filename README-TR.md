@@ -141,9 +141,9 @@ değişmeden `vehicle_stack.core` gibi başka bir üst paket altında da açıla
 | `events/errors.py` | event bus hata sınıfları |
 | `mission/base.py` | uygulamaya ait mission'lar için taban sınıf |
 | `mission/controller.py` | mission'a sunulan abstract kontrol sınırı |
-| `mission/engine.py` | registry, durum, yaşam döngüsü ve public mission facade |
-| `mission/lifecycle.py` | pause, resume, stop, progress, checkpoint ve tamamlama |
-| `mission/scheduling.py` | kuyruk, çakışma, öncelik, retry ve zincirler |
+| `mission/engine.py` | registry, ortak durum ve public mission facade |
+| `mission/lifecycle.py` | kullanıma hazır pause, resume, stop, progress ve tamamlama bileşeni |
+| `mission/scheduler.py` | kullanıma hazır kuyruk, çakışma, öncelik, retry ve zincir bileşeni |
 | `mission/runtime.py` | motorun sahip olduğu durum ve bağlı mission controller |
 | `mission/models.py` | snapshot, event, retry politikası ve zincir modelleri |
 | `mission/enums.py` | faz, öncelik, politika ve geçiş kuralları |
@@ -162,10 +162,11 @@ değişmeden `vehicle_stack.core` gibi başka bir üst paket altında da açıla
 | `mavlink/runtime.py` | üst seviye yaşam döngüsü ve mesajlaşma facade'ı |
 | `mavlink/protocols.py` | uyumlu MAVLink mesajları için structural type'lar |
 
-`annotations.py`, `resolution.py`, `lifecycle.py` ve `mission/runtime.py` gibi
-dosyalar uygulama ayrıntılarıdır. Çoğu uygulama doğrudan bu dosyalar yerine
-`src.core`, `src.core.dependency`, `src.core.events`, `src.core.mission` ve
-`src.core.mavlink` public exportlarını kullanmalıdır.
+`dependency/annotations.py`, `dependency/resolution.py`,
+`dependency/lifecycle.py` ve `mission/runtime.py` uygulama ayrıntılarıdır. Çoğu
+uygulama doğrudan bu dosyalar yerine `src.core`, `src.core.dependency`,
+`src.core.events`, `src.core.mission` ve `src.core.mavlink` public exportlarını
+kullanmalıdır.
 
 ## Temel sözleşmeler
 
@@ -459,8 +460,9 @@ kapatır. `AsyncEventEngine` aynı yapıyı await edilen işlemler ve
 ## Mission sistemi
 
 Mission paketi araç davranışını koordinasyondan ayırır. Uygulama `Mission`
-sınıflarını yazar; `MissionEngine` registry, thread, geçiş, kuyruk ve gözlenebilir
-durumun sahipliğini alır.
+sınıflarını yazar; `MissionEngine` registry, thread ve gözlenebilir durumun
+sahipliğini alır. Yaşam döngüsü ile zamanlama davranışı gizli mixin kalıtımı
+yerine kullanıma hazır iki bileşen tarafından sağlanır.
 
 ### Mission tanımlama
 
@@ -553,8 +555,8 @@ durdurur.
 
 `snapshot()`, `snapshots()` ve `manager_snapshot()` çağırana ait mapping'lerden
 ayrılmış frozen çalışma kayıtları sağlar. `events` ve `transitions` normal
-`EventBus` nesneleridir.
-Geçmiş event'ler `MissionEventQuery` ile filtrelenebilir:
+`EventBus` nesneleridir. Geçmiş event'ler `MissionEventQuery` ile
+filtrelenebilir:
 
 ```python
 from src.core.mission import MissionEventLevel, MissionEventQuery
@@ -564,6 +566,37 @@ important = engine.query_events(
     MissionEventQuery(minimum_level=MissionEventLevel.WARNING, limit=50)
 )
 ```
+
+### Lifecycle ve scheduler bileşenleri
+
+Normal kullanımda ek ayar gerekmez; `MissionEngine()` kendi `MissionLifecycle`
+ve `MissionScheduler` nesnelerini otomatik oluşturur. Uygulama yalnızca belirli
+bir davranışı genişletmek isterse aynı public sınıfları doğrudan kullanabilir:
+
+```python
+from src.core import MissionEngine, MissionLifecycle, MissionScheduler
+
+
+class ObservedLifecycle(MissionLifecycle):
+    def progress(self, mission, value, *, reason=""):
+        print(f"mission ilerlemesi: {value:.0%}")
+        return super().progress(mission, value, reason=reason)
+
+
+lifecycle = ObservedLifecycle()
+scheduler = MissionScheduler()
+engine = MissionEngine(lifecycle=lifecycle, scheduler=scheduler)
+
+assert engine.lifecycle is lifecycle
+assert engine.scheduler is scheduler
+```
+
+Motor her bileşeni tek bir owner'a bağlar. `engine.launch()`, `engine.pause()` ve
+`engine.wait()` gibi mevcut çağrılar ana facade olarak kalır ve işlemleri bu
+bileşenlere devreder. Doğrudan bileşen erişimi gerektiğinde aynı işlemler
+`engine.scheduler` ve `engine.lifecycle` üzerinden de kullanılabilir. Özel bir
+bileşen yalnızca ihtiyaç duyduğu davranıştan miras alır; motor artık çoklu
+kalıtım kullanmaz.
 
 ### Mission zincirleri
 

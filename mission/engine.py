@@ -19,6 +19,7 @@ from .errors import (
     MissionTimeoutError,
 )
 from .models import (
+    MissionChain,
     MissionChainSnapshot,
     MissionEvent,
     MissionEventQuery,
@@ -27,16 +28,16 @@ from .models import (
     MissionSnapshot,
     MissionTransition,
 )
-from .lifecycle import MissionLifecycleMixin
+from .lifecycle import MissionLifecycle
 from .runtime import BoundMissionController, MissionRuntime
-from .scheduling import MissionSchedulingMixin
+from .scheduler import MissionScheduler
 
 
 MissionReference = Mission | int
 MissionFactory = Callable[[type[Mission]], Mission]
 
 
-class MissionEngine(MissionLifecycleMixin, MissionSchedulingMixin, Service):
+class MissionEngine(Service):
     """Run application-defined missions with scheduling and resource safety.
 
     Missions without conflicts run concurrently. Conflicting missions follow
@@ -52,6 +53,8 @@ class MissionEngine(MissionLifecycleMixin, MissionSchedulingMixin, Service):
         stop_timeout: float = 2.0,
         event_history: int = 1_000,
         mission_factory: MissionFactory | None = None,
+        lifecycle: MissionLifecycle | None = None,
+        scheduler: MissionScheduler | None = None,
     ) -> None:
         scheduler_interval = float(scheduler_interval)
         stop_timeout = float(stop_timeout)
@@ -59,6 +62,10 @@ class MissionEngine(MissionLifecycleMixin, MissionSchedulingMixin, Service):
             raise ValueError("Mission scheduler interval must be positive and finite")
         if not math.isfinite(stop_timeout) or stop_timeout <= 0:
             raise ValueError("Mission stop timeout must be positive and finite")
+        if lifecycle is not None and not isinstance(lifecycle, MissionLifecycle):
+            raise TypeError("Mission engine lifecycle must be MissionLifecycle")
+        if scheduler is not None and not isinstance(scheduler, MissionScheduler):
+            raise TypeError("Mission engine scheduler must be MissionScheduler")
         self._scheduler_interval = scheduler_interval
         self._stop_timeout = stop_timeout
         self._mission_factory = mission_factory or (lambda mission_type: mission_type())
@@ -75,6 +82,8 @@ class MissionEngine(MissionLifecycleMixin, MissionSchedulingMixin, Service):
 
         self.events = EventBus[MissionEvent](history=event_history)
         self.transitions = EventBus[MissionTransition](history=event_history)
+        self.lifecycle = (lifecycle or MissionLifecycle()).bind(self)
+        self.scheduler = (scheduler or MissionScheduler()).bind(self)
 
     @property
     def running(self) -> bool:
@@ -98,7 +107,7 @@ class MissionEngine(MissionLifecycleMixin, MissionSchedulingMixin, Service):
             self._scheduler_stop.clear()
             self._scheduler_wake.clear()
             thread = threading.Thread(
-                target=self._scheduler_loop,
+                target=self.scheduler._scheduler_loop,
                 name="MissionScheduler",
                 daemon=True,
             )
@@ -176,6 +185,155 @@ class MissionEngine(MissionLifecycleMixin, MissionSchedulingMixin, Service):
             runtime.mission.unbind_control(runtime.control)
         self.events.close()
         self.transitions.close()
+
+    def launch(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.scheduler.launch(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def run(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.launch(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def launch_many(
+        self,
+        *missions: MissionReference,
+    ) -> tuple[MissionSnapshot, ...]:
+        return self.scheduler.launch_many(*missions)
+
+    def run_parallel(
+        self,
+        *missions: MissionReference,
+    ) -> tuple[MissionSnapshot, ...]:
+        return self.launch_many(*missions)
+
+    def start_chain(self, chain: MissionChain) -> MissionChainSnapshot:
+        return self.scheduler.start_chain(chain)
+
+    def chain_snapshot(self, chain_id: str) -> MissionChainSnapshot:
+        return self.scheduler.chain_snapshot(chain_id)
+
+    def pause(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.lifecycle.pause(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def resume(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.lifecycle.resume(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def stop_mission(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.lifecycle.stop_mission(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def cancel(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.lifecycle.cancel(
+            mission,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def complete(
+        self,
+        mission: MissionReference,
+        result: Mapping[str, Any] | None = None,
+    ) -> MissionSnapshot:
+        return self.lifecycle.complete(mission, result)
+
+    def fail(
+        self,
+        mission: MissionReference,
+        reason: str,
+        *,
+        retryable: bool = False,
+    ) -> MissionSnapshot:
+        return self.lifecycle.fail(mission, reason, retryable=retryable)
+
+    def progress(
+        self,
+        mission: MissionReference,
+        value: float,
+        *,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        return self.lifecycle.progress(mission, value, reason=reason)
+
+    def checkpoint(
+        self,
+        mission: MissionReference,
+        name: str,
+        values: Mapping[str, Any] | None = None,
+    ) -> MissionSnapshot:
+        return self.lifecycle.checkpoint(mission, name, values)
+
+    def wait(
+        self,
+        mission: MissionReference,
+        timeout: float | None = None,
+    ) -> MissionSnapshot | None:
+        return self.lifecycle.wait(mission, timeout)
+
+    def stop_matching(
+        self,
+        requester_id: int,
+        *,
+        tags: Iterable[str] = (),
+        resources: Iterable[str] = (),
+    ) -> tuple[MissionSnapshot, ...]:
+        return self.lifecycle.stop_matching(
+            requester_id,
+            tags=tags,
+            resources=resources,
+        )
 
     def register(self, mission: Mission) -> MissionSnapshot:
         if not isinstance(mission, Mission):
