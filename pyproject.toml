@@ -18,8 +18,8 @@ dependencies = []
 mavlink = ["pymavlink>=2.4"]
 
 [project.urls]
-Repository = "https://github.com/Kirlangic-Team/vehicle-autonomy-core"
-Changelog = "https://github.com/Kirlangic-Team/vehicle-autonomy-core/blob/main/CHANGELOG.md"
+Repository = "https://github.com/TahsinCr/vehicle-autonomy-core"
+Changelog = "https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 packages = ["src.core", "src.core.dependency", "src.core.events", "src.core.mavlink", "src.core.mission"]

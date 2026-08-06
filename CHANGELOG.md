@@ -105,7 +105,7 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - Established `Vehicle Autonomy Core` as the project name and
-  `Kirlangic-Team/vehicle-autonomy-core` as the repository location.
+  `TahsinCr/vehicle-autonomy-core` as the repository location.
 - Made `src.core` the intended consumer import boundary while keeping all
   internal imports relative, allowing the package to work below another parent
   package as well.
@@ -149,5 +149,5 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[v1.1]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/compare/v1.0...v1.1
-[v1.0]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/releases/tag/v1.0
+[v1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.0...v1.1
+[v1.0]: https://github.com/TahsinCr/vehicle-autonomy-core/releases/tag/v1.0

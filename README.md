@@ -94,7 +94,7 @@ The intended integration is to place this repository at `src/core` in the
 consuming project. A Git submodule is suitable for this layout:
 
 ```bash
-git submodule add https://github.com/Kirlangic-Team/vehicle-autonomy-core.git src/core
+git submodule add https://github.com/TahsinCr/vehicle-autonomy-core.git src/core
 ```
 
 ```text
@@ -917,12 +917,12 @@ Vehicle Autonomy Core is licensed under GNU General Public License v3.0 only
 <!-- Badges -->
 
 [python-shield]: https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
-[license-shield]: https://img.shields.io/github/license/Kirlangic-Team/vehicle-autonomy-core.svg?style=for-the-badge
+[license-shield]: https://img.shields.io/github/license/TahsinCr/vehicle-autonomy-core.svg?style=for-the-badge
 
 <!-- Links -->
 
 [python-url]: https://www.python.org/downloads/
-[readme-tr-url]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/blob/main/README-TR.md
-[changelog-url]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/blob/main/CHANGELOG.md
-[license-url]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/blob/main/LICENSE
-[copyright-url]: https://github.com/Kirlangic-Team/vehicle-autonomy-core/blob/main/COPYRIGHT
+[readme-tr-url]: https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/README-TR.md
+[changelog-url]: https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/CHANGELOG.md
+[license-url]: https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/LICENSE
+[copyright-url]: https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/COPYRIGHT
