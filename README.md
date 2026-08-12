@@ -874,6 +874,14 @@ adapters; users do not need to subclass them.
 Run the complete hardware-free suite from the repository root:
 
 ```bash
+python tests/run.py
+```
+
+The script discovers every `test*.py` file below `tests` and returns a non-zero
+exit code when a test fails. The equivalent direct command and the source
+compilation check are:
+
+```bash
 python -m unittest discover -v
 python -m compileall -q .
 ```
@@ -887,10 +895,12 @@ python -m unittest discover -s tests/mission -t . -v
 python -m unittest discover -s tests/mavlink -t . -v
 ```
 
-The suite covers both the standalone checkout and intended `src/core` layout.
-MAVLink tests use fakes and do not require a flight controller. Serial, radio,
-network and hardware-in-the-loop behavior must still be tested by the consuming
-vehicle project.
+The package-layout tests create temporary, real package trees for both
+`src.core` and another parent package. They verify the intended submodule
+layout through normal imports in clean subprocesses instead of an embedded
+custom loader. MAVLink tests use fakes and do not require a flight controller.
+Serial, radio, network and hardware-in-the-loop behavior must still be tested
+by the consuming vehicle project.
 
 ## Contributing
 

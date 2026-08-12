@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.1.1] - 2026-08-12
+
+### Added
+
+- Added `tests/run.py` as a straightforward entry point for running the entire
+  test suite. It can be called from the repository root and returns a failing
+  exit code when any test fails.
+
+### Changed
+
+- Replaced the hard-to-follow `test_imports.py` helper with
+  `test_package_layout.py`. The same compatibility guarantees are retained,
+  but the test now builds real temporary package layouts and imports them in a
+  clean Python process.
+- Gave package layout, project metadata and repository naming checks clearer
+  boundaries so failures are easier to understand.
+- Updated the English and Turkish guides with the recommended test command and
+  a concise explanation of what the package-layout checks protect.
+- Updated package metadata to version `1.1.1`.
+
 ## [v1.1] - 2026-08-06
 
 ### Added
@@ -149,5 +169,6 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
+[v1.1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1...v1.1.1
 [v1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.0...v1.1
 [v1.0]: https://github.com/TahsinCr/vehicle-autonomy-core/releases/tag/v1.0

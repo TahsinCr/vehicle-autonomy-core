@@ -878,6 +878,14 @@ sözleşmelerdir; bunlardan miras almak gerekmez.
 Donanım gerektirmeyen bütün testleri depo kökünden çalıştırın:
 
 ```bash
+python tests/run.py
+```
+
+Script `tests` altındaki bütün `test*.py` dosyalarını bulur ve herhangi bir test
+başarısız olursa sıfırdan farklı exit code döndürür. Bunun doğrudan komut
+karşılığı ve kaynak derleme kontrolü şöyledir:
+
+```bash
 python -m unittest discover -v
 python -m compileall -q .
 ```
@@ -891,10 +899,12 @@ python -m unittest discover -s tests/mission -t . -v
 python -m unittest discover -s tests/mavlink -t . -v
 ```
 
-Testler hem bağımsız checkout'u hem amaçlanan `src/core` yerleşimini kapsar.
-MAVLink testleri fake nesneler kullanır ve flight controller istemez. Serial,
-radyo, ağ ve hardware-in-the-loop davranışları tüketici araç projesinde ayrıca
-test edilmelidir.
+Paket yerleşimi testleri hem `src.core` hem başka bir üst paket için geçici ve
+gerçek paket ağaçları oluşturur. Amaçlanan submodule yerleşimi ve relative
+importlar, testin içine gömülmüş özel bir yükleyici yerine temiz alt süreçlerde
+normal importlarla doğrulanır. MAVLink testleri fake nesneler kullanır ve flight
+controller istemez. Serial, radyo, ağ ve hardware-in-the-loop davranışları
+tüketici araç projesinde ayrıca test edilmelidir.
 
 ## Katkı
 
