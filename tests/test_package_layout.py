@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -47,11 +46,14 @@ import sys
 
 package_name = sys.argv[1]
 core = importlib.import_module(package_name)
+compatibility = importlib.import_module(f"{package_name}.compatibility")
 dependency = importlib.import_module(f"{package_name}.dependency")
 mission = importlib.import_module(f"{package_name}.mission")
 mavlink = importlib.import_module(f"{package_name}.mavlink")
 
 assert core.DependencyContainer is dependency.DependencyContainer
+assert str(dependency.Lifetime.SCOPED) == "scoped"
+assert len(compatibility.ExceptionGroup("test", [RuntimeError()]).exceptions) == 1
 assert core.MissionEngine is mission.MissionEngine
 assert core.MissionLifecycle is mission.MissionLifecycle
 assert core.MissionScheduler is mission.MissionScheduler
@@ -82,12 +84,11 @@ assert mavlink.MavlinkRuntime.__name__ == "MavlinkRuntime"
 class ProjectMetadataTests(unittest.TestCase):
     """Keep install metadata and repository naming consistent."""
 
-    def test_mavlink_remains_an_optional_dependency(self) -> None:
-        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        project = metadata["project"]
-        self.assertEqual(project["requires-python"], ">=3.11")
-        self.assertEqual(project["dependencies"], [])
-        self.assertIn("pymavlink", project["optional-dependencies"]["mavlink"][0])
+    def test_python_floor_and_optional_mavlink_metadata(self) -> None:
+        metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('requires-python = ">=3.10"', metadata)
+        self.assertIn("dependencies = []", metadata)
+        self.assertIn('mavlink = ["pymavlink>=2.4"]', metadata)
 
     def test_repository_contains_no_legacy_project_spelling(self) -> None:
         searchable_suffixes = {".md", ".py", ".toml"}

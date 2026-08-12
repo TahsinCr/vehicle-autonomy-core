@@ -60,27 +60,37 @@ class MissionLifecycle:
         reason: str = "",
     ) -> MissionSnapshot:
         runtime = self.engine._runtime(mission)
+        transition: MissionTransition | None = None
         with self.engine._condition:
             self.engine._authorize_locked(requester_id, runtime)
             if runtime.snapshot.phase is MissionPhase.PAUSED:
                 return runtime.snapshot
-            self._transition_locked(
+            _, transition = self._transition_locked(
                 runtime,
                 MissionPhase.PAUSING,
                 reason=reason,
                 requester_id=requester_id,
             )
+        self._publish_transition(transition)
         try:
-            runtime.mission.pause()
+            with runtime.callback_lock:
+                with self.engine._condition:
+                    if runtime.snapshot.phase is not MissionPhase.PAUSING:
+                        return runtime.snapshot
+                runtime.mission.pause()
         except Exception as exc:
             return self.fail(runtime.mission.id, str(exc))
         with self.engine._condition:
-            return self._transition_locked(
+            if runtime.snapshot.phase is not MissionPhase.PAUSING:
+                return runtime.snapshot
+            snapshot, transition = self._transition_locked(
                 runtime,
                 MissionPhase.PAUSED,
                 reason=reason,
                 requester_id=requester_id,
             )
+        self._publish_transition(transition)
+        return snapshot
 
     def resume(
         self,
@@ -97,16 +107,24 @@ class MissionLifecycle:
             if runtime.snapshot.phase is not MissionPhase.PAUSED:
                 raise MissionTransitionError("Only a paused mission can resume")
         try:
-            runtime.mission.resume()
+            with runtime.callback_lock:
+                with self.engine._condition:
+                    if runtime.snapshot.phase is not MissionPhase.PAUSED:
+                        return runtime.snapshot
+                runtime.mission.resume()
         except Exception as exc:
             return self.fail(runtime.mission.id, str(exc))
         with self.engine._condition:
-            return self._transition_locked(
+            if runtime.snapshot.phase is not MissionPhase.PAUSED:
+                return runtime.snapshot
+            snapshot, transition = self._transition_locked(
                 runtime,
                 MissionPhase.RUNNING,
                 reason=reason,
                 requester_id=requester_id,
             )
+        self._publish_transition(transition)
+        return snapshot
 
     def stop_mission(
         self,
@@ -149,19 +167,21 @@ class MissionLifecycle:
                 return runtime.snapshot
             runtime.stop_event.set()
         try:
+            self._join_worker(runtime)
             self._cleanup_runtime(runtime)
         except Exception as exc:
             return self.fail(runtime.mission.id, f"Mission cleanup failed: {exc}")
         with self.engine._condition:
             if runtime.snapshot.phase is MissionPhase.STOPPING:
                 return runtime.snapshot
-            snapshot = self._transition_locked(
+            snapshot, transition = self._transition_locked(
                 runtime,
                 MissionPhase.SUCCEEDED,
                 result=dict(result or {}),
                 progress=1.0,
                 reason="Mission completed",
             )
+        self._publish_transition(transition)
         self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=True)
         return snapshot
 
@@ -179,13 +199,14 @@ class MissionLifecycle:
                 return runtime.snapshot
             runtime.stop_event.set()
         try:
+            self._join_worker(runtime)
             self._cleanup_runtime(runtime)
         except Exception as exc:
             failure_reason = f"{failure_reason}; cleanup failed: {exc}"
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
-            snapshot = self._transition_locked(
+            snapshot, transition = self._transition_locked(
                 runtime,
                 MissionPhase.FAILED,
                 reason=failure_reason,
@@ -194,11 +215,15 @@ class MissionLifecycle:
                 retryable and snapshot.attempt < runtime.mission.retry.attempts
             )
             if should_retry:
-                snapshot = self._queue_locked(
+                snapshot, queued_transition = self._queue_locked(
                     runtime,
                     "Mission queued for retry",
                     next_retry_at=time.time() + runtime.mission.retry.delay,
                 )
+            else:
+                queued_transition = None
+        self._publish_transition(transition)
+        self._publish_transition(queued_transition)
         if not should_retry:
             self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
         else:
@@ -301,29 +326,46 @@ class MissionLifecycle:
 
     def _run_mission(self, mission_id: int, generation: int) -> None:
         runtime = self.engine._runtime(mission_id)
-        started = time.monotonic()
         try:
-            with self.engine._condition:
-                if (
-                    runtime.snapshot.generation != generation
-                    or runtime.snapshot.phase is not MissionPhase.STARTING
-                ):
-                    return
-                self._transition_locked(runtime, MissionPhase.RUNNING)
-            runtime.mission.start()
+            with runtime.callback_lock:
+                with self.engine._condition:
+                    if (
+                        runtime.snapshot.generation != generation
+                        or runtime.snapshot.phase is not MissionPhase.STARTING
+                    ):
+                        return
+                    _, transition = self._transition_locked(
+                        runtime, MissionPhase.RUNNING
+                    )
+                self._publish_transition(transition)
+                with self.engine._condition:
+                    if (
+                        runtime.snapshot.generation != generation
+                        or runtime.snapshot.phase is not MissionPhase.RUNNING
+                    ):
+                        return
+                runtime.mission.start()
             while not runtime.stop_event.wait(runtime.mission.tick_interval):
                 with self.engine._condition:
                     snapshot = runtime.snapshot
+                    elapsed = self._active_elapsed_locked(runtime)
                 if snapshot.generation != generation or snapshot.phase.terminal:
                     break
-                if snapshot.phase is MissionPhase.PAUSED:
+                if snapshot.phase is not MissionPhase.RUNNING:
                     continue
-                elapsed = time.monotonic() - started
                 timeout = runtime.mission.timeout_seconds
                 if timeout is not None and elapsed >= timeout:
                     self.fail(mission_id, "Mission execution timed out", retryable=True)
                     break
-                runtime.mission.tick(elapsed)
+                with runtime.callback_lock:
+                    with self.engine._condition:
+                        if (
+                            runtime.snapshot.generation != generation
+                            or runtime.snapshot.phase is not MissionPhase.RUNNING
+                        ):
+                            continue
+                        elapsed = self._active_elapsed_locked(runtime)
+                    runtime.mission.tick(elapsed)
         except Exception as exc:
             self.fail(mission_id, str(exc), retryable=True)
 
@@ -336,6 +378,7 @@ class MissionLifecycle:
         reason: str,
     ) -> MissionSnapshot:
         runtime = self.engine._runtime(mission)
+        transition: MissionTransition | None = None
         with self.engine._condition:
             self.engine._authorize_locked(requester_id, runtime)
             current = runtime.snapshot.phase
@@ -345,39 +388,33 @@ class MissionLifecycle:
                 return runtime.snapshot
             runtime.stop_event.set()
             if current is MissionPhase.QUEUED:
-                snapshot = self._transition_locked(
+                snapshot, transition = self._transition_locked(
                     runtime,
                     terminal,
                     requester_id=requester_id,
                     reason=reason,
                 )
-                worker = None
             elif current is MissionPhase.STOPPING:
                 snapshot = runtime.snapshot
-                worker = runtime.worker
             else:
-                self._transition_locked(
+                _, transition = self._transition_locked(
                     runtime,
                     MissionPhase.STOPPING,
                     requester_id=requester_id,
                     reason=reason,
                 )
-                worker = runtime.worker
+
+        self._publish_transition(transition)
 
         if current is not MissionPhase.QUEUED:
+            self._join_worker(runtime)
             try:
                 self._cleanup_runtime(runtime)
             except Exception as exc:
                 return self.fail(runtime.mission.id, str(exc))
-            if worker is not None and worker is not threading.current_thread():
-                worker.join(self.engine._stop_timeout)
-                if worker.is_alive():
-                    raise MissionTimeoutError(
-                        f"Mission {runtime.mission.id} did not stop in time"
-                    )
             with self.engine._condition:
                 if runtime.snapshot.phase is MissionPhase.STOPPING:
-                    snapshot = self._transition_locked(
+                    snapshot, transition = self._transition_locked(
                         runtime,
                         terminal,
                         requester_id=requester_id,
@@ -385,17 +422,30 @@ class MissionLifecycle:
                     )
                 else:
                     snapshot = runtime.snapshot
+                    transition = None
+            self._publish_transition(transition)
         self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
         self.engine._scheduler_wake.set()
         return snapshot
+
+    def _join_worker(self, runtime: MissionRuntime) -> None:
+        worker = runtime.worker
+        if worker is None or worker is threading.current_thread():
+            return
+        worker.join(self.engine._stop_timeout)
+        if worker.is_alive():
+            raise MissionTimeoutError(
+                f"Mission {runtime.mission.id} did not stop in time"
+            )
 
     @staticmethod
     def _cleanup_runtime(runtime: MissionRuntime) -> None:
         with runtime.cleanup_lock:
             if runtime.cleaned:
                 return
-            runtime.mission.stop()
-            runtime.cleaned = True
+            with runtime.callback_lock:
+                runtime.mission.stop()
+                runtime.cleaned = True
 
     def _transition_locked(
         self,
@@ -406,7 +456,7 @@ class MissionLifecycle:
         reason: str = "",
         result: Mapping[str, Any] | None = None,
         progress: float | None = None,
-    ) -> MissionSnapshot:
+    ) -> tuple[MissionSnapshot, MissionTransition]:
         previous = runtime.snapshot.phase
         ensure_mission_transition(previous, current)
         now = time.time()
@@ -427,6 +477,13 @@ class MissionLifecycle:
                 progress=0.0,
                 result={},
             )
+            runtime.active_elapsed = 0.0
+            runtime.active_started_monotonic = None
+        if current is MissionPhase.RUNNING:
+            runtime.active_started_monotonic = time.monotonic()
+        elif previous is MissionPhase.RUNNING:
+            runtime.active_elapsed = self._active_elapsed_locked(runtime)
+            runtime.active_started_monotonic = None
         if current.terminal:
             changes["finished_at"] = now
         if result is not None:
@@ -441,17 +498,40 @@ class MissionLifecycle:
             requester_id,
             reason,
         )
-        self.engine._condition.notify_all()
-        self.engine.transitions.publish(transition)
-        self.engine._emit(
-            MissionEventType.TRANSITION,
-            f"Mission {previous.value} -> {current.value}",
-            mission_id=runtime.mission.id,
-            requester_id=requester_id,
-            generation=runtime.snapshot.generation,
-            fields={"previous": previous.value, "current": current.value},
+        self.engine._pending_transitions.append(
+            (transition, runtime.snapshot.generation)
         )
-        return runtime.snapshot
+        self.engine._condition.notify_all()
+        return runtime.snapshot, transition
+
+    def _publish_transition(self, transition: MissionTransition | None) -> None:
+        if transition is None:
+            return
+        with self.engine._transition_publish_lock:
+            while True:
+                with self.engine._condition:
+                    if not self.engine._pending_transitions:
+                        return
+                    current, generation = self.engine._pending_transitions.popleft()
+                self.engine.transitions.publish(current)
+                self.engine._emit(
+                    MissionEventType.TRANSITION,
+                    f"Mission {current.previous.value} -> {current.current.value}",
+                    mission_id=current.mission_id,
+                    requester_id=current.requester_id,
+                    generation=generation,
+                    fields={
+                        "previous": current.previous.value,
+                        "current": current.current.value,
+                    },
+                )
+
+    @staticmethod
+    def _active_elapsed_locked(runtime: MissionRuntime) -> float:
+        elapsed = runtime.active_elapsed
+        if runtime.active_started_monotonic is not None:
+            elapsed += time.monotonic() - runtime.active_started_monotonic
+        return elapsed
 
     def _queue_locked(
         self,
@@ -459,12 +539,12 @@ class MissionLifecycle:
         reason: str,
         *,
         next_retry_at: float | None = None,
-    ) -> MissionSnapshot:
+    ) -> tuple[MissionSnapshot, MissionTransition | None]:
         if runtime.snapshot.phase is MissionPhase.QUEUED:
             if next_retry_at is not None:
                 runtime.snapshot = runtime.snapshot.evolve(next_retry_at=next_retry_at)
-            return runtime.snapshot
-        snapshot = self._transition_locked(
+            return runtime.snapshot, None
+        snapshot, transition = self._transition_locked(
             runtime,
             MissionPhase.QUEUED,
             reason=reason,
@@ -473,4 +553,4 @@ class MissionLifecycle:
             runtime.snapshot = snapshot.evolve(next_retry_at=next_retry_at)
             snapshot = runtime.snapshot
         self.engine._scheduler_wake.set()
-        return snapshot
+        return snapshot, transition

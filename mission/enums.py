@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from enum import IntEnum, StrEnum
+from enum import IntEnum
+
+from ..compatibility import StrEnum
 
 from .errors import MissionTransitionError
 
@@ -115,7 +117,12 @@ _TRANSITIONS: dict[MissionPhase, frozenset[MissionPhase]] = {
         }
     ),
     MissionPhase.PAUSING: frozenset(
-        {MissionPhase.PAUSED, MissionPhase.FAILED, MissionPhase.CANCELLED}
+        {
+            MissionPhase.PAUSED,
+            MissionPhase.STOPPING,
+            MissionPhase.FAILED,
+            MissionPhase.CANCELLED,
+        }
     ),
     MissionPhase.PAUSED: frozenset(
         {

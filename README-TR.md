@@ -1,4 +1,4 @@
-[![Python 3.11+][python-shield]][python-url]
+[![Python 3.10+][python-shield]][python-url]
 [![Repository license][license-shield]][license-url]
 
 [English][readme-url] | **Türkçe**
@@ -64,7 +64,7 @@ uygulamaya özel mission kodunu import etmez.
 
 ## Gereksinimler ve kurulum
 
-- Python 3.11 veya daha yeni bir sürüm
+- Python 3.10 veya daha yeni bir sürüm
 - Yalnızca gerçek bir MAVLink bağlantısı açılacaksa `pymavlink`
 - Abstract, event, dependency injection ve mission katmanlarında üçüncü taraf
   çalışma zamanı bağımlılığı yoktur
@@ -321,7 +321,11 @@ await container.shutdown_async()
 önceden oluşturur. `unregister()` senkron cache değerlerini kapatıp token'ı
 siler; `aclose()` kullanan değerlerde `unregister_async()` çağrılmalıdır.
 Shutdown bütün kaynakları oluşturulma sırasının tersinde kapatmayı dener ve
-birden fazla hata varsa bunları birlikte yükseltir.
+birden fazla hata varsa bunları birlikte yükseltir. Eşzamanlı çözümlemeler aynı
+scope içinde yine tek bir instance alır. Birden fazla token altında kayıtlı bir
+nesne son sahibi kaldırılana kadar açık kalır. Senkron shutdown async-only bir
+cleanup ile karşılaşırsa sahipliği korur; işlem `shutdown_async()` ile yeniden
+denenebilir.
 
 Uygulamaya ait composition root için `BaseDependencyContainer` sınıfından
 miras alıp kayıtları `configure()` içinde tutabilirsiniz.
@@ -523,7 +527,7 @@ Mission ayarları sınıf üzerinde tanımlanır:
 | `conflict_policy` | çakışmayı reddeder, kuyruğa alır veya düşük önceliği durdurur |
 | `prerequisite_policy` | eksik ön koşulda reddeder veya kuyruğa alır |
 | `tick_interval` | `tick()` çağrıları arasındaki beklemedir |
-| `timeout_seconds` | maksimum çalışma süresi veya `None` değeridir |
+| `timeout_seconds` | pause süreleri hariç maksimum aktif çalışma süresi veya `None` değeridir |
 | `queue_timeout_seconds` | maksimum kuyruk süresi veya `None` değeridir |
 | `retry` | tekrar deneme sayısı ve gecikmesidir |
 
@@ -623,7 +627,10 @@ Mission worker'ları ve scheduler daemon thread kullanır. `stop()` işbirliğin
 dayalıdır: `start()` veya `tick()` içinde süresiz bloklanan bir mission motor
 tarafından zorla güvenli hâle getirilemez. Worker `stop_timeout` içinde bitmezse
 motor `MissionTimeoutError` yükseltir ve shutdown'ın tekrar denenebilmesi için
-stopping durumunu görünür tutar.
+stopping durumunu görünür tutar. Motor aynı mission nesnesi üzerinde `start()`,
+`tick()`, `pause()`, `resume()` veya `stop()` callback'lerini eşzamanlı çağırmaz.
+Transition aboneleri engine state lock'u dışında çalışır ve başka bir lifecycle
+komutu verebilir.
 
 ## MAVLink
 
@@ -726,8 +733,9 @@ Router başladıktan sonra aynı connection üzerinde başka bir bileşen
 `recv_match()` çağırmamalıdır. Birden fazla okuyucu mesajları belirsiz biçimde
 birbirinden çalar.
 
-Router callback'leri receive thread üzerinde çalışır. Kısa tutulmalıdır. Yavaş
-işler için uygulamaya ait kuyruk, `MavlinkAsyncChannel` veya
+Router callback'leri receive thread üzerinde çalışır. Model inference, disk I/O,
+network isteği veya başka bir bloklayıcı iş burada yapılmamalıdır. Bu işler için
+uygulamaya ait kuyruk, `MavlinkAsyncChannel` veya
 `MavlinkApplicationDispatcher` kullanılmalıdır. Stop sırasında receive thread
 canlı kalırsa router `TimeoutError` yükseltir ve bağlantıyı çalışan thread'in
 altından kapatmaz.
@@ -749,9 +757,11 @@ async def consume(router) -> None:
 ```
 
 Özel loop verilmediyse channel kendi event loop'u içinden başlatılmalıdır.
-Kuyruk dolduğunda en eski mesajı atar ve `dropped_messages` sayısını artırır.
-`stop()` forwarding aboneliğini iptal edip kuyruğu temizler; yeniden başlatılan
-channel önceki oturumdan eski mesaj teslim etmez.
+`maxsize`, router tarafındaki hazırlık buffer'ı ile asyncio kuyruğunun toplamını
+sınırlar. Mesajlar hazırlık buffer'ındayken yeni mesaj en eski bekleyenin yerini
+alır; consumer kuyruğu kapasitenin tamamını doldurmuşsa yeni mesajlar atılır.
+Her taşma `dropped_messages` sayısını artırır. `stop()` iki buffer'ı da temizler;
+yeniden başlatılan channel önceki oturumdan eski mesaj teslim etmez.
 
 ### Uygulama paketleri
 
@@ -785,6 +795,8 @@ Gönderici JSON nesnesini MAVLink `V2_EXTENSION` payload'larına böler ve CRC32
 bütünlük kontrolü ekler. Assembler sırası karışmış fragment'ları kabul eder,
 kaynakları system/component ve packet ID ile ayırır, çelişen tekrarları
 reddeder ve tamamlanmayan paketleri süre sonunda temizler.
+`max_inflight_assemblies`, `max_inflight_bytes` ve `max_completed_packets`,
+tamamlanmamış trafiği ve yakın dönem duplicate takibini global olarak sınırlar.
 
 `MavlinkApplicationPacket` paket tipi, ID, timestamp, source ID ve JSON
 uyumluluğunu doğrular. `to_dict()` bağımsız bir dictionary döndürür. Protokol
@@ -931,7 +943,7 @@ telif bildirimi için [COPYRIGHT][copyright-url] dosyasına bakın.
 
 <!-- Badges -->
 
-[python-shield]: https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
+[python-shield]: https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
 [license-shield]: https://img.shields.io/github/license/TahsinCr/vehicle-autonomy-core.svg?style=for-the-badge
 
 <!-- Links -->

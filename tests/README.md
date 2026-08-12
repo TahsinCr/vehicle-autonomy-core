@@ -40,3 +40,6 @@ python -m compileall -q .
 The tests do not require vehicle hardware. MAVLink-facing tests use fakes;
 serial links, radios and hardware-in-the-loop behavior remain the consuming
 vehicle project's responsibility.
+
+The supported interpreter floor is Python 3.10. Run the complete suite on each
+Python version claimed by a release when preparing a tag.

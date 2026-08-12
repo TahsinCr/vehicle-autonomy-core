@@ -6,8 +6,9 @@ import asyncio
 import threading
 from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any, ParamSpec, TypeAlias, TypeVar
+
+from ..compatibility import StrEnum
 
 
 T = TypeVar("T")

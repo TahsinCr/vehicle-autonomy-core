@@ -22,6 +22,7 @@ from src.core.events import (
     MemoryEventHistory,
     PublishResult,
 )
+from src.core.compatibility import ExceptionGroup
 
 
 class EventBusTests(unittest.TestCase):
@@ -345,6 +346,17 @@ class AsyncEventBusTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bus.closed)
         with self.assertRaises(EventBusClosedError):
             await bus.publish(5)
+
+    async def test_async_wait_subscription_is_atomic_with_publish(self) -> None:
+        bus = AsyncEventBus[int]()
+        await bus._lock.acquire()
+        waiting = asyncio.create_task(bus.wait_for(timeout=0.1))
+        publishing = asyncio.create_task(bus.publish(7))
+        await asyncio.sleep(0)
+        bus._lock.release()
+
+        await publishing
+        self.assertEqual(await waiting, 7)
 
     async def test_async_error_and_timeout_actions(self) -> None:
         errors: list[tuple[int, str]] = []

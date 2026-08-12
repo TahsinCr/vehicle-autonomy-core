@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import math
 import threading
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from ..abstracts import Service
+from ..compatibility import ExceptionGroup
 from ..events import EventBus
 from .base import Mission
 from .enums import MissionEventLevel, MissionEventType, MissionPhase
@@ -73,6 +75,8 @@ class MissionEngine(Service):
         self._chains: dict[str, MissionChainSnapshot] = {}
         self._mission_chains: dict[int, str] = {}
         self._event_sequence = 0
+        self._pending_transitions: deque[tuple[MissionTransition, int]] = deque()
+        self._transition_publish_lock = threading.RLock()
         self._running = False
         self._closed = False
         self._scheduler_stop = threading.Event()

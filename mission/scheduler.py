@@ -19,7 +19,12 @@ from .errors import (
     MissionNotFoundError,
     MissionRegistrationError,
 )
-from .models import MissionChain, MissionChainSnapshot, MissionSnapshot
+from .models import (
+    MissionChain,
+    MissionChainSnapshot,
+    MissionSnapshot,
+    MissionTransition,
+)
 from .runtime import MissionRuntime
 
 if TYPE_CHECKING:
@@ -78,6 +83,7 @@ class MissionScheduler:
         self.engine.start()
 
         preempt_ids: tuple[int, ...] = ()
+        queued: tuple[MissionSnapshot, MissionTransition | None] | None = None
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission_id)
             self.engine._authorize_locked(requester_id, runtime)
@@ -90,20 +96,23 @@ class MissionScheduler:
                     runtime.mission.prerequisite_policy
                     is MissionPrerequisitePolicy.QUEUE
                 ):
-                    return self.engine.lifecycle._queue_locked(
+                    queued = self.engine.lifecycle._queue_locked(
                         runtime,
                         reason or "Waiting for prerequisites",
                     )
-                names = ", ".join(item.__name__ for item in missing)
-                raise MissionConflictError(f"Missing mission prerequisites: {names}")
-            if conflicts:
+                else:
+                    names = ", ".join(item.__name__ for item in missing)
+                    raise MissionConflictError(
+                        f"Missing mission prerequisites: {names}"
+                    )
+            elif conflicts:
                 policy = runtime.mission.conflict_policy
                 if policy is MissionConflictPolicy.QUEUE:
-                    return self.engine.lifecycle._queue_locked(
+                    queued = self.engine.lifecycle._queue_locked(
                         runtime,
                         reason or "Waiting for resources",
                     )
-                if policy is MissionConflictPolicy.PREEMPT_LOWER:
+                elif policy is MissionConflictPolicy.PREEMPT_LOWER:
                     lower = tuple(
                         item
                         for item in conflicts
@@ -120,6 +129,11 @@ class MissionScheduler:
                         self.engine._conflict_message(runtime, conflicts)
                     )
 
+        if queued is not None:
+            snapshot, transition = queued
+            self.engine.lifecycle._publish_transition(transition)
+            return snapshot
+
         for conflict_id in preempt_ids:
             self.engine.stop_mission(
                 conflict_id,
@@ -127,32 +141,45 @@ class MissionScheduler:
                 reason=f"Preempted by {runtime.mission.name}",
             )
 
+        queued = None
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission_id)
             conflicts = self._conflicts_locked(runtime.mission)
             if conflicts:
-                return self.engine.lifecycle._queue_locked(
+                queued = self.engine.lifecycle._queue_locked(
                     runtime,
                     reason or "Waiting for resources",
                 )
-            runtime.stop_event.clear()
-            runtime.cleaned = False
-            snapshot = self.engine.lifecycle._transition_locked(
-                runtime,
-                MissionPhase.STARTING,
-                reason=reason,
-                requester_id=requester_id,
-            )
-            generation = snapshot.generation
-            worker = threading.Thread(
-                target=self.engine.lifecycle._run_mission,
-                args=(mission_id, generation),
-                name=f"Mission[{runtime.mission.name}:{mission_id}]",
-                daemon=True,
-            )
-            runtime.worker = worker
-            worker.start()
-            return snapshot
+            else:
+                runtime.stop_event.clear()
+                runtime.cleaned = False
+                snapshot, transition = self.engine.lifecycle._transition_locked(
+                    runtime,
+                    MissionPhase.STARTING,
+                    reason=reason,
+                    requester_id=requester_id,
+                )
+                generation = snapshot.generation
+        if queued is not None:
+            snapshot, transition = queued
+        self.engine.lifecycle._publish_transition(transition)
+        if queued is None:
+            with self.engine._condition:
+                runtime = self.engine._runtime_locked(mission_id)
+                if (
+                    runtime.snapshot.generation == generation
+                    and runtime.snapshot.phase is MissionPhase.STARTING
+                ):
+                    worker = threading.Thread(
+                        target=self.engine.lifecycle._run_mission,
+                        args=(mission_id, generation),
+                        name=f"Mission[{runtime.mission.name}:{mission_id}]",
+                        daemon=True,
+                    )
+                    runtime.worker = worker
+                    worker.start()
+                snapshot = runtime.snapshot
+        return snapshot
 
     def run(
         self,
@@ -193,7 +220,11 @@ class MissionScheduler:
             MissionEventType.CHAIN,
             f"Mission chain started: {chain.chain_id}",
         )
-        self._launch_chain_index(chain.chain_id, 0)
+        try:
+            self._launch_chain_index(chain.chain_id, 0)
+        except Exception as exc:
+            self._mark_chain_failed(chain.chain_id, exc)
+            raise
         with self.engine._condition:
             return self.engine._chains[chain.chain_id]
 
@@ -277,6 +308,7 @@ class MissionScheduler:
         self.launch(mission)
 
     def _advance_chain(self, chain_id: str, *, succeeded: bool) -> None:
+        event_message: str | None = None
         with self.engine._condition:
             snapshot = self.engine._chains.get(chain_id)
             if snapshot is None or not snapshot.active:
@@ -288,26 +320,59 @@ class MissionScheduler:
                     failed=True,
                     reason="Mission in chain failed",
                 )
-                self.engine._emit(
-                    MissionEventType.CHAIN,
-                    f"Mission chain failed: {chain_id}",
-                )
-                return
-            next_index = snapshot.current_index + 1
-            if next_index >= len(snapshot.chain.mission_types):
+                event_message = f"Mission chain failed: {chain_id}"
+                next_index = None
+            else:
+                next_index = snapshot.current_index + 1
+            if (
+                next_index is not None
+                and next_index >= len(snapshot.chain.mission_types)
+            ):
                 self.engine._chains[chain_id] = replace(
                     snapshot,
                     current_index=next_index,
                     active=False,
                     completed=True,
                 )
-                self.engine._emit(
-                    MissionEventType.CHAIN,
-                    f"Mission chain completed: {chain_id}",
+                event_message = f"Mission chain completed: {chain_id}"
+                next_index = None
+            elif next_index is not None:
+                self.engine._chains[chain_id] = replace(
+                    snapshot, current_index=next_index
                 )
+        if event_message is not None:
+            self.engine._emit(MissionEventType.CHAIN, event_message)
+        if next_index is None:
+            return
+        try:
+            self._launch_chain_index(chain_id, next_index)
+        except Exception as exc:
+            self._mark_chain_failed(chain_id, exc)
+
+    def _mark_chain_failed(self, chain_id: str, error: Exception) -> None:
+        reason = f"Mission chain could not continue: {error}"
+        with self.engine._condition:
+            snapshot = self.engine._chains.get(chain_id)
+            if snapshot is None or not snapshot.active:
                 return
-            self.engine._chains[chain_id] = replace(snapshot, current_index=next_index)
-        self._launch_chain_index(chain_id, next_index)
+            self.engine._chains[chain_id] = replace(
+                snapshot,
+                active=False,
+                failed=True,
+                reason=reason,
+            )
+            orphaned_ids = tuple(
+                mission_id
+                for mission_id, owner_chain_id in self.engine._mission_chains.items()
+                if owner_chain_id == chain_id
+                and not self.engine._runtimes[mission_id].snapshot.phase.active
+            )
+            for mission_id in orphaned_ids:
+                self.engine._mission_chains.pop(mission_id, None)
+        self.engine._emit(
+            MissionEventType.CHAIN,
+            reason,
+        )
 
     def _missing_prerequisites_locked(
         self,

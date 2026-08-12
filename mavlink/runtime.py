@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..abstracts import Service
+from ..compatibility import ExceptionGroup
 from ..events import EventBus, Subscription
 from .application import MavlinkApplicationChannel, MavlinkApplicationPacket
 from .client import MavlinkClient
@@ -263,6 +264,9 @@ class MavlinkRuntime(Service):
             receive,
             predicate=predicate,
         )
+        with lock:
+            if consumed:
+                subscription.cancel()
         return subscription
 
     def wait_for(

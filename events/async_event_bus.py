@@ -9,6 +9,8 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from ..compatibility import ExceptionGroup
+
 from .actions import AsyncEventBusActions, EventErrorContext, EventTimeoutContext
 from .base import BaseEventBus
 from .contracts import DeliveryMode, ErrorPolicy, EventBusStats, PublishResult
@@ -135,21 +137,11 @@ class AsyncEventBus(BaseEventBus[T]):
         )
         async with self._lock:
             self._ensure_open()
-            subscription_id = self._next_id
-            self._next_id += 1
-
-            async def cancel() -> None:
-                async with self._lock:
-                    self._subscribers.pop(subscription_id, None)
-
-            subscription = AsyncSubscription(subscription_id, cancel)
-            subscriber = _AsyncSubscriber(
+            subscription, subscriber = self._subscribe_locked(
                 callback,
                 normalized_filter,
                 delivery_limit,
-                subscription,
             )
-            self._subscribers[subscription_id] = subscriber
 
         if replay and self._history is not None:
             for event in self._history.query(normalized_filter, limit=replay):
@@ -174,6 +166,29 @@ class AsyncEventBus(BaseEventBus[T]):
                     if final:
                         break
         return subscription
+
+    def _subscribe_locked(
+        self,
+        callback: Callable[[T], Awaitable[None]],
+        event_filter: EventFilter[T],
+        delivery_limit: int | None,
+    ) -> tuple[AsyncSubscription, _AsyncSubscriber[T]]:
+        subscription_id = self._next_id
+        self._next_id += 1
+
+        async def cancel() -> None:
+            async with self._lock:
+                self._subscribers.pop(subscription_id, None)
+
+        subscription = AsyncSubscription(subscription_id, cancel)
+        subscriber = _AsyncSubscriber(
+            callback,
+            event_filter,
+            delivery_limit,
+            subscription,
+        )
+        self._subscribers[subscription_id] = subscriber
+        return subscription, subscriber
 
     async def once(
         self,
@@ -372,34 +387,28 @@ class AsyncEventBus(BaseEventBus[T]):
             predicate=predicate,
         )
         result: asyncio.Future[T | None] = loop.create_future()
-        async with self._lock:
-            self._ensure_open()
-            self._waiters.add(result)
 
         async def capture(event: T) -> None:
             if not result.done():
                 result.set_result(event)
 
-        subscription: AsyncSubscription | None = None
+        async with self._lock:
+            self._ensure_open()
+            subscription, _subscriber = self._subscribe_locked(
+                capture,
+                normalized_filter,
+                1,
+            )
+            self._waiters.add(result)
+
         timed_out = False
         try:
-            try:
-                subscription = await self.subscribe(
-                    capture,
-                    event_filter=normalized_filter,
-                    once=True,
-                )
-            except EventBusError:
-                if result.done():
-                    return result.result()
-                raise
             value = await asyncio.wait_for(result, timeout)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             timed_out = True
             value = None
         finally:
-            if subscription is not None:
-                await subscription.cancel()
+            await subscription.cancel()
             async with self._lock:
                 self._waiters.discard(result)
         if timed_out and self._actions.on_timeout is not None:

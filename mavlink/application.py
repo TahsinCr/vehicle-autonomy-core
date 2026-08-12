@@ -242,12 +242,29 @@ class MavlinkApplicationCodec:
 class MavlinkApplicationAssembler:
     """Reassemble out-of-order fragments into one packet per source identity."""
 
-    def __init__(self, *, fragment_timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        *,
+        fragment_timeout: float = 10.0,
+        max_inflight_assemblies: int = 256,
+        max_inflight_bytes: int = _MAX_PACKET_BYTES * 4,
+        max_completed_packets: int = 1_024,
+    ) -> None:
         if fragment_timeout <= 0:
             raise ValueError("Fragment zaman aşımı pozitif olmalı")
+        if max_inflight_assemblies <= 0:
+            raise ValueError("In-flight assembly sınırı pozitif olmalı")
+        if max_inflight_bytes <= 0:
+            raise ValueError("In-flight byte sınırı pozitif olmalı")
+        if max_completed_packets <= 0:
+            raise ValueError("Tamamlanan paket geçmişi sınırı pozitif olmalı")
         self._fragment_timeout = float(fragment_timeout)
+        self._max_inflight_assemblies = int(max_inflight_assemblies)
+        self._max_inflight_bytes = int(max_inflight_bytes)
+        self._max_completed_packets = int(max_completed_packets)
         self._assemblies: dict[tuple[int, int, int], _Assembly] = {}
         self._completed: dict[tuple[int, int, int], float] = {}
+        self._inflight_bytes = 0
         self._lock = threading.RLock()
 
     def accept(
@@ -266,25 +283,38 @@ class MavlinkApplicationAssembler:
                 return None
             assembly = self._assemblies.get(key)
             if assembly is None:
+                if len(self._assemblies) >= self._max_inflight_assemblies:
+                    raise MavlinkApplicationProtocolError(
+                        "Çok fazla tamamlanmamış uygulama paketi var"
+                    )
                 assembly = _Assembly(fragment.count, fragment.checksum, now)
                 self._assemblies[key] = assembly
             elif assembly.count != fragment.count or assembly.checksum != fragment.checksum:
-                self._assemblies.pop(key, None)
+                self._discard_assembly(key)
                 raise MavlinkApplicationProtocolError(
                     "Aynı kimlikte uyuşmayan uygulama fragmentleri alındı"
                 )
             previous = assembly.fragments.get(fragment.index)
             if previous is not None and previous != fragment.chunk:
-                self._assemblies.pop(key, None)
+                self._discard_assembly(key)
                 raise MavlinkApplicationProtocolError("Tekrarlanan fragment içeriği uyuşmuyor")
-            assembly.fragments[fragment.index] = fragment.chunk
+            if previous is None:
+                if self._inflight_bytes + len(fragment.chunk) > self._max_inflight_bytes:
+                    self._discard_assembly(key)
+                    raise MavlinkApplicationProtocolError(
+                        "Tamamlanmamış uygulama paketleri byte sınırını aştı"
+                    )
+                assembly.fragments[fragment.index] = fragment.chunk
+                self._inflight_bytes += len(fragment.chunk)
             if len(assembly.fragments) != assembly.count:
                 return None
             body = b"".join(assembly.fragments[index] for index in range(assembly.count))
-            self._assemblies.pop(key, None)
+            self._discard_assembly(key)
             if zlib.crc32(body) & 0xFFFFFFFF != assembly.checksum:
                 raise MavlinkApplicationProtocolError("Uygulama paketi CRC doğrulamasını geçemedi")
             self._completed[key] = now
+            while len(self._completed) > self._max_completed_packets:
+                self._completed.pop(next(iter(self._completed)))
         return MavlinkApplicationCodec.decode_packet(
             fragment.packet_id,
             body,
@@ -296,6 +326,12 @@ class MavlinkApplicationAssembler:
         with self._lock:
             self._assemblies.clear()
             self._completed.clear()
+            self._inflight_bytes = 0
+
+    def _discard_assembly(self, key: tuple[int, int, int]) -> None:
+        assembly = self._assemblies.pop(key, None)
+        if assembly is not None:
+            self._inflight_bytes -= sum(map(len, assembly.fragments.values()))
 
     def _prune(self, now: float) -> None:
         deadline = now - self._fragment_timeout
@@ -304,6 +340,11 @@ class MavlinkApplicationAssembler:
             for key, value in self._assemblies.items()
             if value.created_monotonic >= deadline
         }
+        self._inflight_bytes = sum(
+            len(chunk)
+            for assembly in self._assemblies.values()
+            for chunk in assembly.fragments.values()
+        )
         self._completed = {
             key: completed_at
             for key, completed_at in self._completed.items()
@@ -331,6 +372,9 @@ class MavlinkApplicationChannel(Service):
         source_systems: int | tuple[int, ...] | None = None,
         source_components: int | tuple[int, ...] | None = None,
         fragment_timeout: float = 10.0,
+        max_inflight_assemblies: int = 256,
+        max_inflight_bytes: int = _MAX_PACKET_BYTES * 4,
+        max_completed_packets: int = 1_024,
     ) -> None:
         for name, value, maximum in (
             ("network_id", network_id, 255),
@@ -354,7 +398,12 @@ class MavlinkApplicationChannel(Service):
         )
         self.packets = EventBus[MavlinkApplicationPacket]()
         self.errors = EventBus[Exception]()
-        self._assembler = MavlinkApplicationAssembler(fragment_timeout=fragment_timeout)
+        self._assembler = MavlinkApplicationAssembler(
+            fragment_timeout=fragment_timeout,
+            max_inflight_assemblies=max_inflight_assemblies,
+            max_inflight_bytes=max_inflight_bytes,
+            max_completed_packets=max_completed_packets,
+        )
         self._source_systems = source_systems
         self._source_components = source_components
         self._subscription: Subscription | None = None

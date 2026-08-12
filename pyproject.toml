@@ -4,15 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vehicle-autonomy-core"
-version = "1.1.1"
+version = "1.2.0"
 description = "Reusable vehicle-agnostic autonomy infrastructure for Python projects"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
   { name = "TahsinCr", email = "Tahsincr@outlook.com" },
 ]
 dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 
 [project.optional-dependencies]
 mavlink = ["pymavlink>=2.4"]
@@ -22,5 +29,6 @@ Repository = "https://github.com/TahsinCr/vehicle-autonomy-core"
 Changelog = "https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
+include-package-data = false
 packages = ["src.core", "src.core.dependency", "src.core.events", "src.core.mavlink", "src.core.mission"]
 package-dir = { "src.core" = ".", "src.core.dependency" = "dependency", "src.core.events" = "events", "src.core.mavlink" = "mavlink", "src.core.mission" = "mission" }

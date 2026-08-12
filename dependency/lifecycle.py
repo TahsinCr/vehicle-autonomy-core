@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Iterable
 from typing import Any
 
+from ..compatibility import ExceptionGroup
 from .registration import MISSING, Provider
 from .errors import AsyncDependencyError
 from .resolution import close_awaitable, format_token, maybe_await

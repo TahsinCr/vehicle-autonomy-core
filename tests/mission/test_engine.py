@@ -75,6 +75,10 @@ class ExclusiveMission(BlockingMission):
     conflict_policy = MissionConflictPolicy.QUEUE
 
 
+class RejectingExclusiveMission(BlockingMission):
+    resources = frozenset({"flight-control"})
+
+
 class CriticalMission(BlockingMission):
     priority = int(MissionPriority.CRITICAL)
     resources = frozenset({"flight-control"})
@@ -132,6 +136,40 @@ class StuckMission(Mission):
 
     def stop(self) -> None:
         pass
+
+
+class BlockingTickMission(Mission):
+    tick_interval = 0.001
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tick_entered = threading.Event()
+        self.release_tick = threading.Event()
+        self.stop_entered = threading.Event()
+
+    def start(self) -> None:
+        pass
+
+    def tick(self, elapsed_seconds: float) -> None:
+        self.tick_entered.set()
+        self.release_tick.wait()
+
+    def stop(self) -> None:
+        self.stop_entered.set()
+
+
+class PausableTickMission(BlockingTickMission):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_entered = threading.Event()
+
+    def pause(self) -> None:
+        self.pause_entered.set()
+
+
+class PausedTimeoutMission(BlockingMission):
+    tick_interval = 0.001
+    timeout_seconds = 0.1
 
 
 class RecordingLifecycle(MissionLifecycle):
@@ -355,6 +393,67 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(waiting_result.phase, MissionPhase.FAILED)
         self.assertIn("queue timed out", waiting_result.reason)
 
+    def test_stop_waits_for_tick_before_cleanup(self) -> None:
+        mission = BlockingTickMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.tick_entered.wait(1.0))
+
+        stopped: list[MissionSnapshot] = []
+        stopper = threading.Thread(
+            target=lambda: stopped.append(self.engine.stop_mission(mission))
+        )
+        stopper.start()
+        time.sleep(0.02)
+
+        self.assertFalse(mission.stop_entered.is_set())
+        mission.release_tick.set()
+        stopper.join(1.0)
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(mission.stop_entered.is_set())
+        self.assertEqual(stopped[0].phase, MissionPhase.STOPPED)
+
+    def test_pause_waits_for_tick_and_blocks_new_ticks(self) -> None:
+        mission = PausableTickMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.tick_entered.wait(1.0))
+
+        paused: list[MissionSnapshot] = []
+        pauser = threading.Thread(target=lambda: paused.append(self.engine.pause(mission)))
+        pauser.start()
+        time.sleep(0.02)
+
+        self.assertFalse(mission.pause_entered.is_set())
+        mission.release_tick.set()
+        pauser.join(1.0)
+        self.assertEqual(paused[0].phase, MissionPhase.PAUSED)
+        self.assertTrue(mission.pause_entered.is_set())
+
+    def test_transition_callback_can_stop_starting_mission_safely(self) -> None:
+        mission = BlockingMission()
+
+        def stop_on_starting(transition: object) -> None:
+            if getattr(transition, "current", None) is MissionPhase.STARTING:
+                self.engine.stop_mission(mission)
+
+        self.engine.transitions.subscribe(stop_on_starting)
+        snapshot = self.engine.launch(mission)
+
+        self.assertEqual(snapshot.phase, MissionPhase.STOPPED)
+        self.assertFalse(mission.started.is_set())
+
+    def test_execution_timeout_excludes_paused_time(self) -> None:
+        mission = PausedTimeoutMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.started.wait(1.0))
+        time.sleep(0.01)
+        self.engine.pause(mission)
+        time.sleep(0.15)
+
+        self.assertEqual(self.engine.snapshot(mission).phase, MissionPhase.PAUSED)
+        self.engine.resume(mission)
+        time.sleep(0.01)
+        self.assertEqual(self.engine.snapshot(mission).phase, MissionPhase.RUNNING)
+
 
 class MissionEngineChainTests(unittest.TestCase):
     def test_chain_runs_each_mission_in_order(self) -> None:
@@ -383,5 +482,46 @@ class MissionEngineChainTests(unittest.TestCase):
                 ),
                 2,
             )
+        finally:
+            engine.close()
+
+    def test_chain_factory_failure_marks_chain_inactive(self) -> None:
+        def broken_factory(_mission_type: type[Mission]) -> Mission:
+            raise RuntimeError("factory failed")
+
+        engine = MissionEngine(mission_factory=broken_factory)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "factory failed"):
+                engine.start_chain(MissionChain("broken", (CompletingMission,)))
+
+            snapshot = engine.chain_snapshot("broken")
+            self.assertFalse(snapshot.active)
+            self.assertTrue(snapshot.failed)
+            self.assertIn("factory failed", snapshot.reason)
+        finally:
+            engine.close()
+
+    def test_chain_launch_conflict_marks_chain_inactive(self) -> None:
+        engine = MissionEngine(scheduler_interval=0.001)
+        owner = ExclusiveMission()
+        try:
+            engine.launch(owner)
+            self.assertTrue(owner.started.wait(1.0))
+            engine.start_chain(
+                MissionChain(
+                    "conflicted",
+                    (CompletingMission, RejectingExclusiveMission),
+                )
+            )
+
+            deadline = time.monotonic() + 1.0
+            while engine.chain_snapshot("conflicted").active:
+                if time.monotonic() >= deadline:
+                    self.fail("Mission chain remained active after launch conflict")
+                time.sleep(0.001)
+
+            snapshot = engine.chain_snapshot("conflicted")
+            self.assertTrue(snapshot.failed)
+            self.assertIn("conflicts", snapshot.reason)
         finally:
             engine.close()

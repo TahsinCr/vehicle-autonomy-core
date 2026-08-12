@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.2] - 2026-08-13
+
+### Added
+
+- Added dependency-free Python 3.10 fallbacks for string enums and grouped
+  cleanup errors.
+- Added deterministic concurrency tests for mission callback ownership,
+  paused execution timeouts, scoped dependency resolution and asynchronous
+  event waits.
+- Added configurable in-flight assembly, byte and recently completed packet
+  limits to the MAVLink application assembler.
+
+### Changed
+
+- Lowered the supported Python version to 3.10 and verified the source tree,
+  standard test discovery and installed wheel on Python 3.10.18.
+- Mission lifecycle callbacks for one mission are now serialized. Stop waits
+  for an active `start()` or `tick()` call before invoking mission cleanup, and
+  pause prevents another tick from starting while the pause callback runs.
+- Mission transition events are published outside the engine condition lock
+  while preserving transition order. Reentrant subscribers can safely issue
+  lifecycle commands.
+- Mission execution timeouts now count active running time and exclude time
+  spent paused.
+- Scoped dependencies now coordinate concurrent synchronous and asynchronous
+  resolution within each scope.
+- Python bytecode and cache directories are excluded from built wheels.
+- The MAVLink asyncio bridge now bounds messages before they reach the event
+  loop as well as in its asyncio queue, with at most one pending drain callback.
+- Updated package metadata to version `1.2.0`.
+
+### Fixed
+
+- Marked mission chains failed when their factory, registration or next launch
+  step raises, preventing inactive chains from remaining active indefinitely.
+- Kept async-only resources attached when synchronous dependency shutdown is
+  rejected, allowing cleanup to be retried with `shutdown_async()`.
+- Prevented a shared dependency instance from being closed while another token
+  in the same container still references it.
+- Closed the subscription race in `AsyncEventBus.wait_for()` and the immediate
+  delivery leak in `MavlinkRuntime.once()`.
+
 ## [v1.1.1] - 2026-08-12
 
 ### Added
@@ -169,6 +211,7 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
+[v1.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1.1...v1.2
 [v1.1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1...v1.1.1
 [v1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.0...v1.1
 [v1.0]: https://github.com/TahsinCr/vehicle-autonomy-core/releases/tag/v1.0

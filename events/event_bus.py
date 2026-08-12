@@ -9,6 +9,8 @@ from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
+from ..compatibility import ExceptionGroup
+
 from .actions import EventBusActions, EventErrorContext, EventTimeoutContext
 from .base import BaseEventBus
 from .contracts import ErrorPolicy, EventBusStats, PublishResult

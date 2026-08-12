@@ -1,4 +1,4 @@
-[![Python 3.11+][python-shield]][python-url]
+[![Python 3.10+][python-shield]][python-url]
 [![Repository license][license-shield]][license-url]
 
 **English** | [Türkçe][readme-tr-url]
@@ -66,7 +66,7 @@ a UI framework or application-specific mission code.
 
 ## Requirements and installation
 
-- Python 3.11 or newer
+- Python 3.10 or newer
 - `pymavlink` only when opening a real MAVLink connection
 - no third-party runtime dependency for abstracts, events, dependency injection
   or missions
@@ -324,7 +324,11 @@ await container.shutdown_async()
 priority order. `unregister()` disposes synchronous cached values before
 removing their token; use `unregister_async()` for values with `aclose()`.
 Shutdown tries every cached resource in reverse creation order and raises all
-cleanup failures together when more than one resource fails.
+cleanup failures together when more than one resource fails. Concurrent
+resolutions still receive one scoped instance, and an object registered under
+several tokens remains open until its final owning token is removed. A
+synchronous shutdown that encounters async-only cleanup leaves ownership intact
+so the application can retry with `shutdown_async()`.
 
 For a project-owned composition root, subclass `BaseDependencyContainer` and
 put registrations in `configure()`.
@@ -525,7 +529,7 @@ Mission configuration is declared on the class:
 | `conflict_policy` | reject, queue or preempt lower-priority conflicts |
 | `prerequisite_policy` | reject or queue while prerequisites are missing |
 | `tick_interval` | delay between `tick()` calls |
-| `timeout_seconds` | maximum execution duration, or `None` |
+| `timeout_seconds` | maximum active execution duration, excluding pauses, or `None` |
 | `queue_timeout_seconds` | maximum queue duration, or `None` |
 | `retry` | attempt count and delay for retryable failures |
 
@@ -625,7 +629,9 @@ Mission workers and the scheduler use daemon threads. `stop()` is cooperative:
 a mission that blocks indefinitely in `start()` or `tick()` cannot be made safe
 by the engine. If a worker does not finish within `stop_timeout`, the engine
 raises `MissionTimeoutError` and keeps the stopping state visible so shutdown
-can be retried.
+can be retried. The engine never calls `start()`, `tick()`, `pause()`, `resume()`
+or `stop()` concurrently on the same mission instance. Transition subscribers
+run outside the engine state lock and may issue another lifecycle command.
 
 ## MAVLink
 
@@ -727,9 +733,10 @@ MavlinkMessageRouter    the only recv_match() loop
 After the router starts, no other component should call `recv_match()` on the
 same connection. Competing readers lose messages nondeterministically.
 
-Router callbacks run on the receive thread. Keep them short. Use an
-application queue, `MavlinkAsyncChannel` or `MavlinkApplicationDispatcher` for
-slow work. A router stop raises `TimeoutError` if the receive thread remains
+Router callbacks run on the receive thread. They must not perform model
+inference, disk I/O, network requests or other blocking work. Use an application
+queue, `MavlinkAsyncChannel` or `MavlinkApplicationDispatcher` for those jobs.
+A router stop raises `TimeoutError` if the receive thread remains
 alive and leaves the connection open instead of closing it under that thread.
 
 ### Asyncio bridge
@@ -749,9 +756,12 @@ async def consume(router) -> None:
 ```
 
 The channel must be started from its owning event loop unless a loop was
-supplied explicitly. When full, it discards the oldest item and increments
-`dropped_messages`. `stop()` cancels forwarding and clears the queue, so a
-restart never delivers stale messages from the previous session.
+supplied explicitly. `maxsize` bounds the combined router-side staging buffer
+and asyncio queue. While messages are still staged, newer arrivals replace the
+oldest staged item; once the consumer queue holds the full capacity, further
+arrivals are dropped. Every overflow increments `dropped_messages`. `stop()`
+cancels forwarding and clears both buffers, so a restart never delivers stale
+messages from the previous session.
 
 ### Application packets
 
@@ -784,7 +794,9 @@ with MavlinkRuntime(endpoint, application_role="vehicle") as mavlink:
 The sender serializes a JSON object, fragments it into MAVLink
 `V2_EXTENSION` payloads and adds CRC32 integrity checking. The assembler accepts
 out-of-order fragments, isolates sources by system/component and packet ID,
-rejects conflicting duplicates, and expires incomplete assemblies.
+rejects conflicting duplicates, and expires incomplete assemblies. Its
+`max_inflight_assemblies`, `max_inflight_bytes` and `max_completed_packets`
+limits bound incomplete traffic and recent duplicate tracking globally.
 
 `MavlinkApplicationPacket` validates packet type, ID, timestamp, source IDs and
 JSON compatibility. `to_dict()` returns a detached dictionary. For protocol
@@ -926,7 +938,7 @@ Vehicle Autonomy Core is licensed under GNU General Public License v3.0 only
 
 <!-- Badges -->
 
-[python-shield]: https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
+[python-shield]: https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
 [license-shield]: https://img.shields.io/github/license/TahsinCr/vehicle-autonomy-core.svg?style=for-the-badge
 
 <!-- Links -->

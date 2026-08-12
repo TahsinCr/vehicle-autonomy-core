@@ -122,6 +122,17 @@ class _ClosingLoop:
         raise RuntimeError("event loop closed during scheduling")
 
 
+class _QueuedLoop:
+    def __init__(self) -> None:
+        self.callbacks: list[tuple[Any, tuple[Any, ...]]] = []
+
+    def is_closed(self) -> bool:
+        return False
+
+    def call_soon_threadsafe(self, callback: Any, *args: Any) -> None:
+        self.callbacks.append((callback, args))
+
+
 class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_queue_overflow_drops_oldest_and_stop_clears_session(self) -> None:
         router = _RouterStub()
@@ -151,6 +162,21 @@ class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
             loop=_ClosingLoop(),  # type: ignore[arg-type]
         )
         channel._forward(_Message("HEARTBEAT"))
+
+    async def test_router_side_buffer_is_bounded_before_loop_drain(self) -> None:
+        loop = _QueuedLoop()
+        channel = MavlinkAsyncChannel(
+            _RouterStub(),  # type: ignore[arg-type]
+            maxsize=4,
+            loop=loop,  # type: ignore[arg-type]
+        )
+
+        for value in range(100):
+            channel._forward(_Message("ATTITUDE", value))
+
+        self.assertEqual(len(loop.callbacks), 1)
+        self.assertEqual(len(channel._incoming), 4)
+        self.assertEqual(channel.dropped_messages, 96)
 
 
 class _ChannelStub:

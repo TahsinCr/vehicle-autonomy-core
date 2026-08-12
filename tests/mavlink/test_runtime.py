@@ -4,6 +4,7 @@ import unittest
 from typing import Any
 
 from src.core.events import EventBus
+from src.core.compatibility import ExceptionGroup
 from src.core.mavlink import (
     MavlinkApplicationPacket,
     MavlinkEndpoint,
@@ -60,6 +61,13 @@ class FakeClient:
 
     def send_named(self, message_name: str, **parameters: Any) -> None:
         self.sent.append((message_name, parameters))
+
+
+class ImmediateClient(FakeClient):
+    def subscribe(self, callback: Any, _message_filter: Any = None) -> Any:
+        subscription = self.router.messages.subscribe(callback)
+        callback("immediate")
+        return subscription
 
 
 class FakePeer:
@@ -164,6 +172,18 @@ class MavlinkRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.request("mission.start"), "response")
         self.assertEqual(runtime.latest("ATTITUDE"), "latest")
         self.assertEqual(runtime.wait_for("GPS_RAW_INT"), "waited")
+
+    def test_once_cancels_subscription_when_delivery_is_immediate(self) -> None:
+        calls: list[str] = []
+        client = ImmediateClient(calls)
+        runtime = MavlinkRuntime(client=client)  # type: ignore[arg-type]
+        received: list[Any] = []
+
+        subscription = runtime.once("HEARTBEAT", received.append)
+
+        self.assertEqual(received, ["immediate"])
+        self.assertFalse(subscription.active)
+        self.assertEqual(client.router.messages.subscriber_count, 0)
 
     def test_runtime_unifies_component_errors_and_reports_state(self) -> None:
         calls: list[str] = []

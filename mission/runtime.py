@@ -24,6 +24,9 @@ class MissionRuntime:
     worker: threading.Thread | None = None
     cleaned: bool = False
     cleanup_lock: threading.Lock = field(default_factory=threading.Lock)
+    callback_lock: threading.RLock = field(default_factory=threading.RLock)
+    active_elapsed: float = 0.0
+    active_started_monotonic: float | None = None
 
 
 class BoundMissionController(MissionController):

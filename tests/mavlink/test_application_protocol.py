@@ -177,6 +177,48 @@ class ApplicationCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(MavlinkApplicationProtocolError, "sürümü"):
             MavlinkApplicationCodec.decode_fragment(fragment)
 
+    def test_inflight_assembly_count_is_bounded(self) -> None:
+        assembler = MavlinkApplicationAssembler(max_inflight_assemblies=2)
+        fragments = [
+            MavlinkApplicationCodec.encode(
+                MavlinkApplicationPacket(
+                    "data.large",
+                    {"text": "x" * 1_000},
+                    packet_id=packet_id,
+                )
+            )[0]
+            for packet_id in (1, 2, 3)
+        ]
+
+        self.assertIsNone(assembler.accept(fragments[0]))
+        self.assertIsNone(assembler.accept(fragments[1]))
+        with self.assertRaisesRegex(MavlinkApplicationProtocolError, "Çok fazla"):
+            assembler.accept(fragments[2])
+
+    def test_inflight_fragment_bytes_are_bounded(self) -> None:
+        fragment = MavlinkApplicationCodec.encode(
+            MavlinkApplicationPacket("data.large", {"text": "x" * 1_000})
+        )[0]
+        assembler = MavlinkApplicationAssembler(max_inflight_bytes=8)
+
+        with self.assertRaisesRegex(MavlinkApplicationProtocolError, "byte sınırını"):
+            assembler.accept(fragment)
+
+    def test_completed_packet_history_is_bounded(self) -> None:
+        assembler = MavlinkApplicationAssembler(max_completed_packets=2)
+        fragments = [
+            MavlinkApplicationCodec.encode(
+                MavlinkApplicationPacket("status", packet_id=packet_id)
+            )[0]
+            for packet_id in (1, 2, 3)
+        ]
+
+        for fragment in fragments:
+            self.assertIsNotNone(assembler.accept(fragment))
+
+        self.assertEqual(len(assembler._completed), 2)
+        self.assertNotIn((0, 0, 1), assembler._completed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from enum import StrEnum
+from ..compatibility import StrEnum
 from typing import Any
 
 REMOTE_LOG_PACKET_TYPE = "logs.push"

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import asyncio
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from src.core.dependency import (
     AsyncDependencyError,
@@ -8,6 +12,7 @@ from src.core.dependency import (
     get_current_container,
     set_default_container,
 )
+from src.core.compatibility import ExceptionGroup
 
 
 class _SyncResource:
@@ -138,6 +143,39 @@ class DependencyLifecycleTests(unittest.TestCase):
         container.shutdown()
         self.assertEqual([first.close_count, second.close_count, third.close_count], [1, 1, 1])
 
+    def test_scoped_resolution_is_singleton_per_scope_across_threads(self) -> None:
+        created = 0
+        lock = threading.Lock()
+
+        def factory() -> object:
+            nonlocal created
+            time.sleep(0.01)
+            with lock:
+                created += 1
+            return object()
+
+        root = DependencyContainer()
+        root.scoped("resource", factory=factory)
+        scope = root.create_scope()
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            instances = tuple(executor.map(lambda _index: scope.resolve("resource"), range(16)))
+
+        self.assertEqual(created, 1)
+        self.assertTrue(all(item is instances[0] for item in instances))
+
+    def test_shared_instance_is_disposed_after_last_token_is_removed(self) -> None:
+        resource = _SyncResource("shared", [])
+        container = DependencyContainer()
+        container.instance("interface", resource)
+        container.instance("concrete", resource)
+
+        container.unregister("interface")
+        self.assertEqual(resource.close_count, 0)
+        self.assertIs(container.resolve("concrete"), resource)
+
+        container.unregister("concrete")
+        self.assertEqual(resource.close_count, 1)
+
 
 class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -210,6 +248,37 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await first_scope.shutdown_async()
         await second_scope.shutdown_async()
         self.assertEqual(closed, ["scope-0", "scope-1"])
+
+    async def test_concurrent_async_scoped_resolution_creates_once(self) -> None:
+        created = 0
+
+        async def factory() -> object:
+            nonlocal created
+            await asyncio.sleep(0.01)
+            created += 1
+            return object()
+
+        root = DependencyContainer()
+        root.scoped("resource", factory=factory)
+        scope = root.create_scope()
+        instances = await asyncio.gather(
+            *(scope.resolve_async("resource") for _ in range(16))
+        )
+
+        self.assertEqual(created, 1)
+        self.assertTrue(all(item is instances[0] for item in instances))
+
+    async def test_sync_shutdown_keeps_async_resources_attached(self) -> None:
+        resource = _AsyncResource("async", [])
+        container = DependencyContainer()
+        container.instance("resource", resource)
+
+        with self.assertRaises(AsyncDependencyError):
+            container.shutdown()
+
+        self.assertIs(container.resolve("resource"), resource)
+        await container.shutdown_async()
+        self.assertEqual(resource.close_count, 1)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import inspect
+import threading
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -59,7 +61,10 @@ class DependencyContainer:
         "parent",
         "_context_tokens",
         "_providers",
+        "_scope_async_locks",
         "_scope_cache",
+        "_scope_lock",
+        "_scope_sync_locks",
         "_tracker",
     )
 
@@ -73,6 +78,9 @@ class DependencyContainer:
         self.auto_wire = auto_wire
         self._providers: dict[Token, Provider] = {}
         self._scope_cache: dict[Token, Any] = {}
+        self._scope_lock = threading.RLock()
+        self._scope_sync_locks: dict[Token, threading.RLock] = {}
+        self._scope_async_locks: dict[Token, asyncio.Lock] = {}
         self._tracker = ResourceTracker()
         self._context_tokens: list[
             contextvars.Token[DependencyContainer | None]
@@ -337,6 +345,16 @@ class DependencyContainer:
             await self.resolve_async(provider.token)
 
     def shutdown(self) -> None:
+        candidates = self._shutdown_instances()
+        async_only = next(
+            (item for item in candidates if requires_async_disposal(item)),
+            None,
+        )
+        if async_only is not None:
+            raise AsyncDependencyError(
+                f"{format_token(type(async_only))} async kapanıyor; "
+                "shutdown_async kullan."
+            )
         dispose_many(self._detach_shutdown_instances())
 
     async def shutdown_async(self) -> None:
@@ -441,11 +459,14 @@ class DependencyContainer:
             if provider.lifetime == Lifetime.TRANSIENT:
                 return self._call_factory(provider.factory, provider.dependencies)
             if provider.lifetime == Lifetime.SCOPED:
-                if provider.token not in self._scope_cache:
-                    value = self._call_factory(provider.factory, provider.dependencies)
-                    self._scope_cache[provider.token] = value
-                    self._tracker.remember(value)
-                return self._scope_cache[provider.token]
+                with self._get_scope_sync_lock(provider.token):
+                    if provider.token not in self._scope_cache:
+                        value = self._call_factory(
+                            provider.factory, provider.dependencies
+                        )
+                        self._scope_cache[provider.token] = value
+                        self._tracker.remember(value)
+                    return self._scope_cache[provider.token]
             with provider.sync_lock:
                 if provider.singleton is MISSING:
                     provider.singleton = self._call_factory(
@@ -466,13 +487,14 @@ class DependencyContainer:
                     provider.factory, provider.dependencies
                 )
             if provider.lifetime == Lifetime.SCOPED:
-                if provider.token not in self._scope_cache:
-                    value = await self._call_factory_async(
-                        provider.factory, provider.dependencies
-                    )
-                    self._scope_cache[provider.token] = value
-                    self._tracker.remember(value)
-                return self._scope_cache[provider.token]
+                async with self._get_scope_async_lock(provider.token):
+                    if provider.token not in self._scope_cache:
+                        value = await self._call_factory_async(
+                            provider.factory, provider.dependencies
+                        )
+                        self._scope_cache[provider.token] = value
+                        self._tracker.remember(value)
+                    return self._scope_cache[provider.token]
             async with provider.get_async_lock():
                 if provider.singleton is MISSING:
                     provider.singleton = await self._call_factory_async(
@@ -544,23 +566,55 @@ class DependencyContainer:
             values.extend(cached_instances(provider))
         return tuple(values)
 
+    def _get_scope_sync_lock(self, token: Token) -> threading.RLock:
+        with self._scope_lock:
+            return self._scope_sync_locks.setdefault(token, threading.RLock())
+
+    def _get_scope_async_lock(self, token: Token) -> asyncio.Lock:
+        with self._scope_lock:
+            return self._scope_async_locks.setdefault(token, asyncio.Lock())
+
+    def _is_referenced(self, instance: Any) -> bool:
+        if any(value is instance for value in self._scope_cache.values()):
+            return True
+        return any(
+            cached is instance
+            for provider in self._providers.values()
+            for cached in cached_instances(provider)
+        )
+
     def _detach_token_instances(self, token: Token) -> tuple[Any, ...]:
         candidates = self._token_instances(token)
         provider = self._providers.pop(token, None)
         self._scope_cache.pop(token, MISSING)
+        with self._scope_lock:
+            self._scope_sync_locks.pop(token, None)
+            self._scope_async_locks.pop(token, None)
         if provider is not None:
             provider.instance = MISSING
             provider.singleton = MISSING
-        ordered = self._tracker.ordered(candidates)
+        unreferenced = tuple(
+            instance for instance in candidates if not self._is_referenced(instance)
+        )
+        ordered = self._tracker.ordered(unreferenced)
         self._tracker.forget(ordered)
         return ordered
 
-    def _detach_shutdown_instances(self) -> tuple[Any, ...]:
+    def _shutdown_instances(self) -> tuple[Any, ...]:
         candidates = list(self._scope_cache.values())
-        self._scope_cache.clear()
         if self.parent is None:
             for provider in self._providers.values():
                 candidates.extend(cached_instances(provider))
+        return self._tracker.ordered(candidates)
+
+    def _detach_shutdown_instances(self) -> tuple[Any, ...]:
+        candidates = list(self._shutdown_instances())
+        self._scope_cache.clear()
+        with self._scope_lock:
+            self._scope_sync_locks.clear()
+            self._scope_async_locks.clear()
+        if self.parent is None:
+            for provider in self._providers.values():
                 provider.instance = MISSING
                 provider.singleton = MISSING
         ordered = self._tracker.ordered(candidates)
