@@ -101,6 +101,30 @@ class EventBusTests(unittest.TestCase):
         bus.subscribe(replayed.append, replay=2)
         self.assertEqual(replayed, [3, 4])
 
+    def test_live_publish_waits_behind_subscription_replay(self) -> None:
+        bus = EventBus[int](history=4)
+        bus.publish(1)
+        replay_started = threading.Event()
+        release_replay = threading.Event()
+        received: list[int] = []
+
+        def handler(value: int) -> None:
+            if value == 1:
+                replay_started.set()
+                release_replay.wait(1.0)
+            received.append(value)
+
+        subscriber = threading.Thread(
+            target=lambda: bus.subscribe(handler, replay=1)
+        )
+        subscriber.start()
+        self.assertTrue(replay_started.wait(1.0))
+        bus.publish(2)
+        release_replay.set()
+        subscriber.join(1.0)
+
+        self.assertEqual(received, [1, 2])
+
     def test_history_capacity_shorthand_and_bus_query_tools(self) -> None:
         bus = EventBus[int](history=2)
         for value in (1, 2, 3):
@@ -346,6 +370,27 @@ class AsyncEventBusTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bus.closed)
         with self.assertRaises(EventBusClosedError):
             await bus.publish(5)
+
+    async def test_async_live_publish_waits_behind_subscription_replay(self) -> None:
+        bus = AsyncEventBus[int](history=4)
+        await bus.publish(1)
+        replay_started = asyncio.Event()
+        release_replay = asyncio.Event()
+        received: list[int] = []
+
+        async def handler(value: int) -> None:
+            if value == 1:
+                replay_started.set()
+                await release_replay.wait()
+            received.append(value)
+
+        subscription = asyncio.create_task(bus.subscribe(handler, replay=1))
+        await asyncio.wait_for(replay_started.wait(), 1.0)
+        await bus.publish(2)
+        release_replay.set()
+        await asyncio.wait_for(subscription, 1.0)
+
+        self.assertEqual(received, [1, 2])
 
     async def test_async_wait_subscription_is_atomic_with_publish(self) -> None:
         bus = AsyncEventBus[int]()

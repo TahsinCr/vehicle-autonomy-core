@@ -36,6 +36,35 @@ class _Missing:
 MISSING = _Missing()
 
 
+class InitializationGate:
+    """Coordinate one cached value across sync threads and async tasks."""
+
+    __slots__ = ("_condition", "_initializing")
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._initializing = False
+
+    def claim(self) -> bool:
+        with self._condition:
+            if self._initializing:
+                return False
+            self._initializing = True
+            return True
+
+    def wait(self) -> None:
+        with self._condition:
+            self._condition.wait_for(lambda: not self._initializing)
+
+    async def wait_async(self) -> None:
+        await asyncio.to_thread(self.wait)
+
+    def release(self) -> None:
+        with self._condition:
+            self._initializing = False
+            self._condition.notify_all()
+
+
 class Lifetime(StrEnum):
     TRANSIENT = "transient"
     SINGLETON = "singleton"
@@ -59,18 +88,11 @@ class Provider:
     priority: int = DEFAULT_PRIORITY
     instance: Any = MISSING
     singleton: Any = MISSING
-    sync_lock: threading.RLock = field(default_factory=threading.RLock)
-    async_lock: asyncio.Lock | None = None
+    initialization: InitializationGate = field(default_factory=InitializationGate)
 
     @property
     def has_instance(self) -> bool:
         return self.instance is not MISSING
-
-    def get_async_lock(self) -> asyncio.Lock:
-        if self.async_lock is None:
-            self.async_lock = asyncio.Lock()
-        return self.async_lock
-
 
 @dataclass(frozen=True, slots=True)
 class Registration:

@@ -268,6 +268,66 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created, 1)
         self.assertTrue(all(item is instances[0] for item in instances))
 
+    async def test_sync_and_async_resolution_share_one_cached_initialization(self) -> None:
+        for lifetime in ("singleton", "scoped"):
+            with self.subTest(lifetime=lifetime):
+                started = threading.Event()
+                release = threading.Event()
+                created = 0
+
+                def factory() -> object:
+                    nonlocal created
+                    started.set()
+                    release.wait(1.0)
+                    created += 1
+                    return object()
+
+                root = DependencyContainer()
+                getattr(root, lifetime)("resource", factory=factory)
+                container = root if lifetime == "singleton" else root.create_scope()
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    sync_future = executor.submit(container.resolve, "resource")
+                    self.assertTrue(await asyncio.to_thread(started.wait, 1.0))
+                    async_task = asyncio.create_task(
+                        container.resolve_async("resource")
+                    )
+                    await asyncio.sleep(0.01)
+                    self.assertFalse(async_task.done())
+                    release.set()
+                    sync_value = await asyncio.wrap_future(sync_future)
+                    async_value = await async_task
+
+                self.assertIs(sync_value, async_value)
+                self.assertEqual(created, 1)
+
+    async def test_sync_resolution_waits_for_async_singleton_initialization(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        created = 0
+
+        async def factory() -> object:
+            nonlocal created
+            started.set()
+            await release.wait()
+            created += 1
+            return object()
+
+        container = DependencyContainer()
+        container.singleton("resource", factory=factory)
+        async_task = asyncio.create_task(container.resolve_async("resource"))
+        await asyncio.wait_for(started.wait(), 1.0)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            sync_future = executor.submit(container.resolve, "resource")
+            await asyncio.sleep(0.01)
+            self.assertFalse(sync_future.done())
+            release.set()
+            async_value = await async_task
+            sync_value = await asyncio.wrap_future(sync_future)
+
+        self.assertIs(sync_value, async_value)
+        self.assertEqual(created, 1)
+
     async def test_sync_shutdown_keeps_async_resources_attached(self) -> None:
         resource = _AsyncResource("async", [])
         container = DependencyContainer()

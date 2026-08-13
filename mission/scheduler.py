@@ -76,11 +76,37 @@ class MissionScheduler:
 
         if isinstance(mission, Mission):
             with self.engine._condition:
-                registered = mission.id in self.engine._runtimes
-            if not registered:
-                self.engine.register(mission)
+                registered = self.engine._runtimes.get(mission.id)
+            if registered is not None and registered.mission is not mission:
+                raise MissionRegistrationError(
+                    f"Mission {mission.id} is already registered"
+                )
+            if registered is None:
+                try:
+                    self.engine.register(mission)
+                except MissionRegistrationError:
+                    with self.engine._condition:
+                        runtime = self.engine._runtimes.get(mission.id)
+                        if runtime is None or runtime.mission is not mission:
+                            raise
         mission_id = self.engine._mission_id(mission)
         self.engine.start()
+        runtime = self.engine._runtime(mission_id)
+        with runtime.launch_lock:
+            return self._launch_serialized(
+                mission_id,
+                requester_id=requester_id,
+                reason=reason,
+            )
+
+    def _launch_serialized(
+        self,
+        mission_id: int,
+        *,
+        requester_id: int | None,
+        reason: str,
+    ) -> MissionSnapshot:
+        """Perform one launch while holding the mission's launch lock."""
 
         preempt_ids: tuple[int, ...] = ()
         queued: tuple[MissionSnapshot, MissionTransition | None] | None = None
@@ -247,32 +273,55 @@ class MissionScheduler:
 
     def _promote_queued(self) -> None:
         now = time.time()
+        monotonic_now = time.monotonic()
         with self.engine._condition:
             queued = sorted(
                 (
-                    runtime
+                    (
+                        runtime.mission.id,
+                        runtime.snapshot.generation,
+                        runtime.queued_monotonic,
+                        runtime.mission.priority,
+                    )
                     for runtime in self.engine._runtimes.values()
                     if runtime.snapshot.phase is MissionPhase.QUEUED
                 ),
                 key=lambda item: (
-                    item.mission.priority,
-                    item.snapshot.queued_at or item.snapshot.registered_at,
+                    item[3],
+                    item[2] if item[2] is not None else float("inf"),
                 ),
             )
-        for runtime in queued:
-            snapshot = runtime.snapshot
-            queue_timeout = runtime.mission.queue_timeout_seconds
-            if (
-                queue_timeout is not None
-                and snapshot.queued_at is not None
-                and now - snapshot.queued_at >= queue_timeout
-            ):
-                self.engine.fail(runtime.mission.id, "Mission queue timed out")
+        for mission_id, generation, queued_at, _priority in queued:
+            transition: MissionTransition | None = None
+            with self.engine._condition:
+                runtime = self.engine._runtimes.get(mission_id)
+                if (
+                    runtime is None
+                    or runtime.snapshot.phase is not MissionPhase.QUEUED
+                    or runtime.snapshot.generation != generation
+                    or runtime.queued_monotonic != queued_at
+                ):
+                    continue
+                snapshot = runtime.snapshot
+                queue_timeout = runtime.mission.queue_timeout_seconds
+                if (
+                    queue_timeout is not None
+                    and queued_at is not None
+                    and monotonic_now - queued_at >= queue_timeout
+                ):
+                    snapshot, transition = self.engine.lifecycle._transition_locked(
+                        runtime,
+                        MissionPhase.FAILED,
+                        reason="Mission queue timed out",
+                    )
+            if transition is not None:
+                self.engine.lifecycle._publish_transition(transition)
+                self._after_terminal(mission_id, succeeded=False)
                 continue
             if snapshot.next_retry_at is not None and now < snapshot.next_retry_at:
                 continue
             try:
-                self.launch(runtime.mission.id, reason="Queued mission released")
+                self.launch(mission_id, reason="Queued mission released")
             except MissionConflictError:
                 continue
 

@@ -5,8 +5,8 @@ import math
 import re
 import time
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field
+from ..abstracts import _copy_model_value, _freeze_model_value
 from ..compatibility import StrEnum
 from typing import Any
 
@@ -58,7 +58,7 @@ class MavlinkRemoteLogRecord:
         action = str(self.action).strip().lower()
         message = str(self.message).strip()
         emitted_at = float(self.emitted_at)
-        details = dict(self.details)
+        details = _copy_model_value(self.details, lists=True)
         if sequence <= 0:
             raise ValueError("Remote log sequence must be positive")
         if not source or len(source) > 64:
@@ -91,7 +91,7 @@ class MavlinkRemoteLogRecord:
         object.__setattr__(self, "message", message)
         object.__setattr__(self, "level", MavlinkRemoteLogLevel(self.level))
         object.__setattr__(self, "emitted_at", emitted_at)
-        object.__setattr__(self, "details", deepcopy(details))
+        object.__setattr__(self, "details", _freeze_model_value(details))
         object.__setattr__(self, "device_id", device_id)
         object.__setattr__(self, "correlation_id", correlation_id)
 
@@ -103,7 +103,7 @@ class MavlinkRemoteLogRecord:
             "message": self.message,
             "level": self.level.value,
             "at": self.emitted_at,
-            "details": deepcopy(self.details),
+            "details": _copy_model_value(self.details, lists=True),
         }
         if self.device_id is not None:
             payload["device_id"] = self.device_id

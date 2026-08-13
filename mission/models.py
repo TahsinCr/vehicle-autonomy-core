@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from ..abstracts import Model
+from ..abstracts import Model, _freeze_model_value
 from .enums import (
     MissionEventLevel,
     MissionEventType,
@@ -67,14 +67,18 @@ class MissionSnapshot(Model):
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "phase", MissionPhase(self.phase))
         object.__setattr__(self, "progress", float(self.progress))
-        object.__setattr__(self, "result", deepcopy(dict(self.result)))
+        object.__setattr__(self, "result", _freeze_model_value(self.result))
         object.__setattr__(
             self,
             "checkpoints",
-            {
-                str(name): deepcopy(dict(value))
-                for name, value in self.checkpoints.items()
-            },
+            _freeze_model_value(
+                self.checkpoints
+                if isinstance(self.checkpoints, MappingProxyType)
+                else {
+                    str(name): value
+                    for name, value in self.checkpoints.items()
+                }
+            ),
         )
 
     def evolve(self, **changes: Any) -> "MissionSnapshot":
@@ -116,7 +120,7 @@ class MissionEvent(Model):
         object.__setattr__(self, "event_type", MissionEventType(self.event_type))
         object.__setattr__(self, "level", MissionEventLevel(self.level))
         object.__setattr__(self, "message", message)
-        object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
+        object.__setattr__(self, "fields", _freeze_model_value(self.fields))
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +171,11 @@ class MissionManagerSnapshot(Model):
     updated_at: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "resource_owners", dict(self.resource_owners))
+        object.__setattr__(
+            self,
+            "resource_owners",
+            _freeze_model_value(self.resource_owners),
+        )
 
 
 @dataclass(frozen=True, slots=True)

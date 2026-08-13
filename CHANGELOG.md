@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.3] - 2026-08-13
+
+### Added
+
+- Added deterministic tests for concurrent mission launch, guarded completion,
+  mixed sync/async dependency resolution, event replay ordering, cross-thread
+  asyncio channel shutdown and dispatcher self-stop.
+- Added a GitHub Actions matrix for Python 3.10 through 3.14, an installed-wheel
+  check and an optional real `pymavlink` UDP loopback test.
+
+### Changed
+
+- Mission queue age now uses a monotonic clock, and repeated launch calls for
+  one mission share a single serialized launch path.
+- Frozen mission, application-packet, handler-result and remote-log mappings are
+  recursively immutable. Serialization still returns detached mutable data.
+- Sync and async dependency resolution now coordinate through the same cache
+  initialization gate for singleton and scoped lifetimes.
+- Event replay is delivered before live events that arrive while a subscription
+  is being established.
+- `MavlinkAsyncChannel` now uses one thread-safe, latest-biased bounded queue.
+  Overflow consistently drops the oldest pending message, and stop safely wakes
+  receivers without touching an asyncio queue from another thread.
+- Application fragment cleanup is amortized and tracks byte counts incrementally
+  instead of rescanning every in-flight fragment on each arrival.
+- Updated package metadata to version `1.3.0`.
+
+### Fixed
+
+- Prevented `MissionLifecycle.complete()` from changing stop or cleanup state
+  before validating that the mission is running.
+- Prevented stale queued snapshots from timing out or promoting a newer mission
+  generation.
+- Allowed an application handler to stop its own dispatcher without attempting
+  to join its current worker thread. Responses from the stopped generation stay
+  suppressed.
+
 ## [v1.2] - 2026-08-13
 
 ### Added
@@ -211,6 +248,7 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
+[v1.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.2...v1.3
 [v1.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1.1...v1.2
 [v1.1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1...v1.1.1
 [v1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.0...v1.1

@@ -18,6 +18,7 @@ from src.core.mission import (
     MissionScheduler,
     MissionSnapshot,
     MissionTimeoutError,
+    MissionTransitionError,
 )
 
 
@@ -276,6 +277,79 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(snapshot.checkpoints["started"], {"ready": True})
         self.assertEqual(mission.stop_count, 1)
         self.assertGreaterEqual(len(self.engine.query_events()), 4)
+
+    def test_concurrent_launch_is_idempotent_for_one_mission(self) -> None:
+        mission = BlockingMission()
+        callers = 8
+        barrier = threading.Barrier(callers)
+        results: list[MissionSnapshot] = []
+        errors: list[BaseException] = []
+
+        def launch() -> None:
+            try:
+                barrier.wait()
+                results.append(self.engine.launch(mission))
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=launch) for _ in range(callers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertFalse(errors)
+        self.assertEqual(len(results), callers)
+        self.assertTrue(mission.started.wait(1.0))
+        self.assertEqual(len(self.engine.snapshots()), 1)
+        self.assertEqual(self.engine.snapshot(mission).generation, 1)
+
+    def test_complete_rejects_non_running_phases_without_side_effects(self) -> None:
+        phases = (
+            MissionPhase.STARTING,
+            MissionPhase.PAUSING,
+            MissionPhase.PAUSED,
+            MissionPhase.STOPPING,
+        )
+        for phase in phases:
+            with self.subTest(phase=phase):
+                mission = BlockingMission(name=f"Complete guard {phase.value}")
+                self.engine.register(mission)
+                runtime = self.engine._runtime(mission)
+                with self.engine._condition:
+                    runtime.snapshot = runtime.snapshot.evolve(phase=phase)
+
+                with self.assertRaisesRegex(
+                    MissionTransitionError,
+                    "running mission",
+                ):
+                    self.engine.complete(mission)
+
+                self.assertFalse(runtime.stop_event.is_set())
+                self.assertFalse(runtime.cleaned)
+                self.assertEqual(runtime.snapshot.phase, phase)
+                with self.engine._condition:
+                    runtime.snapshot = runtime.snapshot.evolve(
+                        phase=MissionPhase.STOPPED
+                    )
+
+    def test_queue_timeout_uses_monotonic_age_and_launch_clears_marker(self) -> None:
+        owner = ExclusiveMission()
+        waiting = QueueTimedMission()
+        self.engine.launch(owner)
+        self.assertTrue(owner.started.wait(1.0))
+        self.assertEqual(self.engine.launch(waiting).phase, MissionPhase.QUEUED)
+        runtime = self.engine._runtime(waiting)
+
+        with self.engine._condition:
+            runtime.snapshot = runtime.snapshot.evolve(queued_at=0.0)
+        self.engine.scheduler._promote_queued()
+        self.assertEqual(self.engine.snapshot(waiting).phase, MissionPhase.QUEUED)
+
+        self.engine.stop_mission(owner)
+        self.assertTrue(waiting.started.wait(1.0))
+        self.assertIsNone(runtime.queued_monotonic)
+        self.assertIsNone(self.engine.snapshot(waiting).queued_at)
 
     def test_non_conflicting_missions_run_in_parallel_and_pause_resume(self) -> None:
         first = BlockingMission(name="First")

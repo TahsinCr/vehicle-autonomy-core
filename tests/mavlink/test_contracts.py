@@ -320,7 +320,13 @@ class RemoteLogTests(unittest.TestCase):
         self.assertFalse(hasattr(record.level, "yki_severity"))
         self.assertEqual(record.level.priority, 40)
         self.assertEqual(record.to_payload()["details"], {"nested": {"values": [1]}})
-        batch = MavlinkRemoteLogBatch("session-001", (record, self._record(2)))
+        with self.assertRaises(TypeError):
+            record.details["new"] = True  # type: ignore[index]
+        with self.assertRaises(AttributeError):
+            record.details["nested"]["values"].append(2)  # type: ignore[union-attr]
+        copied = self._record(2, details=record.details)
+        self.assertEqual(copied.to_payload()["details"], record.to_payload()["details"])
+        batch = MavlinkRemoteLogBatch("session-001", (record, copied))
         restored = MavlinkRemoteLogBatch.from_payload(batch.to_payload())
         self.assertEqual(restored.to_payload(), batch.to_payload())
 

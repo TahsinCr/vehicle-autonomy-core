@@ -3,11 +3,10 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..abstracts import Service
+from ..abstracts import Service, _copy_model_value, _freeze_model_value
 from ..events import EventBus, Subscription
 from .application import MavlinkApplicationPacket
 from .peer import MavlinkApplicationPeer
@@ -28,7 +27,7 @@ class MavlinkApplicationResult:
             response_type = "system.ack" if self.accepted else "system.error"
         object.__setattr__(self, "accepted", bool(self.accepted))
         object.__setattr__(self, "message", str(self.message))
-        object.__setattr__(self, "payload", deepcopy(dict(self.payload)))
+        object.__setattr__(self, "payload", _freeze_model_value(self.payload))
         object.__setattr__(self, "response_type", response_type)
 
     @classmethod
@@ -147,6 +146,7 @@ class MavlinkApplicationDispatcher(Service):
         self._executor: ThreadPoolExecutor | None = None
         self._generation = 0
         self._lock = threading.RLock()
+        self._worker_context = threading.local()
 
         self.handled = EventBus[MavlinkApplicationDispatch]()
         self.unhandled = EventBus[MavlinkApplicationPacket]()
@@ -191,7 +191,13 @@ class MavlinkApplicationDispatcher(Service):
         if subscription is not None:
             subscription.cancel()
         if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+            called_from_worker = bool(
+                getattr(self._worker_context, "active", False)
+            )
+            executor.shutdown(
+                wait=not called_from_worker,
+                cancel_futures=True,
+            )
 
     def dispatch(self, packet: MavlinkApplicationPacket) -> bool:
         """Queue one packet for its registered handler."""
@@ -253,6 +259,18 @@ class MavlinkApplicationDispatcher(Service):
         handler: MavlinkApplicationHandler,
         generation: int,
     ) -> None:
+        self._worker_context.active = True
+        try:
+            self._handle(packet, handler, generation)
+        finally:
+            self._worker_context.active = False
+
+    def _handle(
+        self,
+        packet: MavlinkApplicationPacket,
+        handler: MavlinkApplicationHandler,
+        generation: int,
+    ) -> None:
         error: Exception | None = None
         try:
             returned = handler(packet)
@@ -285,7 +303,7 @@ class MavlinkApplicationDispatcher(Service):
         request: MavlinkApplicationPacket,
         result: MavlinkApplicationResult,
     ) -> None:
-        payload = dict(result.payload)
+        payload = _copy_model_value(result.payload, lists=True)
         payload.update(
             {
                 "request_id": request.packet_id,

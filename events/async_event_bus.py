@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections import deque
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from typing import Generic, TypeVar
 
 from ..compatibility import ExceptionGroup
@@ -29,6 +30,8 @@ class _AsyncSubscriber(Generic[T]):
     event_filter: EventFilter[T]
     remaining: int | None
     subscription: AsyncSubscription
+    replaying: bool = False
+    pending: deque[T] = dataclass_field(default_factory=deque)
 
     def claim(self) -> tuple[bool, bool]:
         """Reserve one delivery and report whether it is the final one."""
@@ -41,6 +44,20 @@ class _AsyncSubscriber(Generic[T]):
             return False, False
         self.remaining -= 1
         return True, self.remaining == 0
+
+    def buffer_if_replaying(self, event: T) -> bool:
+        if not self.replaying:
+            return False
+        self.pending.append(event)
+        return True
+
+    def finish_replay(self) -> tuple[T, ...] | None:
+        if self.pending:
+            events = tuple(self.pending)
+            self.pending.clear()
+            return events
+        self.replaying = False
+        return None
 
 
 class AsyncEventBus(BaseEventBus[T]):
@@ -141,30 +158,39 @@ class AsyncEventBus(BaseEventBus[T]):
                 callback,
                 normalized_filter,
                 delivery_limit,
+                replaying=bool(replay and self._history is not None),
+            )
+            replay_events = (
+                self._history.query(normalized_filter, limit=replay)
+                if subscriber.replaying
+                else ()
             )
 
-        if replay and self._history is not None:
-            for event in self._history.query(normalized_filter, limit=replay):
-                claimed, final = subscriber.claim()
-                if not claimed:
-                    break
-                if final:
-                    await subscription._consume()
-                try:
-                    await callback(event)
-                except Exception as exc:
-                    action_errors = await self._notify_errors(event, (exc,))
-                    self._failed += 1 + len(action_errors)
-                    if self._error_policy is ErrorPolicy.RAISE:
-                        await subscription.cancel()
-                        raise ExceptionGroup(
-                            "Async event replay failed",
-                            [exc, *action_errors],
-                        )
-                else:
-                    self._delivered += 1
-                    if final:
+        if subscriber.replaying:
+            pending: tuple[T, ...] | None = replay_events
+            while pending is not None:
+                for event in pending:
+                    claimed, final = subscriber.claim()
+                    if not claimed:
                         break
+                    if final:
+                        await subscription._consume()
+                    try:
+                        await callback(event)
+                    except Exception as exc:
+                        action_errors = await self._notify_errors(event, (exc,))
+                        self._failed += 1 + len(action_errors)
+                        if self._error_policy is ErrorPolicy.RAISE:
+                            await subscription.cancel()
+                            raise ExceptionGroup(
+                                "Async event replay failed",
+                                [exc, *action_errors],
+                            )
+                    else:
+                        self._delivered += 1
+                        if final:
+                            break
+                pending = subscriber.finish_replay()
         return subscription
 
     def _subscribe_locked(
@@ -172,6 +198,7 @@ class AsyncEventBus(BaseEventBus[T]):
         callback: Callable[[T], Awaitable[None]],
         event_filter: EventFilter[T],
         delivery_limit: int | None,
+        replaying: bool = False,
     ) -> tuple[AsyncSubscription, _AsyncSubscriber[T]]:
         subscription_id = self._next_id
         self._next_id += 1
@@ -186,6 +213,7 @@ class AsyncEventBus(BaseEventBus[T]):
             event_filter,
             delivery_limit,
             subscription,
+            replaying=replaying,
         )
         self._subscribers[subscription_id] = subscriber
         return subscription, subscriber
@@ -234,6 +262,8 @@ class AsyncEventBus(BaseEventBus[T]):
                 errors.append(exc)
                 continue
             if matches:
+                if subscriber.buffer_if_replaying(event):
+                    continue
                 matched.append(subscriber)
 
         delivered = 0

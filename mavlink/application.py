@@ -8,11 +8,10 @@ import threading
 import time
 import zlib
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..abstracts import Service
+from ..abstracts import Service, _copy_model_value, _freeze_model_value
 from ..events import EventBus, Subscription
 from .client import MavlinkClient
 from .filter import (
@@ -79,7 +78,7 @@ class MavlinkApplicationPacket:
             raise ValueError("Uygulama paket zamanı pozitif ve sonlu olmalı")
         if not isinstance(self.payload, Mapping):
             raise ValueError("Uygulama paket payload değeri nesne olmalı")
-        payload = dict(self.payload)
+        payload = _copy_model_value(self.payload, lists=True)
         try:
             json.dumps(payload, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
@@ -90,7 +89,7 @@ class MavlinkApplicationPacket:
             "source_component",
         )
         object.__setattr__(self, "packet_type", normalized_type)
-        object.__setattr__(self, "payload", deepcopy(payload))
+        object.__setattr__(self, "payload", _freeze_model_value(payload))
         object.__setattr__(self, "packet_id", int(self.packet_id))
         object.__setattr__(self, "sent_at", sent_at)
         object.__setattr__(self, "source_system", source_system)
@@ -100,7 +99,7 @@ class MavlinkApplicationPacket:
     def to_dict(self) -> dict[str, Any]:
         return {
             "packet_type": self.packet_type,
-            "payload": deepcopy(self.payload),
+            "payload": _copy_model_value(self.payload, lists=True),
             "packet_id": self.packet_id,
             "sent_at": self.sent_at,
             "source_system": self.source_system,
@@ -124,6 +123,7 @@ class _Assembly:
     checksum: int
     created_monotonic: float
     fragments: dict[int, bytes] = field(default_factory=dict)
+    byte_count: int = 0
 
 
 class MavlinkApplicationCodec:
@@ -138,7 +138,7 @@ class MavlinkApplicationCodec:
             body = json.dumps(
                 {
                     "type": packet.packet_type,
-                    "payload": packet.payload,
+                    "payload": _copy_model_value(packet.payload, lists=True),
                     "sent_at": packet.sent_at,
                     "reply": packet.expects_response,
                 },
@@ -265,6 +265,7 @@ class MavlinkApplicationAssembler:
         self._assemblies: dict[tuple[int, int, int], _Assembly] = {}
         self._completed: dict[tuple[int, int, int], float] = {}
         self._inflight_bytes = 0
+        self._next_prune_at = 0.0
         self._lock = threading.RLock()
 
     def accept(
@@ -305,6 +306,7 @@ class MavlinkApplicationAssembler:
                         "Tamamlanmamış uygulama paketleri byte sınırını aştı"
                     )
                 assembly.fragments[fragment.index] = fragment.chunk
+                assembly.byte_count += len(fragment.chunk)
                 self._inflight_bytes += len(fragment.chunk)
             if len(assembly.fragments) != assembly.count:
                 return None
@@ -327,29 +329,32 @@ class MavlinkApplicationAssembler:
             self._assemblies.clear()
             self._completed.clear()
             self._inflight_bytes = 0
+            self._next_prune_at = 0.0
 
     def _discard_assembly(self, key: tuple[int, int, int]) -> None:
         assembly = self._assemblies.pop(key, None)
         if assembly is not None:
-            self._inflight_bytes -= sum(map(len, assembly.fragments.values()))
+            self._inflight_bytes -= assembly.byte_count
 
     def _prune(self, now: float) -> None:
+        if now < self._next_prune_at:
+            return
         deadline = now - self._fragment_timeout
-        self._assemblies = {
-            key: value
-            for key, value in self._assemblies.items()
-            if value.created_monotonic >= deadline
-        }
-        self._inflight_bytes = sum(
-            len(chunk)
-            for assembly in self._assemblies.values()
-            for chunk in assembly.fragments.values()
+        expired_assemblies = tuple(
+            key
+            for key, assembly in self._assemblies.items()
+            if assembly.created_monotonic < deadline
         )
-        self._completed = {
-            key: completed_at
+        for key in expired_assemblies:
+            self._discard_assembly(key)
+        expired_completed = tuple(
+            key
             for key, completed_at in self._completed.items()
-            if completed_at >= deadline
-        }
+            if completed_at < deadline
+        )
+        for key in expired_completed:
+            self._completed.pop(key, None)
+        self._next_prune_at = now + min(self._fragment_timeout, 1.0)
 
 
 class MavlinkApplicationChannel(Service):

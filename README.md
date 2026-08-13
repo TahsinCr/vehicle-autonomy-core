@@ -379,7 +379,8 @@ positions.subscribe(
 Use `EventFilter` when the same filter is shared by several operations. With
 history enabled, `latest()` returns the newest match and `query()` returns
 stored matches. `wait_for()` blocks until a match arrives and returns `None` on
-timeout.
+timeout. Replay is a strict subscription boundary: matching live events that
+arrive during replay are delivered afterwards, so they cannot overtake history.
 
 `publish_every(event, interval, times=...)` publishes the same event on a
 daemon schedule and returns a cancellable `Subscription`.
@@ -756,12 +757,12 @@ async def consume(router) -> None:
 ```
 
 The channel must be started from its owning event loop unless a loop was
-supplied explicitly. `maxsize` bounds the combined router-side staging buffer
-and asyncio queue. While messages are still staged, newer arrivals replace the
-oldest staged item; once the consumer queue holds the full capacity, further
-arrivals are dropped. Every overflow increments `dropped_messages`. `stop()`
-cancels forwarding and clears both buffers, so a restart never delivers stale
-messages from the previous session.
+supplied explicitly. `maxsize` bounds one thread-safe pending queue. On
+overflow, the oldest pending message is always dropped so telemetry stays
+latest-biased; every drop increments `dropped_messages`. `stop()` cancels
+forwarding, clears the queue and wakes blocked receivers. A blocked `receive()`
+then raises `RuntimeError`, and a restart never delivers stale messages from the
+previous session.
 
 ### Application packets
 
@@ -913,6 +914,16 @@ layout through normal imports in clean subprocesses instead of an embedded
 custom loader. MAVLink tests use fakes and do not require a flight controller.
 Serial, radio, network and hardware-in-the-loop behavior must still be tested
 by the consuming vehicle project.
+
+When the optional dependency is installed, the real UDP loopback check can be
+run with:
+
+```bash
+python -m unittest tests.mavlink.test_pymavlink_integration -v
+```
+
+GitHub Actions runs the hardware-free suite on Python 3.10 through 3.14, checks
+the built wheel and runs this loopback test in a separate `pymavlink` job.
 
 ## Contributing
 

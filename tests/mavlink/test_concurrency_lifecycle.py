@@ -118,7 +118,7 @@ class _ClosingLoop:
     def is_closed(self) -> bool:
         return False
 
-    def call_soon_threadsafe(self, _callback: Any, _message: Any) -> None:
+    def call_soon_threadsafe(self, _callback: Any, *_args: Any) -> None:
         raise RuntimeError("event loop closed during scheduling")
 
 
@@ -175,8 +175,22 @@ class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
             channel._forward(_Message("ATTITUDE", value))
 
         self.assertEqual(len(loop.callbacks), 1)
-        self.assertEqual(len(channel._incoming), 4)
+        self.assertEqual(channel.pending_messages, 4)
         self.assertEqual(channel.dropped_messages, 96)
+
+    async def test_stop_from_another_thread_wakes_receiver_without_queue_race(self) -> None:
+        channel = MavlinkAsyncChannel(_RouterStub())  # type: ignore[arg-type]
+        channel.start()
+        receiver = asyncio.create_task(channel.receive())
+        await asyncio.sleep(0)
+
+        stopper = threading.Thread(target=channel.stop)
+        stopper.start()
+        stopper.join(1.0)
+
+        with self.assertRaisesRegex(RuntimeError, "çalışmıyor"):
+            await asyncio.wait_for(receiver, 1.0)
+        self.assertEqual(channel.pending_messages, 0)
 
 
 class _ChannelStub:
@@ -359,6 +373,38 @@ class _PeerStub:
 
 
 class DispatcherLifecycleTests(unittest.TestCase):
+    def test_handler_can_stop_dispatcher_without_joining_itself(self) -> None:
+        peer = _PeerStub()
+        dispatcher = MavlinkApplicationDispatcher(peer)  # type: ignore[arg-type]
+        finished = threading.Event()
+        errors: list[BaseException] = []
+
+        def handler(_packet: MavlinkApplicationPacket) -> dict[str, bool]:
+            try:
+                dispatcher.stop()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                finished.set()
+            return {"done": True}
+
+        dispatcher.register("system.stop", handler)
+        dispatcher.start()
+        self.assertTrue(
+            dispatcher.dispatch(
+                MavlinkApplicationPacket(
+                    "system.stop",
+                    packet_id=99,
+                    expects_response=True,
+                )
+            )
+        )
+
+        self.assertTrue(finished.wait(1.0))
+        self.assertFalse(errors)
+        self.assertFalse(dispatcher.running)
+        self.assertFalse(peer.sent)
+
     def test_stop_suppresses_running_handler_response_and_releases_capacity(self) -> None:
         peer = _PeerStub()
         dispatcher = MavlinkApplicationDispatcher(

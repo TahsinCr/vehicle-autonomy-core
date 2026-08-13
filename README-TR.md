@@ -376,6 +376,8 @@ positions.subscribe(
 Aynı filtre birden fazla yerde kullanılacaksa `EventFilter` oluşturulabilir.
 History açıksa `latest()` son eşleşmeyi, `query()` saklanan eşleşmeleri döndürür.
 `wait_for()` bir eşleşme gelene kadar bekler ve timeout olursa `None` verir.
+Replay kesin bir abonelik sınırıdır: replay sırasında gelen eşleşen canlı
+event'ler geçmişin önüne geçmez, replay bittikten sonra teslim edilir.
 
 `publish_every(event, interval, times=...)` aynı event'i daemon bir schedule
 üzerinde yayınlar ve iptal edilebilir bir `Subscription` döndürür.
@@ -757,11 +759,12 @@ async def consume(router) -> None:
 ```
 
 Özel loop verilmediyse channel kendi event loop'u içinden başlatılmalıdır.
-`maxsize`, router tarafındaki hazırlık buffer'ı ile asyncio kuyruğunun toplamını
-sınırlar. Mesajlar hazırlık buffer'ındayken yeni mesaj en eski bekleyenin yerini
-alır; consumer kuyruğu kapasitenin tamamını doldurmuşsa yeni mesajlar atılır.
-Her taşma `dropped_messages` sayısını artırır. `stop()` iki buffer'ı da temizler;
-yeniden başlatılan channel önceki oturumdan eski mesaj teslim etmez.
+`maxsize`, thread-safe tek bekleme kuyruğunu sınırlar. Taşma olduğunda telemetri
+güncel kalsın diye her zaman en eski bekleyen mesaj düşürülür; her düşürme
+`dropped_messages` sayısını artırır. `stop()` forwarding'i iptal eder, kuyruğu
+temizler ve bekleyen receiver'ları uyandırır. Bloklanmış `receive()` bu durumda
+`RuntimeError` yükseltir; yeniden başlatılan channel önceki oturumdan mesaj
+teslim etmez.
 
 ### Uygulama paketleri
 
@@ -917,6 +920,17 @@ importlar, testin içine gömülmüş özel bir yükleyici yerine temiz alt sür
 normal importlarla doğrulanır. MAVLink testleri fake nesneler kullanır ve flight
 controller istemez. Serial, radyo, ağ ve hardware-in-the-loop davranışları
 tüketici araç projesinde ayrıca test edilmelidir.
+
+Opsiyonel bağımlılık kuruluysa gerçek UDP loopback kontrolü şu komutla
+çalıştırılabilir:
+
+```bash
+python -m unittest tests.mavlink.test_pymavlink_integration -v
+```
+
+GitHub Actions, donanımsız testleri Python 3.10 ile 3.14 arasında çalıştırır;
+ayrıca wheel kurulumunu ve ayrı bir `pymavlink` işinde bu loopback testini
+doğrular.
 
 ## Katkı
 

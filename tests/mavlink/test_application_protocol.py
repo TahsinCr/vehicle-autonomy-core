@@ -27,6 +27,12 @@ class ApplicationPacketTests(unittest.TestCase):
         serialized = packet.to_dict()
         serialized["payload"]["nested"]["values"].append(4)
         self.assertEqual(packet.to_dict()["payload"], {"nested": {"values": [1, 2]}})
+        with self.assertRaises(TypeError):
+            packet.payload["new"] = True  # type: ignore[index]
+        with self.assertRaises(AttributeError):
+            packet.payload["nested"]["values"].append(4)  # type: ignore[union-attr]
+        copied = MavlinkApplicationPacket("copy", packet.payload)
+        self.assertEqual(copied.to_dict()["payload"], packet.to_dict()["payload"])
 
     def test_application_result_payload_is_detached(self) -> None:
         original = {"nested": {"accepted": True}}
@@ -34,6 +40,8 @@ class ApplicationPacketTests(unittest.TestCase):
         original["nested"]["accepted"] = False
 
         self.assertTrue(result.payload["nested"]["accepted"])
+        with self.assertRaises(TypeError):
+            result.payload["nested"] = {}  # type: ignore[index]
 
     def test_packet_validates_time_sources_type_and_json_payload(self) -> None:
         for sent_at in (0.0, -1.0, math.nan, math.inf, -math.inf):

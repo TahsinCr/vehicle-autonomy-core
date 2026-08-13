@@ -100,7 +100,14 @@ class MissionContractTests(unittest.TestCase):
 
         self.assertEqual(tuple(snapshot.result["path"]["points"]), (1, 2))
         self.assertEqual(tuple(snapshot.checkpoints["start"]["position"]), (3, 4))
-        self.assertEqual(snapshot.evolve(progress=0.75).progress, 0.75)
+        evolved = snapshot.evolve(progress=0.75)
+        self.assertEqual(evolved.progress, 0.75)
+        self.assertIs(evolved.result, snapshot.result)
+        self.assertIs(evolved.checkpoints, snapshot.checkpoints)
+        with self.assertRaises(TypeError):
+            snapshot.result["new"] = True  # type: ignore[index]
+        with self.assertRaises(AttributeError):
+            snapshot.result["path"]["points"].append(3)  # type: ignore[union-attr]
         with self.assertRaises(ValueError):
             MissionSnapshot(mission.id, mission.name, progress=1.1)
 

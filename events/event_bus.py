@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
@@ -30,6 +31,8 @@ class _Subscriber(Generic[T]):
     remaining: int | None
     subscription: Subscription
     lock: threading.Lock = field(default_factory=threading.Lock)
+    replaying: bool = False
+    pending: deque[T] = field(default_factory=deque)
 
     def claim(self) -> tuple[bool, bool]:
         """Reserve one delivery and report whether it is the final one."""
@@ -43,6 +46,22 @@ class _Subscriber(Generic[T]):
                 return False, False
             self.remaining -= 1
             return True, self.remaining == 0
+
+    def buffer_if_replaying(self, event: T) -> bool:
+        with self.lock:
+            if not self.replaying:
+                return False
+            self.pending.append(event)
+            return True
+
+    def finish_replay(self) -> tuple[T, ...] | None:
+        with self.lock:
+            if self.pending:
+                events = tuple(self.pending)
+                self.pending.clear()
+                return events
+            self.replaying = False
+            return None
 
 
 class EventBus(BaseEventBus[T]):
@@ -143,33 +162,42 @@ class EventBus(BaseEventBus[T]):
                 normalized_filter,
                 delivery_limit,
                 subscription,
+                replaying=bool(replay and self._history is not None),
             )
             self._subscribers[subscription_id] = subscriber
+            replay_events = (
+                self._history.query(normalized_filter, limit=replay)
+                if subscriber.replaying
+                else ()
+            )
 
-        if replay and self._history is not None:
-            for event in self._history.query(normalized_filter, limit=replay):
-                claimed, final = subscriber.claim()
-                if not claimed:
-                    break
-                if final:
-                    subscription._consume()
-                try:
-                    callback(event)
-                except Exception as exc:
-                    action_errors = self._notify_errors(event, (exc,))
-                    with self._lock:
-                        self._failed += 1 + len(action_errors)
-                    if self._error_policy is ErrorPolicy.RAISE:
-                        subscription.cancel()
-                        raise ExceptionGroup(
-                            "Event replay failed",
-                            [exc, *action_errors],
-                        )
-                else:
-                    with self._lock:
-                        self._delivered += 1
-                    if final:
+        if subscriber.replaying:
+            pending: tuple[T, ...] | None = replay_events
+            while pending is not None:
+                for event in pending:
+                    claimed, final = subscriber.claim()
+                    if not claimed:
                         break
+                    if final:
+                        subscription._consume()
+                    try:
+                        callback(event)
+                    except Exception as exc:
+                        action_errors = self._notify_errors(event, (exc,))
+                        with self._lock:
+                            self._failed += 1 + len(action_errors)
+                        if self._error_policy is ErrorPolicy.RAISE:
+                            subscription.cancel()
+                            raise ExceptionGroup(
+                                "Event replay failed",
+                                [exc, *action_errors],
+                            )
+                    else:
+                        with self._lock:
+                            self._delivered += 1
+                        if final:
+                            break
+                pending = subscriber.finish_replay()
         return subscription
 
     def once(
@@ -215,6 +243,8 @@ class EventBus(BaseEventBus[T]):
                 errors.append(exc)
                 continue
             if matches:
+                if subscriber.buffer_if_replaying(event):
+                    continue
                 matched.append(subscriber)
 
         delivered = 0

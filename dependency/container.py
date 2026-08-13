@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import inspect
 import threading
@@ -22,6 +21,7 @@ from .registration import (
     DEFAULT_PRIORITY,
     DependencyMap,
     Lifetime,
+    InitializationGate,
     MISSING,
     Provider,
     ProviderCallable,
@@ -61,10 +61,9 @@ class DependencyContainer:
         "parent",
         "_context_tokens",
         "_providers",
-        "_scope_async_locks",
         "_scope_cache",
+        "_scope_initializers",
         "_scope_lock",
-        "_scope_sync_locks",
         "_tracker",
     )
 
@@ -79,8 +78,7 @@ class DependencyContainer:
         self._providers: dict[Token, Provider] = {}
         self._scope_cache: dict[Token, Any] = {}
         self._scope_lock = threading.RLock()
-        self._scope_sync_locks: dict[Token, threading.RLock] = {}
-        self._scope_async_locks: dict[Token, asyncio.Lock] = {}
+        self._scope_initializers: dict[Token, InitializationGate] = {}
         self._tracker = ResourceTracker()
         self._context_tokens: list[
             contextvars.Token[DependencyContainer | None]
@@ -459,21 +457,19 @@ class DependencyContainer:
             if provider.lifetime == Lifetime.TRANSIENT:
                 return self._call_factory(provider.factory, provider.dependencies)
             if provider.lifetime == Lifetime.SCOPED:
-                with self._get_scope_sync_lock(provider.token):
-                    if provider.token not in self._scope_cache:
-                        value = self._call_factory(
-                            provider.factory, provider.dependencies
-                        )
-                        self._scope_cache[provider.token] = value
-                        self._tracker.remember(value)
-                    return self._scope_cache[provider.token]
-            with provider.sync_lock:
-                if provider.singleton is MISSING:
-                    provider.singleton = self._call_factory(
-                        provider.factory, provider.dependencies
-                    )
-                    self._provider_owner(provider)._tracker.remember(provider.singleton)
-                return provider.singleton
+                gate = self._get_scope_initializer(provider.token)
+                return self._resolve_cached_sync(
+                    gate,
+                    lambda: self._scope_cache.get(provider.token, MISSING),
+                    lambda value: self._store_scoped(provider.token, value),
+                    lambda: self._call_factory(provider.factory, provider.dependencies),
+                )
+            return self._resolve_cached_sync(
+                provider.initialization,
+                lambda: provider.singleton,
+                lambda value: self._store_singleton(provider, value),
+                lambda: self._call_factory(provider.factory, provider.dependencies),
+            )
         finally:
             exit_resolution(stack_token)
 
@@ -487,21 +483,23 @@ class DependencyContainer:
                     provider.factory, provider.dependencies
                 )
             if provider.lifetime == Lifetime.SCOPED:
-                async with self._get_scope_async_lock(provider.token):
-                    if provider.token not in self._scope_cache:
-                        value = await self._call_factory_async(
-                            provider.factory, provider.dependencies
-                        )
-                        self._scope_cache[provider.token] = value
-                        self._tracker.remember(value)
-                    return self._scope_cache[provider.token]
-            async with provider.get_async_lock():
-                if provider.singleton is MISSING:
-                    provider.singleton = await self._call_factory_async(
+                gate = self._get_scope_initializer(provider.token)
+                return await self._resolve_cached_async(
+                    gate,
+                    lambda: self._scope_cache.get(provider.token, MISSING),
+                    lambda value: self._store_scoped(provider.token, value),
+                    lambda: self._call_factory_async(
                         provider.factory, provider.dependencies
-                    )
-                    self._provider_owner(provider)._tracker.remember(provider.singleton)
-                return provider.singleton
+                    ),
+                )
+            return await self._resolve_cached_async(
+                provider.initialization,
+                lambda: provider.singleton,
+                lambda value: self._store_singleton(provider, value),
+                lambda: self._call_factory_async(
+                    provider.factory, provider.dependencies
+                ),
+            )
         finally:
             exit_resolution(stack_token)
 
@@ -566,13 +564,59 @@ class DependencyContainer:
             values.extend(cached_instances(provider))
         return tuple(values)
 
-    def _get_scope_sync_lock(self, token: Token) -> threading.RLock:
+    def _get_scope_initializer(self, token: Token) -> InitializationGate:
         with self._scope_lock:
-            return self._scope_sync_locks.setdefault(token, threading.RLock())
+            return self._scope_initializers.setdefault(token, InitializationGate())
 
-    def _get_scope_async_lock(self, token: Token) -> asyncio.Lock:
-        with self._scope_lock:
-            return self._scope_async_locks.setdefault(token, asyncio.Lock())
+    @staticmethod
+    def _resolve_cached_sync(
+        gate: InitializationGate,
+        read: Callable[[], Any],
+        store: Callable[[Any], None],
+        create: Callable[[], Any],
+    ) -> Any:
+        while True:
+            cached = read()
+            if cached is not MISSING:
+                return cached
+            if gate.claim():
+                break
+            gate.wait()
+        try:
+            value = create()
+            store(value)
+            return value
+        finally:
+            gate.release()
+
+    @staticmethod
+    async def _resolve_cached_async(
+        gate: InitializationGate,
+        read: Callable[[], Any],
+        store: Callable[[Any], None],
+        create: Callable[[], Any],
+    ) -> Any:
+        while True:
+            cached = read()
+            if cached is not MISSING:
+                return cached
+            if gate.claim():
+                break
+            await gate.wait_async()
+        try:
+            value = await create()
+            store(value)
+            return value
+        finally:
+            gate.release()
+
+    def _store_scoped(self, token: Token, value: Any) -> None:
+        self._scope_cache[token] = value
+        self._tracker.remember(value)
+
+    def _store_singleton(self, provider: Provider, value: Any) -> None:
+        provider.singleton = value
+        self._provider_owner(provider)._tracker.remember(value)
 
     def _is_referenced(self, instance: Any) -> bool:
         if any(value is instance for value in self._scope_cache.values()):
@@ -588,8 +632,7 @@ class DependencyContainer:
         provider = self._providers.pop(token, None)
         self._scope_cache.pop(token, MISSING)
         with self._scope_lock:
-            self._scope_sync_locks.pop(token, None)
-            self._scope_async_locks.pop(token, None)
+            self._scope_initializers.pop(token, None)
         if provider is not None:
             provider.instance = MISSING
             provider.singleton = MISSING
@@ -611,8 +654,7 @@ class DependencyContainer:
         candidates = list(self._shutdown_instances())
         self._scope_cache.clear()
         with self._scope_lock:
-            self._scope_sync_locks.clear()
-            self._scope_async_locks.clear()
+            self._scope_initializers.clear()
         if self.parent is None:
             for provider in self._providers.values():
                 provider.instance = MISSING

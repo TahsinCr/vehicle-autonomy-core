@@ -165,6 +165,10 @@ class MissionLifecycle:
                 return runtime.snapshot
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
+            if runtime.snapshot.phase is not MissionPhase.RUNNING:
+                raise MissionTransitionError(
+                    "Only a running mission can complete"
+                )
             runtime.stop_event.set()
         try:
             self._join_worker(runtime)
@@ -467,6 +471,7 @@ class MissionLifecycle:
         }
         if current is MissionPhase.QUEUED:
             changes["queued_at"] = now
+            runtime.queued_monotonic = time.monotonic()
         if current is MissionPhase.STARTING:
             changes.update(
                 generation=runtime.snapshot.generation + 1,
@@ -476,9 +481,11 @@ class MissionLifecycle:
                 next_retry_at=None,
                 progress=0.0,
                 result={},
+                queued_at=None,
             )
             runtime.active_elapsed = 0.0
             runtime.active_started_monotonic = None
+            runtime.queued_monotonic = None
         if current is MissionPhase.RUNNING:
             runtime.active_started_monotonic = time.monotonic()
         elif previous is MissionPhase.RUNNING:
