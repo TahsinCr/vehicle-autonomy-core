@@ -147,9 +147,14 @@ changing the source.
 | `mission/controller.py` | abstract control boundary exposed to a mission |
 | `mission/engine.py` | registry, shared state and the public mission facade |
 | `mission/lifecycle.py` | ready-to-use pause, resume, stop, progress and completion component |
-| `mission/scheduler.py` | ready-to-use queue, conflict, priority, retry and chain component |
+| `mission/scheduler.py` | ready-to-use queue, conflict, priority and retry component |
+| `mission/orchestration.py` | internal coordination between execution components |
+| `mission/chain.py` | sequential chains, context handoff and mixed-stage advancement |
+| `mission/parallel.py` | controlled parallel groups and aggregate results |
+| `mission/background.py` | owner-bound background mission policies |
+| `mission/execution.py` | immutable chain, node, group and ownership models |
 | `mission/runtime.py` | engine-owned state and bound mission controller |
-| `mission/models.py` | snapshots, events, retry policy and chain models |
+| `mission/models.py` | lifecycle snapshots, events, queries and retry policy |
 | `mission/enums.py` | phases, priorities, policies and transition rules |
 | `mission/errors.py` | mission-specific exceptions |
 | `mavlink/endpoint.py` | validated serial, UDP and TCP endpoint settings |
@@ -167,7 +172,9 @@ changing the source.
 | `mavlink/protocols.py` | structural types for compatible MAVLink messages |
 
 Files such as `dependency/annotations.py`, `dependency/resolution.py`,
-`dependency/lifecycle.py` and `mission/runtime.py` are implementation modules.
+`dependency/lifecycle.py`, `mission/orchestration.py`, `mission/chain.py`,
+`mission/parallel.py`, `mission/background.py` and `mission/runtime.py` are
+implementation modules.
 Most applications should use the public exports from `src.core`,
 `src.core.dependency`, `src.core.events`, `src.core.mission` and
 `src.core.mavlink` instead of importing those files directly.
@@ -605,26 +612,116 @@ through `engine.scheduler` and `engine.lifecycle` when direct component access
 is useful. A custom component subclasses only the behavior it needs; the engine
 itself no longer uses multiple inheritance.
 
-### Mission chains
+### Mission orchestration
 
-A chain creates and runs mission classes in order:
+A chain creates mission classes in order. Each run has its own immutable
+context, so a mission can read the initial input and the previous result without
+receiving orchestration data through its constructor:
 
 ```python
-from src.core import MissionChain
+from src.core import Mission, MissionChain
 
 
-chain = MissionChain(
-    "survey-sequence",
-    (SurveyMission, SurveyMission),
-    stop_on_failure=True,
-)
-engine.start_chain(chain)
-state = engine.chain_snapshot("survey-sequence")
+class ReadTarget(Mission):
+    def start(self):
+        target = self.runtime.chain_context.input["target"]
+        self.complete({"target": target, "ready": True})
+
+    def stop(self):
+        pass
+
+
+class UseTarget(Mission):
+    def start(self):
+        previous = self.runtime.chain_context.previous_result
+        self.complete({"accepted": previous["ready"]})
+
+    def stop(self):
+        pass
+
+
+chain = MissionChain("target-flow", (ReadTarget, UseTarget))
+run = engine.start_chain(chain, input={"target": "zone-a"})
+state = engine.chain_snapshot(run.execution_id)
 ```
 
-Chain entries are classes rather than instances. By default they must support a
-no-argument constructor. Supply `mission_factory=` to `MissionEngine` when the
-application needs dependency-backed construction.
+`context.results` keeps completed results under node names. Repeated mission
+types receive stable suffixes, or an explicit `MissionNode` can provide the
+name. `stop_on_failure=True` remains the default. With `False`, the next stage
+also receives `previous_mission.phase`, allowing it to handle a terminal result
+deliberately.
+
+A controlled parallel group adds aggregate status and a failure policy to the
+existing independent `run_parallel()` helper:
+
+```python
+from src.core import (
+    MissionNode,
+    MissionParallelGroup,
+    ParallelFailurePolicy,
+)
+
+
+group = MissionParallelGroup(
+    "checks",
+    (
+        MissionNode("health", HealthCheck),
+        MissionNode("position", PositionCheck),
+    ),
+    ParallelFailurePolicy.CANCEL_REMAINING,
+)
+run = engine.start_parallel(group)
+state = engine.parallel_snapshot(run.execution_id)
+engine.cancel_parallel(run.execution_id)  # propagated to active children
+```
+
+`WAIT_ALL` lets every child reach a terminal state. `CANCEL_REMAINING` cancels
+active siblings after a failure, while `STOP_REMAINING` stops them. Shared
+resources and `blocks` are checked before the group starts. Completed values
+are available as the immutable `state.result` mapping.
+
+A parallel group can also be one chain stage. Both children receive the result
+from `Prepare`; `Finish` receives the combined `left` and `right` results:
+
+```python
+from src.core import MissionParallelStage
+
+
+parallel = MissionParallelStage(
+    "work",
+    (MissionNode("left", LeftWork), MissionNode("right", RightWork)),
+    ParallelFailurePolicy.STOP_REMAINING,
+)
+chain = MissionChain("mixed-flow", (Prepare, parallel, Finish))
+engine.start_chain(chain)
+```
+
+Long-lived supporting work remains a normal mission and can be attached to a
+mission, chain run or parallel run:
+
+```python
+from src.core import BackgroundFailurePolicy, OwnerTerminationPolicy
+
+
+foreground = ForegroundMission()
+engine.launch(foreground)
+engine.launch_background(
+    StatusPublisher(),
+    owner=foreground,
+    termination_policy=OwnerTerminationPolicy.STOP_WITH_OWNER,
+    failure_policy=BackgroundFailurePolicy.FAIL_OWNER,
+)
+```
+
+The safe default stops the background mission when its owner ends.
+`CANCEL_WITH_OWNER` preserves cancellation semantics, and `KEEP_RUNNING` must
+be selected explicitly. `stop_chain()`, `cancel_chain()`, `stop_parallel()` and
+`cancel_parallel()` propagate through normal mission lifecycle calls; no extra
+worker-thread mechanism is introduced.
+
+Chain and group entries are classes rather than instances. By default they must
+support a no-argument constructor. Supply `mission_factory=` to
+`MissionEngine` when the application needs dependency-backed construction.
 
 Mission workers and the scheduler use daemon threads. `stop()` is cooperative:
 a mission that blocks indefinitely in `start()` or `tick()` cannot be made safe

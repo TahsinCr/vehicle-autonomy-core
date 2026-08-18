@@ -79,6 +79,12 @@ class Mission(Service, ABC):
     def stop_requested(self) -> bool:
         return self.control.stop_requested
 
+    @property
+    def runtime(self) -> MissionController:
+        """Expose the mission's read-only runtime/controller view."""
+
+        return self.control
+
     def checkpoint(
         self,
         name: str,

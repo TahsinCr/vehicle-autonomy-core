@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.3.1] - 2026-08-18
+
+### Added
+
+- Added an immutable execution context for mission chains. Each run now carries
+  its own input, metadata, previous terminal state and completed stage results.
+- Added named parallel mission groups with aggregate snapshots and explicit
+  wait, cancel-remaining and stop-remaining failure policies.
+- Added parallel stages to mission chains, allowing flows such as
+  `prepare -> parallel work -> finish` with result handoff between stages.
+- Added engine-owned background missions that can follow a mission, chain or
+  parallel group lifecycle through explicit owner and failure policies.
+- Added deterministic orchestration tests covering isolated chain runs, retry
+  context, failure continuation, timeout and cancellation, parallel execution,
+  resource conflicts, result aggregation and background ownership.
+
+### Changed
+
+- Split mission orchestration into focused chain, parallel and background
+  executors. A small internal coordinator connects them while `MissionEngine`
+  remains the only public execution facade.
+- Moved execution definitions and snapshots out of the general lifecycle model
+  module, keeping runtime events and orchestration data in separate files.
+- Renamed `MissionChain.mission_types` to `MissionChain.stages` and replaced
+  `MissionChainSnapshot.current_mission_type` with `current_stage`, reflecting
+  that a chain entry may be a mission, a named node or a parallel stage.
+- Registered missions can now be stopped or cancelled before their first
+  launch, which makes reentrant group and background termination deterministic.
+- Repeated mission types in a chain receive distinct result keys. Applications
+  can also use `MissionNode` when a domain-meaningful node name is preferred.
+- Expanded both guides with practical chain handoff, controlled parallel stage,
+  background ownership and cancellation propagation examples.
+- Updated package metadata to version `1.3.1`.
+
+### Removed
+
+- Removed the chain proxy methods from `MissionScheduler`; chain operations now
+  belong exclusively to `MissionEngine`.
+- Removed `MissionOrchestrator` from package-level exports and removed the
+  direct `Mission.chain_context` shortcut. Missions read execution data through
+  the explicit `Mission.runtime.chain_context` boundary.
+- Removed public-module identity rewriting that existed only to preserve the
+  previous internal file layout.
+
+### Fixed
+
+- Prevented chain context and results from leaking between concurrent or later
+  executions of the same chain definition.
+- Preserved the same chain context across retries and removed it from a mission
+  runtime after the mission reaches a terminal state.
+- Ensured chain, group and owner termination is propagated through normal
+  mission lifecycle commands instead of bypassing cleanup.
+- Prevented reentrant start events from launching children after their group or
+  owner has already been stopped.
+
 ## [v1.3] - 2026-08-13
 
 ### Added
@@ -36,8 +91,8 @@ All notable changes to this project are documented in this file.
 - Prevented stale queued snapshots from timing out or promoting a newer mission
   generation.
 - Allowed an application handler to stop its own dispatcher without attempting
-  to join its current worker thread. Responses from the stopped generation stay
-  suppressed.
+  to join its current worker thread. Late responses from the stopped session
+  remain suppressed.
 
 ## [v1.2] - 2026-08-13
 
@@ -248,6 +303,7 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
+[v1.3.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.3...v1.3.1
 [v1.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.2...v1.3
 [v1.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1.1...v1.2
 [v1.1.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1...v1.1.1

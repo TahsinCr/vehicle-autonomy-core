@@ -143,9 +143,14 @@ değişmeden `vehicle_stack.core` gibi başka bir üst paket altında da açıla
 | `mission/controller.py` | mission'a sunulan abstract kontrol sınırı |
 | `mission/engine.py` | registry, ortak durum ve public mission facade |
 | `mission/lifecycle.py` | kullanıma hazır pause, resume, stop, progress ve tamamlama bileşeni |
-| `mission/scheduler.py` | kullanıma hazır kuyruk, çakışma, öncelik, retry ve zincir bileşeni |
+| `mission/scheduler.py` | kullanıma hazır kuyruk, çakışma, öncelik ve retry bileşeni |
+| `mission/orchestration.py` | execution bileşenleri arasındaki internal koordinasyon |
+| `mission/chain.py` | sıralı zincir, context aktarımı ve karma aşama ilerletme |
+| `mission/parallel.py` | kontrollü paralel gruplar ve birleşik sonuçlar |
+| `mission/background.py` | owner'a bağlı background mission politikaları |
+| `mission/execution.py` | immutable zincir, node, grup ve sahiplik modelleri |
 | `mission/runtime.py` | motorun sahip olduğu durum ve bağlı mission controller |
-| `mission/models.py` | snapshot, event, retry politikası ve zincir modelleri |
+| `mission/models.py` | lifecycle snapshot, event, sorgu ve retry politikası |
 | `mission/enums.py` | faz, öncelik, politika ve geçiş kuralları |
 | `mission/errors.py` | mission hata sınıfları |
 | `mavlink/endpoint.py` | doğrulanan serial, UDP ve TCP ayarları |
@@ -163,8 +168,10 @@ değişmeden `vehicle_stack.core` gibi başka bir üst paket altında da açıla
 | `mavlink/protocols.py` | uyumlu MAVLink mesajları için structural type'lar |
 
 `dependency/annotations.py`, `dependency/resolution.py`,
-`dependency/lifecycle.py` ve `mission/runtime.py` uygulama ayrıntılarıdır. Çoğu
-uygulama doğrudan bu dosyalar yerine `src.core`, `src.core.dependency`,
+`dependency/lifecycle.py`, `mission/orchestration.py`, `mission/chain.py`,
+`mission/parallel.py`, `mission/background.py` ve `mission/runtime.py` uygulama
+ayrıntılarıdır. Çoğu uygulama doğrudan bu dosyalar yerine `src.core`,
+`src.core.dependency`,
 `src.core.events`, `src.core.mission` ve `src.core.mavlink` public exportlarını
 kullanmalıdır.
 
@@ -604,24 +611,115 @@ bileşenlere devreder. Doğrudan bileşen erişimi gerektiğinde aynı işlemler
 bileşen yalnızca ihtiyaç duyduğu davranıştan miras alır; motor artık çoklu
 kalıtım kullanmaz.
 
-### Mission zincirleri
+### Mission orkestrasyonu
 
-Zincir, mission sınıflarını sırayla oluşturup çalıştırır:
+Zincir, mission sınıflarını sırayla oluşturur. Her çalıştırmanın kendine ait
+immutable context'i vardır. Böylece mission, ilk girdiyi ve önceki sonucu
+constructor üzerinden orkestrasyon verisi almadan okuyabilir:
 
 ```python
-from src.core import MissionChain
+from src.core import Mission, MissionChain
 
 
-chain = MissionChain(
-    "survey-sequence",
-    (SurveyMission, SurveyMission),
-    stop_on_failure=True,
-)
-engine.start_chain(chain)
-state = engine.chain_snapshot("survey-sequence")
+class ReadTarget(Mission):
+    def start(self):
+        target = self.runtime.chain_context.input["target"]
+        self.complete({"target": target, "ready": True})
+
+    def stop(self):
+        pass
+
+
+class UseTarget(Mission):
+    def start(self):
+        previous = self.runtime.chain_context.previous_result
+        self.complete({"accepted": previous["ready"]})
+
+    def stop(self):
+        pass
+
+
+chain = MissionChain("target-flow", (ReadTarget, UseTarget))
+run = engine.start_chain(chain, input={"target": "zone-a"})
+state = engine.chain_snapshot(run.execution_id)
 ```
 
-Zincir girdileri instance değil sınıftır. Varsayılan durumda argümansız
+`context.results`, tamamlanan sonuçları node adlarıyla saklar. Tekrarlanan
+mission tiplerine kararlı bir sıra eki verilir; istenirse `MissionNode` ile ad
+açıkça seçilebilir. `stop_on_failure=True` varsayılan davranış olarak kalır.
+Değer `False` olduğunda sıradaki aşama `previous_mission.phase` bilgisini de
+alarak terminal sonucu bilinçli biçimde ele alabilir.
+
+Kontrollü paralel grup, mevcut bağımsız `run_parallel()` yardımcısına toplu
+durum ve hata politikası ekler:
+
+```python
+from src.core import (
+    MissionNode,
+    MissionParallelGroup,
+    ParallelFailurePolicy,
+)
+
+
+group = MissionParallelGroup(
+    "checks",
+    (
+        MissionNode("health", HealthCheck),
+        MissionNode("position", PositionCheck),
+    ),
+    ParallelFailurePolicy.CANCEL_REMAINING,
+)
+run = engine.start_parallel(group)
+state = engine.parallel_snapshot(run.execution_id)
+engine.cancel_parallel(run.execution_id)  # aktif child'lara yayılır
+```
+
+`WAIT_ALL` bütün child'ların terminal duruma gelmesini bekler.
+`CANCEL_REMAINING` hata sonrasında aktif kardeşleri iptal eder;
+`STOP_REMAINING` ise durdurur. Ortak resource ve `blocks` çakışmaları grup
+başlamadan kontrol edilir. Sonuçlar immutable `state.result` mapping'inde
+toplanır.
+
+Paralel grup zincirde tek bir aşama olarak da kullanılabilir. İki child
+`Prepare` sonucunu alır; `Finish` ise `left` ve `right` birleşik sonucunu okur:
+
+```python
+from src.core import MissionParallelStage
+
+
+parallel = MissionParallelStage(
+    "work",
+    (MissionNode("left", LeftWork), MissionNode("right", RightWork)),
+    ParallelFailurePolicy.STOP_REMAINING,
+)
+chain = MissionChain("mixed-flow", (Prepare, parallel, Finish))
+engine.start_chain(chain)
+```
+
+Uzun süre çalışan destek işi normal bir mission olarak kalır ve bir mission'a,
+zincir çalıştırmasına veya paralel çalıştırmaya bağlanabilir:
+
+```python
+from src.core import BackgroundFailurePolicy, OwnerTerminationPolicy
+
+
+foreground = ForegroundMission()
+engine.launch(foreground)
+engine.launch_background(
+    StatusPublisher(),
+    owner=foreground,
+    termination_policy=OwnerTerminationPolicy.STOP_WITH_OWNER,
+    failure_policy=BackgroundFailurePolicy.FAIL_OWNER,
+)
+```
+
+Güvenli varsayılan, owner bittiğinde background mission'ı durdurur.
+`CANCEL_WITH_OWNER` iptal semantiğini korur; `KEEP_RUNNING` ise açıkça
+seçilmelidir. `stop_chain()`, `cancel_chain()`, `stop_parallel()` ve
+`cancel_parallel()` işlemleri normal mission lifecycle çağrılarıyla child'lara
+yayılır; ek bir worker thread mekanizması kullanılmaz.
+
+Zincir ve grup girdileri instance değil sınıftır. Varsayılan durumda argümansız
 oluşturulabilmeleri gerekir. Uygulama dependency destekli oluşturma istiyorsa
 `MissionEngine` kurulurken `mission_factory=` verebilir.
 

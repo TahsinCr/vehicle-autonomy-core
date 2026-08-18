@@ -4,24 +4,19 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from .base import Mission
 from .enums import (
     MissionConflictPolicy,
-    MissionEventType,
     MissionPhase,
     MissionPrerequisitePolicy,
 )
 from .errors import (
     MissionConflictError,
-    MissionNotFoundError,
     MissionRegistrationError,
 )
 from .models import (
-    MissionChain,
-    MissionChainSnapshot,
     MissionSnapshot,
     MissionTransition,
 )
@@ -231,38 +226,6 @@ class MissionScheduler:
     ) -> tuple[MissionSnapshot, ...]:
         return self.launch_many(*missions)
 
-    def start_chain(self, chain: MissionChain) -> MissionChainSnapshot:
-        if not isinstance(chain, MissionChain):
-            raise TypeError("Mission engine chains must be MissionChain instances")
-        with self.engine._condition:
-            current = self.engine._chains.get(chain.chain_id)
-            if current is not None and current.active:
-                raise MissionConflictError(
-                    f"Mission chain is already active: {chain.chain_id}"
-                )
-            snapshot = MissionChainSnapshot(chain=chain, active=True)
-            self.engine._chains[chain.chain_id] = snapshot
-        self.engine._emit(
-            MissionEventType.CHAIN,
-            f"Mission chain started: {chain.chain_id}",
-        )
-        try:
-            self._launch_chain_index(chain.chain_id, 0)
-        except Exception as exc:
-            self._mark_chain_failed(chain.chain_id, exc)
-            raise
-        with self.engine._condition:
-            return self.engine._chains[chain.chain_id]
-
-    def chain_snapshot(self, chain_id: str) -> MissionChainSnapshot:
-        with self.engine._condition:
-            try:
-                return self.engine._chains[str(chain_id).strip()]
-            except KeyError as exc:
-                raise MissionNotFoundError(
-                    f"Mission chain not found: {chain_id}"
-                ) from exc
-
     def _scheduler_loop(self) -> None:
         while not self.engine._scheduler_stop.is_set():
             self.engine._scheduler_wake.wait(self.engine._scheduler_interval)
@@ -326,102 +289,8 @@ class MissionScheduler:
                 continue
 
     def _after_terminal(self, mission_id: int, *, succeeded: bool) -> None:
-        self.engine._scheduler_wake.set()
-        with self.engine._condition:
-            chain_id = self.engine._mission_chains.pop(mission_id, None)
-            if chain_id is not None and not self.engine._running:
-                chain = self.engine._chains.get(chain_id)
-                if chain is not None and chain.active:
-                    self.engine._chains[chain_id] = replace(
-                        chain,
-                        active=False,
-                        failed=True,
-                        reason="Mission engine stopped",
-                    )
-                chain_id = None
-        if chain_id is not None:
-            self._advance_chain(chain_id, succeeded=succeeded)
-
-    def _launch_chain_index(self, chain_id: str, index: int) -> None:
-        with self.engine._condition:
-            snapshot = self.engine._chains[chain_id]
-            mission_type = snapshot.chain.mission_types[index]
-        mission = self.engine._mission_factory(mission_type)
-        if not isinstance(mission, mission_type):
-            raise MissionRegistrationError(
-                "Mission factory must return an instance of the requested type"
-            )
-        self.engine.register(mission)
-        with self.engine._condition:
-            self.engine._mission_chains[mission.id] = chain_id
-        self.launch(mission)
-
-    def _advance_chain(self, chain_id: str, *, succeeded: bool) -> None:
-        event_message: str | None = None
-        with self.engine._condition:
-            snapshot = self.engine._chains.get(chain_id)
-            if snapshot is None or not snapshot.active:
-                return
-            if not succeeded and snapshot.chain.stop_on_failure:
-                self.engine._chains[chain_id] = replace(
-                    snapshot,
-                    active=False,
-                    failed=True,
-                    reason="Mission in chain failed",
-                )
-                event_message = f"Mission chain failed: {chain_id}"
-                next_index = None
-            else:
-                next_index = snapshot.current_index + 1
-            if (
-                next_index is not None
-                and next_index >= len(snapshot.chain.mission_types)
-            ):
-                self.engine._chains[chain_id] = replace(
-                    snapshot,
-                    current_index=next_index,
-                    active=False,
-                    completed=True,
-                )
-                event_message = f"Mission chain completed: {chain_id}"
-                next_index = None
-            elif next_index is not None:
-                self.engine._chains[chain_id] = replace(
-                    snapshot, current_index=next_index
-                )
-        if event_message is not None:
-            self.engine._emit(MissionEventType.CHAIN, event_message)
-        if next_index is None:
-            return
-        try:
-            self._launch_chain_index(chain_id, next_index)
-        except Exception as exc:
-            self._mark_chain_failed(chain_id, exc)
-
-    def _mark_chain_failed(self, chain_id: str, error: Exception) -> None:
-        reason = f"Mission chain could not continue: {error}"
-        with self.engine._condition:
-            snapshot = self.engine._chains.get(chain_id)
-            if snapshot is None or not snapshot.active:
-                return
-            self.engine._chains[chain_id] = replace(
-                snapshot,
-                active=False,
-                failed=True,
-                reason=reason,
-            )
-            orphaned_ids = tuple(
-                mission_id
-                for mission_id, owner_chain_id in self.engine._mission_chains.items()
-                if owner_chain_id == chain_id
-                and not self.engine._runtimes[mission_id].snapshot.phase.active
-            )
-            for mission_id in orphaned_ids:
-                self.engine._mission_chains.pop(mission_id, None)
-        self.engine._emit(
-            MissionEventType.CHAIN,
-            reason,
-        )
+        del succeeded
+        self.engine._orchestrator.after_terminal(mission_id)
 
     def _missing_prerequisites_locked(
         self,

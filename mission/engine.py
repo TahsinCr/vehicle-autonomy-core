@@ -12,7 +12,13 @@ from ..abstracts import Service
 from ..compatibility import ExceptionGroup
 from ..events import EventBus
 from .base import Mission
-from .enums import MissionEventLevel, MissionEventType, MissionPhase
+from .enums import (
+    BackgroundFailurePolicy,
+    MissionEventLevel,
+    MissionEventType,
+    MissionPhase,
+    OwnerTerminationPolicy,
+)
 from .errors import (
     MissionError,
     MissionNotFoundError,
@@ -20,9 +26,14 @@ from .errors import (
     MissionRegistrationError,
     MissionTimeoutError,
 )
-from .models import (
+from .execution import (
     MissionChain,
     MissionChainSnapshot,
+    MissionBackgroundSnapshot,
+    MissionParallelGroup,
+    MissionParallelSnapshot,
+)
+from .models import (
     MissionEvent,
     MissionEventQuery,
     MissionManagerSnapshot,
@@ -31,6 +42,7 @@ from .models import (
     MissionTransition,
 )
 from .lifecycle import MissionLifecycle
+from .orchestration import MissionOrchestrator
 from .runtime import BoundMissionController, MissionRuntime
 from .scheduler import MissionScheduler
 
@@ -72,8 +84,6 @@ class MissionEngine(Service):
         self._stop_timeout = stop_timeout
         self._mission_factory = mission_factory or (lambda mission_type: mission_type())
         self._runtimes: dict[int, MissionRuntime] = {}
-        self._chains: dict[str, MissionChainSnapshot] = {}
-        self._mission_chains: dict[int, str] = {}
         self._event_sequence = 0
         self._pending_transitions: deque[tuple[MissionTransition, int]] = deque()
         self._transition_publish_lock = threading.RLock()
@@ -88,6 +98,7 @@ class MissionEngine(Service):
         self.transitions = EventBus[MissionTransition](history=event_history)
         self.lifecycle = (lifecycle or MissionLifecycle()).bind(self)
         self.scheduler = (scheduler or MissionScheduler()).bind(self)
+        self._orchestrator = MissionOrchestrator(self)
 
     @property
     def running(self) -> bool:
@@ -183,8 +194,7 @@ class MissionEngine(Service):
             self._closed = True
             runtimes = tuple(self._runtimes.values())
             self._runtimes.clear()
-            self._chains.clear()
-            self._mission_chains.clear()
+            self._orchestrator.clear()
         for runtime in runtimes:
             runtime.mission.unbind_control(runtime.control)
         self.events.close()
@@ -228,11 +238,77 @@ class MissionEngine(Service):
     ) -> tuple[MissionSnapshot, ...]:
         return self.launch_many(*missions)
 
-    def start_chain(self, chain: MissionChain) -> MissionChainSnapshot:
-        return self.scheduler.start_chain(chain)
+    def start_chain(
+        self,
+        chain: MissionChain,
+        *,
+        input: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> MissionChainSnapshot:
+        """Start one isolated chain run with optional JSON-safe context data."""
+
+        return self._orchestrator.chains.start(
+            chain,
+            input=input,
+            metadata=metadata,
+        )
 
     def chain_snapshot(self, chain_id: str) -> MissionChainSnapshot:
-        return self.scheduler.chain_snapshot(chain_id)
+        """Return a chain run by execution ID, or the latest run by chain ID."""
+
+        return self._orchestrator.chains.snapshot(chain_id)
+
+    def stop_chain(self, chain_id: str) -> MissionChainSnapshot:
+        """Stop a chain and propagate the command to active child missions."""
+
+        return self._orchestrator.chains.stop(chain_id)
+
+    def cancel_chain(self, chain_id: str) -> MissionChainSnapshot:
+        """Cancel a chain and propagate cancellation to active children."""
+
+        return self._orchestrator.chains.cancel(chain_id)
+
+    def start_parallel(self, group: MissionParallelGroup) -> MissionParallelSnapshot:
+        """Start a named, policy-controlled parallel mission group."""
+
+        return self._orchestrator.parallel.start(group)
+
+    def parallel_snapshot(self, group_id: str) -> MissionParallelSnapshot:
+        """Return a parallel run by execution ID, or the latest run by group ID."""
+
+        return self._orchestrator.parallel.snapshot(group_id)
+
+    def stop_parallel(self, group_id: str) -> MissionParallelSnapshot:
+        """Stop every active child in a parallel execution."""
+
+        return self._orchestrator.parallel.stop(group_id)
+
+    def cancel_parallel(self, group_id: str) -> MissionParallelSnapshot:
+        """Cancel every active child in a parallel execution."""
+
+        return self._orchestrator.parallel.cancel(group_id)
+
+    def launch_background(
+        self,
+        mission: Mission,
+        *,
+        owner: Mission | int | MissionChainSnapshot | MissionParallelSnapshot,
+        termination_policy: OwnerTerminationPolicy = OwnerTerminationPolicy.STOP_WITH_OWNER,
+        failure_policy: BackgroundFailurePolicy = BackgroundFailurePolicy.IGNORE,
+    ) -> MissionBackgroundSnapshot:
+        """Launch a normal mission whose lifecycle is associated with an owner."""
+
+        return self._orchestrator.background.launch(
+            mission,
+            owner=owner,
+            termination_policy=termination_policy,
+            failure_policy=failure_policy,
+        )
+
+    def background_snapshot(self, mission_id: int) -> MissionBackgroundSnapshot:
+        """Return ownership and current lifecycle state for background work."""
+
+        return self._orchestrator.background.snapshot(mission_id)
 
     def pause(
         self,
@@ -378,7 +454,7 @@ class MissionEngine(Service):
                     f"Active or queued mission {mission_id} cannot be unregistered"
                 )
             self._runtimes.pop(mission_id)
-            self._mission_chains.pop(mission_id, None)
+            self._orchestrator.forget_mission(mission_id)
         runtime.mission.unbind_control(runtime.control)
         self._emit(
             MissionEventType.UNREGISTERED,

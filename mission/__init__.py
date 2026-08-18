@@ -12,12 +12,15 @@ else:
     from .lifecycle import MissionLifecycle
     from .scheduler import MissionScheduler
     from .enums import (
+        BackgroundFailurePolicy,
         MissionConflictPolicy,
         MissionEventLevel,
         MissionEventType,
         MissionPhase,
         MissionPrerequisitePolicy,
         MissionPriority,
+        OwnerTerminationPolicy,
+        ParallelFailurePolicy,
         ensure_mission_transition,
     )
     from .errors import (
@@ -29,9 +32,18 @@ else:
         MissionTransitionError,
         MissionTimeoutError,
     )
-    from .models import (
+    from .execution import (
         MissionChain,
         MissionChainSnapshot,
+        MissionBackgroundSnapshot,
+        MissionExecutionContext,
+        MissionExecutionResult,
+        MissionNode,
+        MissionParallelGroup,
+        MissionParallelSnapshot,
+        MissionParallelStage,
+    )
+    from .models import (
         MissionEvent,
         MissionEventQuery,
         MissionManagerSnapshot,
@@ -39,43 +51,10 @@ else:
         MissionSnapshot,
         MissionTransition,
     )
-    # Preserve the historical public module identity for introspection and pickle
-    # compatibility while implementations live in focused submodules.
-    for _public_object in (
-        Mission,
-        MissionChain,
-        MissionChainSnapshot,
-        MissionConflictError,
-        MissionConflictPolicy,
-        MissionController,
-        MissionError,
-        MissionEngine,
-        MissionLifecycle,
-        MissionEvent,
-        MissionEventLevel,
-        MissionEventQuery,
-        MissionEventType,
-        MissionManagerSnapshot,
-        MissionNotFoundError,
-        MissionPermissionError,
-        MissionPhase,
-        MissionPrerequisitePolicy,
-        MissionPriority,
-        MissionRegistrationError,
-        MissionRetryPolicy,
-        MissionSnapshot,
-        MissionScheduler,
-        MissionTransition,
-        MissionTransitionError,
-        MissionTimeoutError,
-        ensure_mission_transition,
-    ):
-        _public_object.__module__ = __name__
-    del _public_object
-
-
     __all__ = [
+        "BackgroundFailurePolicy",
         "Mission",
+        "MissionBackgroundSnapshot",
         "MissionChain",
         "MissionChainSnapshot",
         "MissionConflictError",
@@ -83,17 +62,23 @@ else:
         "MissionController",
         "MissionError",
         "MissionEngine",
+        "MissionExecutionContext",
+        "MissionExecutionResult",
         "MissionLifecycle",
         "MissionEvent",
         "MissionEventLevel",
         "MissionEventQuery",
         "MissionEventType",
         "MissionManagerSnapshot",
+        "MissionNode",
         "MissionNotFoundError",
         "MissionPermissionError",
         "MissionPhase",
         "MissionPrerequisitePolicy",
         "MissionPriority",
+        "MissionParallelGroup",
+        "MissionParallelSnapshot",
+        "MissionParallelStage",
         "MissionRegistrationError",
         "MissionRetryPolicy",
         "MissionSnapshot",
@@ -101,5 +86,7 @@ else:
         "MissionTransition",
         "MissionTransitionError",
         "MissionTimeoutError",
+        "OwnerTerminationPolicy",
+        "ParallelFailurePolicy",
         "ensure_mission_transition",
     ]

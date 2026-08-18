@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .controller import MissionController
+from .execution import MissionExecutionContext
 from .models import MissionSnapshot
 
 if TYPE_CHECKING:
@@ -29,6 +30,8 @@ class MissionRuntime:
     active_elapsed: float = 0.0
     active_started_monotonic: float | None = None
     queued_monotonic: float | None = None
+    chain_context: MissionExecutionContext | None = None
+    execution_node: str | None = None
 
 
 class BoundMissionController(MissionController):
@@ -45,6 +48,11 @@ class BoundMissionController(MissionController):
     @property
     def stop_requested(self) -> bool:
         return self._engine._stop_requested(self._mission_id)
+
+    @property
+    def chain_context(self) -> MissionExecutionContext | None:
+        with self._engine._condition:
+            return self._engine._runtime_locked(self._mission_id).chain_context
 
     def snapshot(self, mission_id: int | None = None) -> MissionSnapshot:
         return self._engine.snapshot(self._mission_id if mission_id is None else mission_id)

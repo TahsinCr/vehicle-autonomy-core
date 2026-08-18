@@ -65,6 +65,30 @@ class MissionPrerequisitePolicy(StrEnum):
     QUEUE = "queue"
 
 
+class ParallelFailurePolicy(StrEnum):
+    """Choose how a parallel execution reacts to a failed child."""
+
+    WAIT_ALL = "wait_all"
+    CANCEL_REMAINING = "cancel_remaining"
+    STOP_REMAINING = "stop_remaining"
+
+
+class OwnerTerminationPolicy(StrEnum):
+    """Control a background mission when its owner terminates."""
+
+    STOP_WITH_OWNER = "stop_with_owner"
+    CANCEL_WITH_OWNER = "cancel_with_owner"
+    KEEP_RUNNING = "keep_running"
+
+
+class BackgroundFailurePolicy(StrEnum):
+    """Choose whether a background failure affects its owner execution."""
+
+    IGNORE = "ignore"
+    FAIL_OWNER = "fail_owner"
+    STOP_EXECUTION = "stop_execution"
+
+
 class MissionEventLevel(IntEnum):
     DEBUG = 10
     INFO = 20
@@ -82,6 +106,8 @@ class MissionEventType(StrEnum):
     PROGRESS = "progress"
     CHECKPOINT = "checkpoint"
     CHAIN = "chain"
+    PARALLEL = "parallel"
+    BACKGROUND = "background"
     RETRY = "retry"
     LOG = "log"
     ERROR = "error"
@@ -89,7 +115,12 @@ class MissionEventType(StrEnum):
 
 _TRANSITIONS: dict[MissionPhase, frozenset[MissionPhase]] = {
     MissionPhase.REGISTERED: frozenset(
-        {MissionPhase.QUEUED, MissionPhase.STARTING, MissionPhase.CANCELLED}
+        {
+            MissionPhase.QUEUED,
+            MissionPhase.STARTING,
+            MissionPhase.STOPPED,
+            MissionPhase.CANCELLED,
+        }
     ),
     MissionPhase.QUEUED: frozenset(
         {

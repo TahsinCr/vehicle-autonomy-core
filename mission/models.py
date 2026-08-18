@@ -1,4 +1,4 @@
-"""Mission snapshots, events, retry policies, and chains."""
+"""Mission lifecycle snapshots, events, queries, and retry settings."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ..abstracts import Model, _freeze_model_value
 from .enums import (
@@ -15,9 +15,6 @@ from .enums import (
     MissionEventType,
     MissionPhase,
 )
-
-if TYPE_CHECKING:
-    from .base import Mission
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,44 +185,11 @@ class MissionTransition(Model):
     timestamp: float = field(default_factory=time.time)
 
 
-@dataclass(frozen=True, slots=True)
-class MissionChain(Model):
-    chain_id: str
-    mission_types: tuple[type["Mission"], ...]
-    stop_on_failure: bool = True
-
-    def __post_init__(self) -> None:
-        from .base import Mission
-
-        chain_id = str(self.chain_id).strip()
-        if not chain_id:
-            raise ValueError("Mission chain ID cannot be empty")
-        if not self.mission_types:
-            raise ValueError("Mission chain must contain at least one mission")
-        if any(
-            not isinstance(mission_type, type)
-            or not issubclass(mission_type, Mission)
-            for mission_type in self.mission_types
-        ):
-            raise ValueError("Mission chain entries must be Mission subclasses")
-        object.__setattr__(self, "chain_id", chain_id)
-
-
-@dataclass(frozen=True, slots=True)
-class MissionChainSnapshot(Model):
-    chain: MissionChain
-    current_index: int = 0
-    active: bool = False
-    completed: bool = False
-    failed: bool = False
-    reason: str = ""
-
-    def __post_init__(self) -> None:
-        if self.current_index < 0:
-            raise ValueError("Mission chain index cannot be negative")
-
-    @property
-    def current_mission_type(self) -> type["Mission"] | None:
-        if not self.active or self.current_index >= len(self.chain.mission_types):
-            return None
-        return self.chain.mission_types[self.current_index]
+__all__ = [
+    "MissionEvent",
+    "MissionEventQuery",
+    "MissionManagerSnapshot",
+    "MissionRetryPolicy",
+    "MissionSnapshot",
+    "MissionTransition",
+]

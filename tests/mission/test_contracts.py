@@ -20,7 +20,7 @@ from src.core.mission import (
 )
 
 
-class KamikazeMission(Mission):
+class PrimaryMission(Mission):
     resources = frozenset({"camera", "flight-control"})
 
     def start(self) -> None:
@@ -44,22 +44,22 @@ class MissionContractTests(unittest.TestCase):
             MissionController()
 
     def test_mission_owns_unique_id_default_name_and_optional_custom_name(self) -> None:
-        first = KamikazeMission()
-        second = KamikazeMission(name="Primary Target")
+        first = PrimaryMission()
+        second = PrimaryMission(name="Primary Target")
 
         self.assertIsInstance(first.id, int)
         self.assertGreater(first.id, 0)
         self.assertNotEqual(first.id, second.id)
-        self.assertEqual(first.name, "Kamikaze Mission")
+        self.assertEqual(first.name, "Primary Mission")
         self.assertEqual(second.name, "Primary Target")
         self.assertEqual(first.resources, frozenset({"camera", "flight-control"}))
         self.assertFalse(hasattr(first, "debug"))
         self.assertFalse(hasattr(first, "on_start"))
         with self.assertRaises(ValueError):
-            KamikazeMission(name="  ")
+            PrimaryMission(name="  ")
 
     def test_mission_records_implement_model_contract(self) -> None:
-        mission = KamikazeMission()
+        mission = PrimaryMission()
         snapshot = MissionSnapshot(
             mission.id,
             mission.name,
@@ -70,7 +70,7 @@ class MissionContractTests(unittest.TestCase):
         self.assertIsInstance(snapshot, Model)
         serialized = snapshot.to_dict()
         self.assertEqual(serialized["mission_id"], mission.id)
-        self.assertEqual(serialized["name"], "Kamikaze Mission")
+        self.assertEqual(serialized["name"], "Primary Mission")
         self.assertEqual(serialized["phase"], MissionPhase.RUNNING)
 
     def test_retry_policy_validates_attempts_and_delay(self) -> None:
@@ -153,19 +153,19 @@ class MissionContractTests(unittest.TestCase):
                     ensure_mission_transition(previous, current)
 
     def test_mission_chain_accepts_repeated_types_and_rejects_invalid_entries(self) -> None:
-        chain = MissionChain("survey.chain", (KamikazeMission, SurveyMission))
-        self.assertEqual(chain.mission_types, (KamikazeMission, SurveyMission))
+        chain = MissionChain("survey.chain", (PrimaryMission, SurveyMission))
+        self.assertEqual(chain.stages, (PrimaryMission, SurveyMission))
         self.assertIs(
-            MissionChainSnapshot(chain, active=True).current_mission_type,
-            KamikazeMission,
+            MissionChainSnapshot(chain, active=True).current_stage,
+            PrimaryMission,
         )
         with self.assertRaises(ValueError):
             MissionChain("survey.chain", ())
         repeated = MissionChain(
             "repeated.chain",
-            (KamikazeMission, KamikazeMission),
+            (PrimaryMission, PrimaryMission),
         )
-        self.assertEqual(len(repeated.mission_types), 2)
+        self.assertEqual(len(repeated.stages), 2)
         with self.assertRaises(ValueError):
             MissionChain("survey.chain", (str,))  # type: ignore[arg-type]
         with self.assertRaises(ValueError):

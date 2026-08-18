@@ -391,7 +391,7 @@ class MissionLifecycle:
             if current.terminal:
                 return runtime.snapshot
             runtime.stop_event.set()
-            if current is MissionPhase.QUEUED:
+            if current in {MissionPhase.REGISTERED, MissionPhase.QUEUED}:
                 snapshot, transition = self._transition_locked(
                     runtime,
                     terminal,
@@ -410,7 +410,7 @@ class MissionLifecycle:
 
         self._publish_transition(transition)
 
-        if current is not MissionPhase.QUEUED:
+        if current not in {MissionPhase.REGISTERED, MissionPhase.QUEUED}:
             self._join_worker(runtime)
             try:
                 self._cleanup_runtime(runtime)

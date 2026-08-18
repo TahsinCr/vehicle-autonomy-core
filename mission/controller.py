@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .execution import MissionExecutionContext
 from .models import MissionSnapshot
 
 
@@ -21,6 +22,11 @@ class MissionController(ABC):
     @abstractmethod
     def stop_requested(self) -> bool:
         """Report whether the mission should stop its current work."""
+
+    @property
+    @abstractmethod
+    def chain_context(self) -> MissionExecutionContext | None:
+        """Return the immutable context of the current chain stage, if any."""
 
     @abstractmethod
     def snapshot(self, mission_id: int | None = None) -> MissionSnapshot: ...
