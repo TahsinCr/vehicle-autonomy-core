@@ -22,6 +22,7 @@ class MavlinkConnection(Service):
     """Own a pymavlink connection and provide thread-safe I/O access."""
 
     UDP_DISCOVERY_INTERVAL_S = 1.0
+    CONNECT_POLL_INTERVAL_S = 0.2
 
     def __init__(
         self,
@@ -40,6 +41,8 @@ class MavlinkConnection(Service):
         self._receive_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._sent_messages = 0
+        self._connect_cancel = threading.Event()
+        self._connecting = False
 
     @property
     def is_connected(self) -> bool:
@@ -82,21 +85,32 @@ class MavlinkConnection(Service):
         with self._lifecycle_lock:
             if self._connection is not None:
                 return
-            connection: Any | None = None
-            try:
-                connection = self._create_connection()
-                heartbeat = self._wait_vehicle_heartbeat(connection)
-                if heartbeat is None:
-                    raise TimeoutError("MAVLink heartbeat zaman aşımı")
-            except Exception as exc:
-                if connection is not None:
-                    try:
-                        connection.close()
-                    except Exception as close_error:
-                        self._publish_error(close_error)
+            if self._connecting:
+                raise RuntimeError("MAVLink bağlantısı zaten başlatılıyor")
+            self._connecting = True
+            self._connect_cancel.clear()
+        connection: Any | None = None
+        try:
+            connection = self._create_connection()
+            heartbeat = self._wait_vehicle_heartbeat(connection)
+            if heartbeat is None:
+                raise TimeoutError("MAVLink heartbeat zaman aşımı")
+            with self._lifecycle_lock:
+                if self._connect_cancel.is_set():
+                    raise ConnectionAbortedError("MAVLink bağlantısı iptal edildi")
+                self._connection = connection
+        except Exception as exc:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception as close_error:
+                    self._publish_error(close_error)
+            if not isinstance(exc, ConnectionAbortedError):
                 self._publish_error(exc)
-                raise
-            self._connection = connection
+            raise
+        finally:
+            with self._lifecycle_lock:
+                self._connecting = False
         self.connection_changed.publish(True)
 
     def _wait_vehicle_heartbeat(self, connection: Any) -> Any:
@@ -106,6 +120,8 @@ class MavlinkConnection(Service):
         requires_probe = self.endpoint.uri.lower().startswith("udpout:")
         next_probe = 0.0
         while True:
+            if self._connect_cancel.is_set():
+                raise ConnectionAbortedError("MAVLink bağlantısı iptal edildi")
             now = time.monotonic()
             remaining = deadline - now
             if remaining <= 0:
@@ -115,17 +131,19 @@ class MavlinkConnection(Service):
                 self._send_discovery_heartbeat(connection)
                 next_probe = now + self.UDP_DISCOVERY_INTERVAL_S
 
-            wait_timeout = remaining
+            wait_timeout = min(remaining, self.CONNECT_POLL_INTERVAL_S)
             if requires_probe:
                 wait_timeout = min(
-                    remaining,
+                    wait_timeout,
                     max(0.01, next_probe - time.monotonic()),
                 )
             heartbeat = connection.wait_heartbeat(timeout=wait_timeout)
             if heartbeat is None:
-                if requires_probe:
-                    continue
-                raise TimeoutError("MAVLink uçuş cihazı heartbeat zaman aşımı")
+                # ``wait_heartbeat`` is allowed to return before its timeout
+                # (notably on a quiet UDP socket).  Keep polling until the
+                # deadline so cancellation remains prompt and deterministic.
+                self._connect_cancel.wait(min(0.01, remaining))
+                continue
             if not callable(classifier) or classifier(heartbeat):
                 return heartbeat
 
@@ -265,6 +283,10 @@ class MavlinkConnection(Service):
             raise
 
     def stop(self) -> None:
+        # A connection attempt keeps its raw transport local until it receives
+        # a valid vehicle heartbeat.  Set cancellation before acquiring I/O
+        # locks so shutdown can interrupt that wait promptly.
+        self._connect_cancel.set()
         with self._send_lock, self._receive_lock, self._lifecycle_lock:
             connection = self._connection
             self._connection = None

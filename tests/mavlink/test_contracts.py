@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import math
 import queue
 import unittest
@@ -150,6 +151,17 @@ class _RawConnection:
         self.closed += 1
 
 
+class _BlockingRawConnection(_RawConnection):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.waiting = threading.Event()
+
+    def wait_heartbeat(self, *, timeout: float) -> Any:
+        self.waiting.set()
+        threading.Event().wait(timeout)
+        return None
+
+
 class _MavlinkConstants:
     MAV_CMD_SET_MESSAGE_INTERVAL = 511
     MAV_TYPE_GCS = 6
@@ -223,6 +235,31 @@ class ConnectionTests(unittest.TestCase):
         self.assertFalse(connection.is_connected)
         self.assertEqual(raw.closed, 1)
         self.assertIsInstance(errors[-1], TimeoutError)
+
+    def test_stop_cancels_an_inflight_heartbeat_wait(self) -> None:
+        raw = _BlockingRawConnection()
+        connection = MavlinkConnection(
+            MavlinkEndpoint(heartbeat_timeout=5.0),
+            connection_factory=lambda _endpoint: raw,
+        )
+        errors: list[Exception] = []
+
+        def start() -> None:
+            try:
+                connection.start()
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=start)
+        worker.start()
+        self.assertTrue(raw.waiting.wait(0.5))
+        connection.stop()
+        worker.join(timeout=1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(connection.is_connected)
+        self.assertEqual(raw.closed, 1)
+        self.assertIsInstance(errors[0], ConnectionAbortedError)
 
     def test_invalid_send_method_is_reported(self) -> None:
         raw = _RawConnection(["vehicle"])
