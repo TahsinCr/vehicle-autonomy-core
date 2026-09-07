@@ -81,6 +81,7 @@ class MavlinkMessageRouter(Service):
             per_key_limit=cache_per_type,
         )
         self._history: deque[MavlinkMessageEnvelope] = deque(maxlen=history_limit)
+        self._latest: dict[tuple, MavlinkMessageEnvelope] = {}
         self._poll_timeout = poll_timeout
         self._error_backoff = error_backoff
         self._stop_timeout = float(stop_timeout)
@@ -214,7 +215,7 @@ class MavlinkMessageRouter(Service):
     ) -> Any | None:
         normalized_filter = coerce_message_filter(message_filter)
         with self._condition:
-            history = tuple(reversed(self._history))
+            history = sorted(self._latest.values(), key=lambda item: item.sequence, reverse=True)
         for envelope in history:
             if self._matches(normalized_filter, envelope):
                 return envelope.message
@@ -300,6 +301,8 @@ class MavlinkMessageRouter(Service):
                     self._sequence += 1
                     envelope = MavlinkMessageEnvelope.wrap(self._sequence, message)
                     self._history.append(envelope)
+                    self._latest[(envelope.source_system, envelope.source_component,
+                                  envelope.message_type)] = envelope
                     self._received_messages += 1
                     self._record_delivery(envelope)
                     self._last_message_monotonic = envelope.received_monotonic

@@ -169,6 +169,10 @@ changing the source.
 | `mavlink/dispatch.py` | bounded application handler execution |
 | `mavlink/remote_log.py` | validated remote-log records and batches |
 | `mavlink/runtime.py` | high-level lifecycle and messaging facade |
+| `mavlink/async_runtime.py` | async lifecycle using the shared transport |
+| `mavlink/vehicles.py` | discovered vehicles, components and source-scoped routing |
+| `mavlink/actions.py` | decorator actions and bounded async callback delivery |
+| `mavlink/handlers.py` | source-scoped application handlers and async task ownership |
 | `mavlink/protocols.py` | structural types for compatible MAVLink messages |
 
 Files such as `dependency/annotations.py`, `dependency/resolution.py`,
@@ -773,7 +777,7 @@ endpoint = MavlinkEndpoint.udp(
 )
 
 with MavlinkRuntime(endpoint) as mavlink:
-    subscription = mavlink.on(
+    subscription = mavlink.subscribe(
         ("HEARTBEAT", "GLOBAL_POSITION_INT"),
         lambda message: print(message.to_dict()),
     )
@@ -793,6 +797,277 @@ error. `reconnect()` performs a complete stop/start cycle. `state` combines
 transport, application-peer and router information; lifecycle errors are
 published through `runtime.errors`.
 
+### Multiple vehicles and components
+
+Use `MavlinkRuntime` for synchronous callbacks or `AsyncMavlinkRuntime` for
+async callbacks. Both use a single receive thread per connection. Vehicle
+discovery requires an autopilot heartbeat; GCS and companion-only systems do
+not create vehicle entries. Components of an identified vehicle are discovered
+from their messages. Systems sharing a link must have distinct system IDs.
+
+```python
+link = MavlinkRuntime(endpoint, heartbeat_timeout=5.0, vehicle_history=128)
+
+@link.vehicles.on_added
+def discovered(event):
+    print("Discovered:", event.vehicle.system_id)
+
+@link.vehicles.subscribe("GLOBAL_POSITION_INT")
+def position(event):
+    print(event.source_system, event.source_component, event.message.lat)
+
+with link:
+    vehicle = link.vehicles.wait_for(timeout=5.0)
+    if vehicle is not None:
+        vehicle.request_message_rate("GLOBAL_POSITION_INT", frequency_hz=10)
+        component = vehicle.get_component(1)
+        if component is not None:
+            subscription = component.subscribe("HEARTBEAT", print)
+            subscription.cancel()
+```
+
+Register discovery handlers before entering the context to observe initial
+discovery. `vehicles.get(12)` only looks up an existing object and returns
+`None` when absent. `wait_for(timeout=...)` waits for any connected endpoint,
+returns `None` on timeout or runtime stop, and does not accept an ID.
+Use `vehicle.get_component(id)` for one component (or `None`) and
+`vehicle.get_components()` for a tuple snapshot of all its components.
+`vehicle.wait_for_component(timeout=...)` waits for a connected component
+(await it in async mode). `remove_component(id)` removes a disconnected one.
+Discovery and connection hooks live directly on the vehicle:
+`on_component_added`, `on_component_removed`, `on_component_connected` and
+`on_component_disconnected`; callbacks and decorators are both supported.
+Iteration is a snapshot, so a bulk operation is explicit:
+
+```python
+for vehicle in link.vehicles:
+    vehicle.request_message_rate("ATTITUDE", frequency_hz=10)
+```
+
+Subscriptions on `link.vehicles`, one vehicle or one
+component receive `MavlinkMessageEnvelope` with the corresponding source
+scope. Collection subscriptions also cover future discoveries. Decorators
+return a callable `CallbackSubscription`; direct registration returns the same
+object whose
+`cancel()` is synchronous in both modes. `once=True` consumes a subscription
+on delivery. Scope `latest(type)` and `history(type=None)` return source-scoped
+envelopes; `wait_for(type, timeout=...)` waits for a new message. History is
+bounded by `vehicle_history` per vehicle and per component.
+
+Named actions also accept decorators or callbacks:
+
+```python
+@vehicle.on_disconnected(once=True)
+def disconnected(event):
+    print(event.vehicle.system_id)
+
+vehicle.on("error", lambda event: print(event.error))
+```
+
+Runtime actions are `on_start`, `on_stop`, `on_error`. Vehicles and components
+have `on_connected`, `on_disconnected` and `on_error`. The fleet collection has
+`on_added` and `on_removed`; component discovery/removal/connection callbacks
+are registered through the vehicle's `on_component_*` methods. Action callbacks
+receive `MavlinkAction` with `source`, `vehicle`, `component` and `error` as
+applicable.
+
+Heartbeat expiry marks an endpoint disconnected without removing it. A later
+heartbeat reuses the object and its subscriptions. Vehicle liveness means at
+least one component is still sending heartbeats; targeted vehicle commands
+additionally require a live, discovered autopilot component. `remove(id)` is
+allowed only for disconnected endpoints and cancels their subscriptions.
+Sending through a component targets that component; sending through a vehicle
+targets its discovered autopilot. `send_named()` is for messages accepting
+target fields and rejects caller-supplied target overrides. `send(message)`
+copies and targets messages without mutating the caller's object. `notify()` and
+`request()` use the configured application peer with explicit source correlation.
+The global peer state and router cache remain connection-level diagnostics.
+
+```python
+from src.core.mavlink import AsyncMavlinkRuntime
+
+async def receive_positions(endpoint):
+    link = AsyncMavlinkRuntime(endpoint, delivery_capacity=1024)
+
+    @link.vehicles.subscribe("GLOBAL_POSITION_INT")
+    async def position(event):
+        print(event.source_system, event.message.lat)
+
+    async with link:
+        vehicle = await link.vehicles.wait_for(timeout=5.0)
+        if vehicle is not None:
+            await vehicle.request_message_rate("GLOBAL_POSITION_INT", 10)
+            message = await vehicle.wait_for("GLOBAL_POSITION_INT", timeout=5.0)
+            print(message)
+```
+
+There is no `.aio` view: discovered objects follow their runtime's mode.
+
+Optional recording is separate from `latest()`, which now keeps the last
+message per type even after history eviction (per source/type on the router).
+Last-known data may be stale: check timestamps and connection state.
+
+```python
+from src.core.mavlink import MessageHistory, SqliteMessageHistory
+
+with SqliteMessageHistory("telemetry.sqlite3", limit=None) as history:
+    with MavlinkRuntime(endpoint) as link:
+        recording = link.add_history(history)  # also works after startup
+        # Run your application's receive/wait workflow here.
+        rows = history.query(system_id=12, component_id=1,
+                             message_type="ATTITUDE", limit=20)
+        last = history.latest(system_id=12, message_type="ATTITUDE")
+        recording.cancel()
+```
+
+Use `MessageHistory(limit=1000)` for memory storage. Both backends default to
+1000 total records; `limit=None` is unlimited. SQLite retention includes earlier
+runs. `query()` returns detached JSON `MessageRecord` snapshots oldest-first,
+with source/type filters and inclusive Unix time bounds `since`/`until`.
+The query limit selects the newest matching records. `clear()` removes all
+records. Memory tail queries stop once enough matches are found; queries with
+no matches can still scan the full history. SQLite applies filters and limits
+in SQL. Source IDs must be integers from 0 to 255; time bounds must be finite
+and ordered, and message types cannot be empty.
+Messages must implement JSON-compatible `to_dict()`.
+
+`add_history` is synchronous in both runtime modes, records future traffic and
+returns a cancellable subscription. Runtime close detaches it; the application
+owns storage and closes it after runtime shutdown. Subclass `MessageHistory`
+for another backend. Storage errors are reported with runtime error source
+`history`. SQLite commits run on a dedicated bounded writer, not the receive
+thread. `queue_capacity=1024` limits pending writes. Queue overflow rejects the
+new record and marks `recording_error`; disk failures are visible through that
+property and raised by `flush()`, queries and `close()`. Check these errors even
+when no more messages arrive. `flush(timeout=5.0)` waits for previously accepted
+records; queries/clear flush before accessing SQLite and close drains the writer.
+JSON snapshot encoding still runs on receipt; custom slow serializers can delay
+reading. No bounded recorder guarantees lossless storage under unlimited load.
+Unlimited storage
+requires monitoring available memory/disk space. Existing `vehicle.history()`
+remains a bounded diagnostic view, independent of these optional recorders.
+
+To find the same component ID across all discovered vehicles, use
+`link.vehicles.get_component(1)`. It returns a tuple snapshot of existing
+component objects (including disconnected ones), or `()` when none match.
+Use `component.system_id` to identify its vehicle, and `component.state.connected`
+to filter live results. In both runtime modes this lookup is synchronous:
+
+```python
+for component in link.vehicles.get_component(1):
+    if component.state.connected:
+        print(component.system_id, component.component_id)
+```
+
+Async lookup/registration/cancellation remain local synchronous operations;
+message waits, sending, application requests and lifecycle operations are
+awaitable. Blocking transport operations use the loop's shared executor.
+Cancelling an async transport call cannot retract a message already sent;
+an in-flight blocking application request can remain until its timeout or peer shutdown.
+Async callback delivery uses one consumer with coalesced cross-thread wakeups.
+Telemetry and lifecycle actions have separate bounded queues. When telemetry
+is full, its oldest callback is dropped; `link.dropped_callbacks` exposes the
+count. Actions run first, in order, so an `on_added` callback can register
+`on_connected` or component discovery callbacks for the same discovery sequence.
+`action_capacity` defaults to 1024. Exhausting it sets `link.delivery_error`,
+makes `link.running` false and reports the fault through `on_error`; stop and
+restart the runtime to recover. Increase the capacity for larger discovery bursts.
+While faulted, runtime and scoped send/request/wait operations reject new calls
+with `RuntimeError` chained from the delivery error. Pending scoped waits wake
+when the loop processes the fault notification. Snapshot lookups and history
+remain readable. Already-started blocking transport calls are not retracted;
+raw waits observe the fault when their underlying wait returns. Direct access
+to the low-level client/connection bypasses the runtime's fault guard.
+Slow callbacks delay other callbacks,
+but not socket reading; message/discovery waits wake independently of callbacks.
+Pending callback deliveries are discarded on stop and are not replayed on restart.
+Running handlers are cancelled; a handler ignoring cancellation causes an
+explicit shutdown timeout. Runtime start/stop hooks are awaited directly.
+Telemetry recipients are snapshotted on
+receipt: a later subscription does not receive older queued messages. Cancelled
+subscriptions are skipped at delivery. Lifecycle actions resolve handlers at
+delivery so discovery hooks can install subsequent connection hooks.
+Synchronous start/stop operations are serialized; close waits for startup to
+finish before disposing resources. Calls from owned threads reject conflicting
+lifecycle operations rather than deadlocking on a thread join.
+
+High-level synchronous message/discovery callbacks, predicates and hooks run
+on one shared callback worker, not the receive thread. `callback_capacity`
+(default 1024) bounds pending telemetry deliveries; overflow drops the oldest
+telemetry and counts it in `dropped_callbacks`. Lifecycle actions use a separate
+FIFO with `callback_action_capacity=1024`; telemetry cannot evict them. Action
+overflow or fatal worker exit sets `delivery_error` and makes `running` false;
+stop/start is required to recover. Slow callbacks delay other callbacks, not queue
+submission. Pending deliveries are discarded on stop. An active synchronous
+callback cannot be killed; shutdown reports a timeout if it does not return.
+Explicit start/stop/removal hooks run on the lifecycle caller. Low-level router
+subscriptions, EventBus subscriptions and synchronous history writers still
+run on their emitting thread; the worker guarantee applies to high-level
+runtime/vehicle/component subscriptions, not these lower-level APIs.
+
+Callback registrations support `once`, `max_calls`, `frequency_hz`, `timeout`,
+`predicate` and `enabled`. `frequency_hz` is an execution-rate ceiling, not a
+periodic scheduler: excess events are skipped. Disabled/filtered/rate-limited
+events do not consume the call budget. `once` and `max_calls` cannot be combined.
+
+```python
+@vehicle.subscribe("ATTITUDE", frequency_hz=10, timeout=0.5, max_calls=100)
+def attitude(event):
+    print(event.message)
+
+@attitude.on_error
+def failed(context):
+    print(context.error)
+
+attitude.on_success(lambda context: print("processed"))
+attitude.disable()
+attitude.enable()
+```
+
+`on_before`, `on_success`, `on_error`, `on_timeout` and `on_after` can be passed
+at registration or added as methods/decorators. They receive `CallbackContext`
+with `event`, `result`, `error`, and elapsed seconds. Async registrations require
+async callbacks/hooks. Sync timeouts are observed after return; async timeouts
+request cancellation of the callback. Hooks themselves have no separate time
+budget. Blocking async code or code ignoring cancellation cannot be forcibly
+interrupted. `on_after` runs in cleanup after an admitted invocation; skipped
+events have no execution hooks. Calling the decorator result directly invokes
+the original function, bypassing the event execution policy.
+Ordinary hook failures do not skip later hooks in the same group. Success and
+cleanup failures reach local error hooks; multiple callback/hook failures are
+preserved in an exception group. Cancellation still propagates.
+
+Discovered identity fields are read-only. A vehicle selects another connected
+autopilot component if its current autopilot is removed or times out.
+Concurrent `close()` calls wait for the same cleanup. Cancelling an async caller
+does not cancel the shared close operation.
+
+Application handlers can be registered with `@link.handle("command.name")`,
+`@vehicle.handle("command.name")` or `@component.handle("command.name")`.
+The most specific matching handler wins: component, vehicle, then runtime.
+Registration returns a cancellable subscription when a callback is passed
+directly; duplicate registrations require `replace=True`. They share the
+bounded application dispatcher, not a worker pool per vehicle. Use ordinary
+functions with `MavlinkRuntime` and `async def` with `AsyncMavlinkRuntime`;
+async application handlers run on the runtime's loop and are cancelled and
+awaited at shutdown.
+
+Async runtime also provides awaitable `send`, `send_named`, `notify`, `request`
+and raw-message `wait_for`. Its `messages`, `packets` and `errors` are
+`AsyncEventBus` instances: use `await link.messages.subscribe(callback)`.
+The high-level `link.subscribe(...)` and scoped subscription methods remain
+synchronous registration operations and support decorators and `once=True`.
+
+`with` and `async with` close the whole shared connection and owned services.
+Do not open or close separate connections for discovered vehicle objects.
+The connection still performs its initial heartbeat handshake before runtime
+startup completes; its timeout is `MavlinkEndpoint.heartbeat_timeout`.
+
+Migration: `runtime.on(message_type, callback)` is now
+`runtime.subscribe(message_type, callback)`. `on()` denotes lifecycle actions.
+For multiple vehicles, use scoped APIs instead of the connection's default
+target or its shared message cache.
+
 ### Filters, history and sending
 
 ```python
@@ -806,7 +1081,7 @@ position_filter = MavlinkMessageFilter.for_types(
     predicate=lambda message: message.relative_alt >= 0,
 )
 
-subscription = mavlink.on(position_filter, print)
+subscription = mavlink.subscribe(position_filter, print)
 mavlink.send_named(
     "command_long_send",
     target_system=1,

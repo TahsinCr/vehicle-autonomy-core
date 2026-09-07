@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vehicle-autonomy-core"
-version = "1.3.1"
+version = "1.5"
 description = "Reusable vehicle-agnostic autonomy infrastructure for Python projects"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 authors = [
   { name = "TahsinCr", email = "Tahsincr@outlook.com" },
 ]

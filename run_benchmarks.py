@@ -82,6 +82,8 @@ from src.core.mission import (  # noqa: E402
     MissionPhase,
     MissionSnapshot,
 )
+from src.core.mavlink.vehicles import VehicleRegistry  # noqa: E402
+from src.core.mavlink.handlers import ApplicationHandlers  # noqa: E402
 
 
 Operation = Callable[[], object]
@@ -172,8 +174,46 @@ class _RouterConnection:
         return True
 
 
+class _VehicleMessage(_MavlinkMessage):
+    autopilot = 3
+    type = 2
+
+    def __init__(self, system):
+        self.system = system
+
+    def get_srcSystem(self):
+        return self.system
+
+
+def _vehicle_cases(base_iterations):
+    """Compare the same routing operation with different registry sizes."""
+    cases = []
+    dialect = types.SimpleNamespace(MAV_AUTOPILOT_INVALID=8, MAV_TYPE_GCS=6)
+    for size in (1, 10, 100):
+        runtime = types.SimpleNamespace(connection=types.SimpleNamespace(mavlink=dialect))
+        runtime._application_handlers = ApplicationHandlers(runtime)
+        registry = VehicleRegistry(runtime, history_capacity=32)
+        registry.running = True
+        for system in range(1, size + 1):
+            registry.accept(MavlinkMessageEnvelope.wrap(system, _VehicleMessage(system)))
+            registry.vehicles.get(system).subscribe("HEARTBEAT", lambda event: None)
+        envelope = MavlinkMessageEnvelope.wrap(size + 1, _VehicleMessage(1))
+        cases.append(BenchmarkCase(
+            "MAVLink", f"source routing with {size} vehicles",
+            lambda registry=registry, envelope=envelope: registry.accept(envelope),
+            max(100, base_iterations // 5), registry.close,
+        ))
+    return cases
+
+
 def build_cases(base_iterations: int) -> list[BenchmarkCase]:
     """Create benchmarks ordered from general primitives to domain features."""
+    from src.core.events import CallbackSubscription
+    callback = CallbackSubscription(1, lambda: None, lambda event: None)
+    hooked = CallbackSubscription(2, lambda: None, lambda event: None,
+        predicate=lambda event: True, on_before=lambda context: None,
+        on_success=lambda context: None, on_after=lambda context: None)
+    disabled = CallbackSubscription(3, lambda: None, lambda event: None, enabled=False)
 
     model = _BenchmarkModel(
         "parent",
@@ -287,6 +327,9 @@ def build_cases(base_iterations: int) -> list[BenchmarkCase]:
 
     return [
         BenchmarkCase("baseline", "function call", lambda: None, base_iterations),
+        BenchmarkCase("events", "callback policy delivery", lambda: callback.invoke(1), base_iterations),
+        BenchmarkCase("events", "callback filter and 3 hooks", lambda: hooked.invoke(1), base_iterations),
+        BenchmarkCase("events", "disabled callback skip", lambda: disabled.invoke(1), base_iterations),
         BenchmarkCase(
             "abstracts",
             "automatic nested model serialization",
@@ -418,7 +461,7 @@ def build_cases(base_iterations: int) -> list[BenchmarkCase]:
             max(100, base_iterations // 20),
             engine.close,
         ),
-    ]
+    ] + _vehicle_cases(base_iterations)
 
 
 async def _build_async_cases(base_iterations: int) -> tuple[

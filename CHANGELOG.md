@@ -4,7 +4,107 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v1.5] - 2026-09-08
+
+### Added
+
+- Added per-registration callback policies and hooks: `frequency_hz`,
+  `max_calls`, `once`, `timeout`, `predicate`, `enabled`, before/success/error/
+  timeout/after hooks and enable/disable controls. MAVLink message subscriptions
+  and lifecycle actions return callable `CallbackSubscription` decorator handles.
+- Move high-level synchronous receive callbacks, predicates and hooks onto one
+  bounded runtime worker. Expose dropped delivery counts and report shutdown
+  timeout for callbacks that do not return. Add policy/hook benchmarks and
+  deterministic slow-consumer, overflow, rate-limit and async timeout tests.
+- Added optional `MessageHistory` and derived `SqliteMessageHistory` storage,
+  attached at runtime through `add_history()`. Both support total retention
+  limits or unlimited recording, source/type/time queries, snapshots and clear.
+  SQLite stores portable JSON and reopens recordings without a live connection.
+  Storage remains caller-owned; registration cancellation and runtime close
+  detach it. Recording errors are surfaced through runtime errors.
+- Added `vehicles.get_component(id)` to retrieve matching components across
+  all discovered vehicles as a tuple snapshot, in both runtime modes.
+- Added source-scoped application handlers with component, vehicle and runtime
+  precedence, cancellation and explicit replacement. Async handlers run on the
+  caller's loop and are tracked through shutdown.
+- Completed async runtime message streams, raw subscriptions, sends, waits and
+  application calls. Added separate lifecycle queue capacity and delivery fault
+  reporting without adding per-vehicle threads.
+- Discover vehicles from autopilot heartbeats and their components from incoming
+  traffic on one shared MAVLink connection. Source-indexed dispatch, bounded
+  per-source telemetry history and one shared liveness monitor keep vehicle
+  count independent of reader/monitor thread count.
+- Added `vehicles.get(id)`, snapshot iteration, `wait_for(timeout=...)` and
+  explicit removal of disconnected endpoints. Reconnection preserves endpoint
+  objects and subscriptions. Component lookup, waits and lifecycle hooks are
+  available directly through each vehicle.
+- Added vehicle/component `subscribe`, `latest`, `history`, message waits,
+  targeted sending, named message-rate requests and application requests.
+  Fleet subscriptions include vehicles discovered after registration, while
+  component discovery and connection hooks live directly on each vehicle.
+- Added named lifecycle actions and string-based `on`, both accepting callbacks
+  or decorators. Subscriptions support cancellation and `once=True`.
+- Added `AsyncMavlinkRuntime` and async vehicle/component scopes. Registration
+  and lookup stay synchronous; waits and transport operations are awaitable.
+  A bounded callback queue uses one consumer on the caller's event loop,
+  reports overflow counts and cancels outstanding deliveries during shutdown.
+- Added multi-source isolation, callback lifecycle, shutdown, reconnect,
+  cancellation and queue overflow tests, plus routing benchmarks at 1, 10 and
+  100 discovered vehicles.
+
+### Changed
+
+- Removed the public vehicle component collection. Use
+  `vehicle.get_component(id)` for one component and `get_components()` for a
+  snapshot. Component waits, removal and discovery/connection hooks now live
+  directly on the vehicle; fleet-wide `vehicles.get_component(id)` is unchanged.
+- `MavlinkRuntime.on()` now registers lifecycle actions, not raw message
+  subscriptions. Replace `runtime.on(message_type, callback)` with
+  `runtime.subscribe(message_type, callback)` for raw messages, or use
+  `vehicle.subscribe(...)` for source-scoped message envelopes.
+- Multi-vehicle applications target discovered vehicle/component objects.
+  The low-level connection/router APIs still expose their shared transport
+  state; their default target and global cache are not per-vehicle state.
+
 ### Fixed
+
+- Serialize synchronous runtime startup and shutdown so close cannot finish
+  while an earlier startup can still reopen the transport. Owned worker threads
+  reject conflicting lifecycle operations instead of waiting on their own join.
+- Snapshot synchronous telemetry subscribers on receipt. Later registrations
+  no longer receive queued older messages, while cancellation is still checked
+  at delivery. Lifecycle actions retain delivery-time registration lookup.
+- Isolate synchronous lifecycle delivery from telemetry overflow. Expose fatal
+  callback-worker exits as runtime faults and reject new operations until restart.
+- Run remaining hooks after ordinary hook failures, report success/cleanup
+  failures to local error hooks, and preserve multiple failures together.
+- Move SQLite commits to a bounded background writer with flush/drain semantics
+  and explicit overflow/disk errors; packet snapshot encoding remains synchronous.
+- Modernize license metadata and align the package version with `1.5` instead
+  of the stale `1.3.1`.
+- Reject same-thread lifecycle re-entry, preventing a nested close during
+  startup from leaving a closed runtime with a live transport.
+- Complete history and runtime registration type annotations, including explicit
+  latest-query parameters and JSON payload types. Validate source IDs, empty
+  message types and invalid time ranges consistently across storage backends.
+- Stop bounded memory history queries after finding enough newest matches,
+  avoiding a full scan and intermediate result list for common latest/tail reads.
+- Keep latest vehicle/component messages independently of bounded history;
+  router latest values are retained per source and message type as well.
+- Reject new async runtime sends and waits consistently after a delivery
+  fault, matching scoped operations. Wake pending scoped waits on fault
+  notification while keeping snapshot lookups available for inspection.
+- Make discovered identity fields read-only so commands cannot diverge from
+  the source registry. Reselect connected autopilots after removal or timeout.
+- Isolate callback cancellation from the shared async consumer. Keep telemetry
+  overflow separate from lifecycle delivery; action overflow now faults visibly.
+- Resolve queued lifecycle callbacks in delivery order so discovery callbacks
+  can install the following connection and component hooks.
+- Make concurrent close callers wait for cleanup in both runtime modes and
+  protect shared async shutdown from caller cancellation.
+- Cover source-handler precedence, async API parity, cancellation, identity,
+  autopilot selection, discovery overflow and concurrent shutdown with tests.
+- Preserve the heartbeat consumed during connection setup for vehicle discovery.
 
 - Run event history predicates outside the history lock against a stable
   snapshot. Predicates can now append or clear history without invalidating
@@ -384,6 +484,9 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.5...HEAD
+[v1.5]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.4...v1.5
+[v1.4]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.3.1...v1.4
 [v1.3.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.3...v1.3.1
 [v1.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.2...v1.3
 [v1.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.1.1...v1.2

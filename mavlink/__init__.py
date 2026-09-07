@@ -9,6 +9,7 @@ if __package__ == "mavlink":
     __all__: list[str] = []
 else:
     from .cache import MessageCache
+    from .history import MessageHistory, MessageRecord, SqliteMessageHistory
     from .channel import MavlinkAsyncChannel
     from .application import (
         DEFAULT_APPLICATION_MESSAGE_TYPE,
@@ -49,8 +50,23 @@ else:
     )
     from .router import MavlinkMessageRouter, MavlinkRouterError, MavlinkRouterStats
     from .runtime import MavlinkRuntime, MavlinkRuntimeError, MavlinkRuntimeState
+    from .async_runtime import AsyncMavlinkRuntime
+    from .actions import MavlinkAction
+    from .vehicles import (
+        MavlinkVehicle, MavlinkComponent, MavlinkCollection, MavlinkVehicleState,
+        AsyncMavlinkVehicle, AsyncMavlinkComponent, AsyncMavlinkCollection,
+    )
 
     __all__ = [
+        "AsyncMavlinkRuntime",
+        "MavlinkAction",
+        "MavlinkVehicle",
+        "MavlinkComponent",
+        "MavlinkCollection",
+        "MavlinkVehicleState",
+        "AsyncMavlinkVehicle",
+        "AsyncMavlinkComponent",
+        "AsyncMavlinkCollection",
         "MavlinkAsyncChannel",
         "MavlinkApplicationAssembler",
         "MavlinkApplicationChannel",
@@ -85,6 +101,9 @@ else:
         "MavlinkRuntimeError",
         "MavlinkRuntimeState",
         "MessageCache",
+        "MessageHistory",
+        "MessageRecord",
+        "SqliteMessageHistory",
         "REMOTE_LOG_MAX_BATCH_BYTES",
         "REMOTE_LOG_MAX_BATCH_RECORDS",
         "REMOTE_LOG_MAX_DETAILS_BYTES",

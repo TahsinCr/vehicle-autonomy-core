@@ -97,6 +97,7 @@ class MavlinkConnection(Service):
                 self._publish_error(exc)
                 raise
             self._connection = connection
+            self.initial_heartbeat = heartbeat
         self.connection_changed.publish(True)
 
     def _wait_vehicle_heartbeat(self, connection: Any) -> Any:

@@ -21,6 +21,7 @@ else:
     from .filtering import EventFilter
     from .history import EventHistory, MemoryEventHistory
     from .subscription import AsyncSubscription, Subscription
+    from .callback import CallbackContext, CallbackSubscription
 
     __all__ = [
         "AsyncEventBus",
@@ -44,4 +45,6 @@ else:
         "MemoryEventHistory",
         "PublishResult",
         "Subscription",
+        "CallbackContext",
+        "CallbackSubscription",
     ]

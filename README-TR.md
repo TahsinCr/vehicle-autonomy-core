@@ -165,6 +165,10 @@ değişmeden `vehicle_stack.core` gibi başka bir üst paket altında da açıla
 | `mavlink/dispatch.py` | sınırlı application handler çalıştırma |
 | `mavlink/remote_log.py` | doğrulanan remote-log kayıt ve batch modelleri |
 | `mavlink/runtime.py` | üst seviye yaşam döngüsü ve mesajlaşma facade'ı |
+| `mavlink/async_runtime.py` | ortak taşıma üzerinde async yaşam döngüsü |
+| `mavlink/vehicles.py` | keşfedilen araçlar, component'ler ve kaynak bazlı yönlendirme |
+| `mavlink/actions.py` | decorator aksiyonları ve sınırlı async callback teslimi |
+| `mavlink/handlers.py` | kaynağa özel application handler'ları ve async görev sahipliği |
 | `mavlink/protocols.py` | uyumlu MAVLink mesajları için structural type'lar |
 
 `dependency/annotations.py`, `dependency/resolution.py`,
@@ -777,7 +781,7 @@ endpoint = MavlinkEndpoint.udp(
 )
 
 with MavlinkRuntime(endpoint) as mavlink:
-    subscription = mavlink.on(
+    subscription = mavlink.subscribe(
         ("HEARTBEAT", "GLOBAL_POSITION_INT"),
         lambda message: print(message.to_dict()),
     )
@@ -796,6 +800,276 @@ başlatır. `stop()` ters sırada kapatır ve bütün cleanup hatalarını korur
 `reconnect()` tam stop/start yapar. `state`, taşıma, application peer ve router
 bilgisini birleştirir; yaşam döngüsü hataları `runtime.errors` üzerinden gelir.
 
+### Çoklu araç ve component yönetimi
+
+Senkron callback için `MavlinkRuntime`, async callback için
+`AsyncMavlinkRuntime` kullanılır. İkisi de bağlantı başına tek receive thread'i
+kullanır. Araç keşfi autopilot heartbeat'i gerektirir; GCS veya yalnızca companion
+olan sistemler araç kaydı oluşturmaz. Tanınan aracın component'leri gelen
+mesajlardan keşfedilir. Aynı bağlantıdaki araçların system ID'leri farklı olmalıdır.
+
+```python
+link = MavlinkRuntime(endpoint, heartbeat_timeout=5.0, vehicle_history=128)
+
+@link.vehicles.on_added
+def discovered(event):
+    print("Araç keşfedildi:", event.vehicle.system_id)
+
+@link.vehicles.subscribe("GLOBAL_POSITION_INT")
+def position(event):
+    print(event.source_system, event.source_component, event.message.lat)
+
+with link:
+    vehicle = link.vehicles.wait_for(timeout=5.0)
+    if vehicle is not None:
+        vehicle.request_message_rate("GLOBAL_POSITION_INT", frequency_hz=10)
+        component = vehicle.get_component(1)
+        if component is not None:
+            subscription = component.subscribe("HEARTBEAT", print)
+            subscription.cancel()
+```
+
+İlk keşfi yakalamak için callback'leri context'e girmeden kaydedin.
+İsteğe bağlı kayıt için `MessageHistory` veya ondan türeyen
+`SqliteMessageHistory` kullanılabilir. `latest()` artık geçmişten bağımsızdır;
+her mesaj türünün son değerini tutar (router'da kaynak/tür başına). Bu değer
+eski olabilir; bağlantı durumunu ve zaman damgasını ayrıca kontrol edin.
+
+```python
+from src.core.mavlink import MessageHistory, SqliteMessageHistory
+
+with SqliteMessageHistory("telemetry.sqlite3", limit=None) as history:
+    with MavlinkRuntime(endpoint) as link:
+        recording = link.add_history(history)
+        # Uygulamanın mesaj alma/bekleme akışı burada çalışır.
+        rows = history.query(system_id=12, component_id=1,
+                             message_type="ATTITUDE", limit=20)
+        last = history.latest(system_id=12, message_type="ATTITUDE")
+        recording.cancel()
+```
+
+Bellekte kayıt için `MessageHistory(limit=1000)` kullanılır. İki sınıfta da
+varsayılan sınır toplam 1000 kayıttır; `None` sınırsızdır. SQLite sınırı önceki
+oturumlardaki kayıtları da kapsar. `query()` eskiden yeniye, bağımsız JSON
+payload taşıyan `MessageRecord` nesneleri döndürür. Kaynak/tür filtrelerine
+ek olarak `since`/`until` dahil Unix zaman sınırlarıdır. Sorgudaki `limit`, en
+yeni eşleşen N kaydı seçer. `clear()` bütün kayıtları siler. Mesajlar JSON
+uyumlu `to_dict()` sağlamalıdır.
+Bellekte son N sorgusu yeterli eşleşmeyi bulunca durur; eşleşme yoksa tüm
+geçmiş taranabilir. SQLite filtre ve limiti SQL içinde uygular. Kaynak ID'leri
+0..255 arası tamsayı, zaman sınırları sonlu ve sıralı olmalıdır; mesaj türü
+boş bırakılamaz.
+
+`add_history` iki modda da senkrondur; çalışma sırasında eklenebilir ve yalnızca
+sonraki trafiği kaydeder. Dönen abonelik iptal edilebilir. Runtime kapanırken
+kayıt ayrılır; depolamayı kapatmak uygulamanın sorumluluğudur. Başka backend
+için `MessageHistory` sınıfından türetilebilir. Kayıt hataları runtime'a
+`history` kaynağıyla bildirilir. SQLite commit'leri ayrı yazıcı thread'indedir.
+`queue_capacity=1024` bekleyen yazıları sınırlar. Taşmada yeni kayıt reddedilir
+ve `recording_error` ayarlanır; disk hataları bu alandan ve `flush()`, sorgu,
+`close()` çağrılarından görülür. Mesaj akışı bitse bile bu hatalar kontrol
+edilmelidir. `flush(timeout=5.0)` önceden kabul edilmiş kayıtları bekler; sorgu
+ve clear önce flush yapar, close yazıcıyı boşaltıp kapatır. JSON snapshot
+üretimi alım sırasında yapılır; özel yavaş serializer okuyucuyu geciktirebilir.
+Sınırlı kuyruk sınırsız yükte kayıpsız kayıt garantisi vermez.
+Sınırsız kullanımda bellek/disk izlenmelidir. Mevcut
+`vehicle.history()` kısa tanılama tamponu olarak kalır; bu kayıttan bağımsızdır.
+
+`vehicles.get(12)` var olan nesneyi döndürür, yoksa `None` verir; nesne üretmez.
+`wait_for(timeout=...)` erişilebilir ilk aracı bekler, timeout veya runtime
+kapanışında `None` döndürür; ID kabul etmez. `vehicle.get_component(id)` tek
+component veya `None`, `vehicle.get_components()` tuple snapshot döndürür.
+`vehicle.wait_for_component(timeout=...)` bağlı component bekler; async modda
+await edilir. `remove_component(id)` bağlantısı kesilmiş component'i kaldırır.
+`on_component_added`, `on_component_removed`, `on_component_connected` ve
+`on_component_disconnected` doğrudan araç üzerindedir; callback veya decorator
+olarak kullanılabilir. İterasyon snapshot kullanır:
+
+```python
+for vehicle in link.vehicles:
+    vehicle.request_message_rate("ATTITUDE", frequency_hz=10)
+```
+
+`link.vehicles`, tek araç veya tek component üzerinden
+abonelik açılabilir. Callback, ilgili kaynağın `MavlinkMessageEnvelope` nesnesini
+alır. Koleksiyon abonelikleri sonradan keşfedilen kaynakları da kapsar.
+Decorator ve doğrudan kayıt çağrılabilir `CallbackSubscription` döndürür. `cancel()`
+her iki modda da senkrondur. `once=True` aboneliği teslim sırasında tüketir.
+`latest(type)` ve `history(type=None)` kaynağa özel mesaj zarflarını döndürür;
+`wait_for(type, timeout=...)` yeni mesaj bekler. Her araç ve component için
+geçmiş ayrı tutulur ve `vehicle_history` ile sınırlanır.
+
+```python
+@vehicle.on_disconnected(once=True)
+def disconnected(event):
+    print(event.vehicle.system_id)
+
+vehicle.on("error", lambda event: print(event.error))
+```
+
+Runtime: `on_start`, `on_stop`, `on_error`. Araç/component: `on_connected`,
+`on_disconnected`, `on_error`. Araç koleksiyonu `on_added` ve `on_removed`
+sunar; component keşif, kaldırma ve bağlantı callback'leri aracın
+`on_component_*` metotlarıyla kaydedilir. Aksiyonlar `MavlinkAction` alır;
+uygun olduğunda `source`, `vehicle`, `component`, `error` alanları doludur.
+İsimli aksiyonlar ve genel `on()` hem callback hem decorator kabul eder.
+
+Heartbeat kesilince nesne silinmez, disconnected olur. Yeniden heartbeat
+geldiğinde aynı nesne ve abonelikler kullanılır. Araç canlılığı en az bir
+component'ten heartbeat gelmesini ifade eder; araç üzerinden hedefli gönderim
+ayrıca canlı ve keşfedilmiş autopilot gerektirir. `remove(id)` yalnızca bağlantısı
+kesilmiş kayıtlarda çalışır ve aboneliklerini kapatır. Component üzerinden
+gönderim o bileşeni; araç üzerinden gönderim keşfedilen autopilot'u hedefler.
+`send_named()` target alanları olan mesajlar içindir; dışarıdan hedef ezilmesine
+izin vermez. `notify()` ve `request()` yapılandırılmış application peer'i açık
+hedef ve yanıt kaynak eşleştirmesiyle kullanır. Ortak peer durumu ve router cache'i
+bağlantı seviyesindedir; araca özel durum yerine kullanılmamalıdır.
+
+`send(message)`, hedef alanları olan mesajın kopyasını hedefleyip gönderir;
+kullanıcının verdiği mesaj nesnesini değiştirmez.
+
+```python
+from src.core.mavlink import AsyncMavlinkRuntime
+
+async def receive_positions(endpoint):
+    link = AsyncMavlinkRuntime(endpoint, delivery_capacity=1024)
+
+    @link.vehicles.subscribe("GLOBAL_POSITION_INT")
+    async def position(event):
+        print(event.source_system, event.message.lat)
+
+    async with link:
+        vehicle = await link.vehicles.wait_for(timeout=5.0)
+        if vehicle is not None:
+            await vehicle.request_message_rate("GLOBAL_POSITION_INT", 10)
+            message = await vehicle.wait_for("GLOBAL_POSITION_INT", timeout=5.0)
+            print(message)
+```
+
+Tüm keşfedilmiş araçlarda aynı component ID'sini aramak için
+`link.vehicles.get_component(1)` kullanılır. Mevcut component nesnelerinin
+tuple snapshot'ını döndürür; eşleşme yoksa sonuç `()` olur. Bağlantısı kesilmiş
+component'ler de dahildir. Araç kimliği `component.system_id`, bağlantı durumu
+`component.state.connected` üzerinden okunur. Bu sorgu iki modda da senkrondur:
+
+```python
+for component in link.vehicles.get_component(1):
+    if component.state.connected:
+        print(component.system_id, component.component_id)
+```
+
+`.aio` yoktur; keşfedilen nesneler runtime'ın modunu izler. Async modda get,
+abonelik kaydı ve iptali senkron kalır; wait, gönderim, application request ve
+yaşam döngüsü işlemleri await edilir. Bloklayan taşıma işlemleri loop'un ortak
+executor'ünü kullanır. Async callback'ler tek tüketiciyle çalışır; thread'den
+loop'a bildirimler birleştirilir. Telemetri ve yaşam döngüsü aksiyonlarının
+sınırlı kuyrukları ayrıdır. Telemetri kuyruğu dolduğunda en eski callback
+bırakılır; sayı `link.dropped_callbacks` ile okunur. Aksiyonlar öncelikli ve
+sıralıdır: `on_added` içinde aynı keşif için `on_connected` veya component
+keşif callback'i kaydedilebilir. `action_capacity` varsayılan olarak 1024'tür.
+Bu kapasite de dolarsa `link.delivery_error` ayarlanır, `link.running` false
+olur ve `on_error` üzerinden hata bildirilir. Kurtarma için stop/start gerekir;
+yoğun keşif trafiğinde kapasite artırılabilir.
+Hata durumunda runtime ve araç/component üzerinden yeni gönderim, request ve
+wait çağrıları, asıl teslim hatasını neden olarak taşıyan `RuntimeError` verir.
+Bekleyen araç/component wait'leri loop hata bildirimini işlediğinde uyanır.
+Snapshot sorguları ve geçmiş okunabilir kalır. Başlamış bloklayan taşıma
+işlemleri geri alınamaz; ham mesaj wait'i alttaki bekleme döndüğünde hatayı
+görür. Doğrudan düşük seviyeli client/connection kullanımı runtime'ın hata
+kontrolünü atlar.
+Yavaş callback diğer callback'leri geciktirir fakat socket okuyucusunu bekletmez.
+Mesaj ve keşif wait'leri callback kuyruğundan bağımsız uyanır.
+
+Async taşıma çağrısının iptali gönderilmiş mesajı geri alamaz. Başlamış bir
+bloklayan application request, timeout veya peer kapanışına kadar sürebilir.
+
+Stop sırasında bekleyen callback'ler bırakılır ve restart'ta tekrar teslim
+edilmez. Çalışan handler iptal edilir; iptale yanıt vermiyorsa kapanış açık
+timeout hatası verir. Runtime start/stop hook'ları doğrudan await edilir.
+Telemetri alıcıları mesaj geldiğinde sabitlenir; sonradan
+eklenen abonelik kuyruktaki eski mesajı almaz. İptal edilenler teslimde atlanır.
+Keşif hook'larının sonraki bağlantı hook'larını kurabilmesi için yaşam döngüsü
+aksiyonları alıcılarını teslim anında belirlemeye devam eder.
+Senkron start/stop işlemleri sıralanır; close açılış bitmeden kaynakları kapatmaz.
+Sahip olunan thread'lerden çakışan yaşam döngüsü çağrıları, kendi kapanışlarını
+bekleyerek kilitlenmek yerine açık hata verir.
+
+Üst seviye senkron mesaj/keşif callback'leri, predicate ve hook'lar receive
+thread'inde değil, ortak tek callback worker'ında çalışır. `callback_capacity`
+(varsayılan 1024) bekleyen telemetri teslimlerini sınırlar; dolunca en eski
+telemetri bırakılır ve `dropped_callbacks` artar. Aksiyonların ayrı FIFO sınırı
+`callback_action_capacity=1024` olur; telemetri keşif bildirimlerini düşüremez.
+Aksiyon taşması veya worker'ın beklenmedik çıkışı `delivery_error` üretir ve
+`running` false olur; kurtarma için stop/start gerekir.
+Yavaş callback diğer callback'leri geciktirir;
+okuyucunun kuyruğa teslimi callback'in bitmesini beklemez. Stop bekleyenleri
+bırakır. Çalışan senkron fonksiyon zorla kesilemez; dönmezse kapanış timeout
+bildirir. Açık start/stop/remove hook'ları yaşam döngüsünü çağıran thread'dedir.
+Düşük seviye router/EventBus abonelikleri ve senkron history yazımı bu worker
+garantisine dahil değildir; yayını yapan thread'de çalışmaya devam eder.
+
+Abonelikte `once`, `max_calls`, `frequency_hz`, `timeout`, `predicate` ve
+`enabled` ayarlanabilir. `frequency_hz` üst sıklık sınırıdır, döngü başlatmaz;
+aradaki olaylar atlanır. Devre dışı, filtrelenen veya sıklık sınırına takılan
+olaylar çağrı sayısını tüketmez. `once` ve `max_calls` birlikte verilemez.
+
+```python
+@vehicle.subscribe("ATTITUDE", frequency_hz=10, timeout=0.5, max_calls=100)
+def attitude(event):
+    print(event.message)
+
+@attitude.on_error
+def failed(context):
+    print(context.error)
+
+attitude.on_success(lambda context: print("işlendi"))
+attitude.disable()
+attitude.enable()
+```
+
+`on_before`, `on_success`, `on_error`, `on_timeout`, `on_after` kayıt sırasında
+parametre veya sonradan metot/decorator olarak eklenir. `CallbackContext`
+içinde `event`, `result`, `error` ve saniye cinsinden `elapsed` bulunur.
+Async kayıtta callback/hook'lar async olmalıdır. Senkron timeout fonksiyon
+döndükten sonra ölçülür; async timeout iptal talep eder. Hook'ların ayrı süre
+sınırı yoktur. Bloklayan async kod ve iptali reddeden kod zorla durdurulamaz.
+`on_after` kabul edilen çağrının temizliğinde çalışır; atlanan olaylarda hook
+çalışmaz. Decorator sonucunu doğrudan çağırmak, ayarları uygulamadan orijinal
+fonksiyonu çağırır.
+Normal hook hataları aynı gruptaki sonraki hook'ları atlatmaz. Success ve
+cleanup hataları yerel error hook'larına ulaşır; birden fazla hata exception
+group içinde korunur. İptal sinyali yayılmaya devam eder.
+
+Keşfedilen nesnelerin kimlik alanları salt okunurdur. Seçili autopilot component
+silindiğinde veya timeout olduğunda bağlı diğer autopilot seçilir. Eşzamanlı
+`close()` çağrıları aynı temizliğin tamamlanmasını bekler. Async çağıranın
+iptali ortak kapanış işlemini iptal etmez.
+
+Application handler'ları `@link.handle("command.name")`,
+`@vehicle.handle("command.name")` veya `@component.handle("command.name")`
+ile kaydedilir. Seçim önceliği component, araç, sonra runtime'dır. Callback
+doğrudan verildiğinde iptal edilebilir abonelik döner; aynı kaydı değiştirmek
+için `replace=True` gerekir. Araç başına worker havuzu açılmaz, sınırlı
+application dispatcher paylaşılır. Senkron runtime'da normal fonksiyon,
+async runtime'da `async def` kullanılır. Async application handler'ları runtime
+loop'unda çalışır; kapanışta iptal edilir ve tamamlanmaları beklenir.
+
+Async runtime'daki `send`, `send_named`, `notify`, `request` ve ham mesaj
+`wait_for` çağrıları await edilir. `messages`, `packets` ve `errors` birer
+`AsyncEventBus` nesnesidir: `await link.messages.subscribe(callback)` kullanılır.
+Üst seviye `link.subscribe(...)` ve araç/component abonelik kayıtları ise
+senkrondur; decorator ve `once=True` destekler.
+
+`with` / `async with` ortak bağlantıyı ve sahip olunan servisleri kapatır;
+araç nesneleri için ayrı bağlantı açmak/kapatmak gerekmez. Runtime başlangıcı
+ilk heartbeat el sıkışmasını beklemeye devam eder; bu süre endpoint üzerindeki
+`heartbeat_timeout` ile belirlenir.
+
+Geçiş: `runtime.on(message_type, callback)` yerine
+`runtime.subscribe(message_type, callback)` kullanın. `on()` artık yaşam döngüsü
+aksiyonları içindir. Çoklu araçta varsayılan connection hedefi ve ortak cache
+yerine araç/component kapsamındaki işlemleri kullanın.
+
 ### Filtre, geçmiş ve gönderim
 
 ```python
@@ -809,7 +1083,7 @@ position_filter = MavlinkMessageFilter.for_types(
     predicate=lambda message: message.relative_alt >= 0,
 )
 
-subscription = mavlink.on(position_filter, print)
+subscription = mavlink.subscribe(position_filter, print)
 mavlink.send_named(
     "command_long_send",
     target_system=1,
