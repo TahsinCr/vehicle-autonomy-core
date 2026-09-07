@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Run event history predicates outside the history lock against a stable
+  snapshot. Predicates can now append or clear history without invalidating
+  iteration, and slow predicates do not hold up other history writers.
+  Filtered reads copy the retained history for consistency; unfiltered limited
+  reads keep their bounded-copy fast path.
+
 ## [v1.4] - 2026-09-07
 
 ### Added

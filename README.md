@@ -390,6 +390,10 @@ timeout. Replay is a strict subscription boundary: matching live events that
 arrive during replay are delivered afterwards, so they cannot overtake history.
 For hot paths, pass `limit=` to `query()` so the backward scan stops as soon as
 enough recent matches have been found.
+Filtered reads first snapshot the retained history, then evaluate predicates
+outside its lock. Concurrent writes or changes made by a predicate do not
+alter that snapshot. The copy costs memory proportional to history size even
+with `limit=`; unfiltered limited reads copy only the requested tail.
 
 `publish_every(event, interval, times=...)` publishes the same event on a
 daemon schedule and returns a cancellable `Subscription`. A bus accepts at

@@ -15,6 +15,7 @@ dist/
 *.egg-info/
 
 data/
+.serena
 
 .idea/
 .vscode/

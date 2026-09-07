@@ -116,7 +116,7 @@ class EventBusTests(unittest.TestCase):
         bus.subscribe(replayed.append, replay=2)
         self.assertEqual(replayed, [3, 4])
 
-    def test_limited_history_reads_do_not_copy_the_complete_buffer(self) -> None:
+    def test_unfiltered_limited_history_reads_do_not_copy_the_complete_buffer(self) -> None:
         class NoFullIterationDeque(deque[int]):
             def __iter__(self):  # type: ignore[override]
                 raise AssertionError("limited reads copied the complete history")
@@ -126,16 +126,60 @@ class EventBusTests(unittest.TestCase):
             range(10_000),
             maxlen=10_000,
         )
-        divisible_by_seven = EventFilter[int](
-            predicate=lambda value: value % 7 == 0
-        )
-
         self.assertEqual(history.query(limit=2), (9_998, 9_999))
-        self.assertEqual(
-            history.query(divisible_by_seven, limit=2),
-            (9_989, 9_996),
-        )
-        self.assertEqual(history.latest(divisible_by_seven), 9_996)
+
+    def test_history_predicates_can_mutate_history_without_changing_snapshot(self) -> None:
+        for operation in ("latest", "limited", "all"):
+            with self.subTest(operation=operation):
+                history = MemoryEventHistory[int](3)
+                for value in range(3):
+                    history.append(value)
+
+                def predicate(value: int) -> bool:
+                    history.clear()
+                    history.append(99)
+                    return value == 0
+
+                event_filter = EventFilter(predicate=predicate)
+                if operation == "latest":
+                    self.assertEqual(history.latest(event_filter), 0)
+                else:
+                    limit = 1 if operation == "limited" else None
+                    self.assertEqual(history.query(event_filter, limit=limit), (0,))
+                self.assertEqual(history.query(), (99,))
+
+    def test_history_predicates_do_not_block_another_writer(self) -> None:
+        for operation in ("latest", "limited", "all"):
+            with self.subTest(operation=operation):
+                history = MemoryEventHistory[int](2)
+                history.append(1)
+                entered = threading.Event()
+                written = threading.Event()
+
+                def writer() -> None:
+                    if entered.wait(2.0):
+                        history.append(2)
+                        written.set()
+
+                def predicate(value: int) -> bool:
+                    entered.set()
+                    self.assertTrue(written.wait(2.0), "predicate holds history lock")
+                    return True
+
+                thread = threading.Thread(target=writer)
+                thread.start()
+                try:
+                    event_filter = EventFilter(predicate=predicate)
+                    if operation == "latest":
+                        self.assertEqual(history.latest(event_filter), 1)
+                    else:
+                        limit = 1 if operation == "limited" else None
+                        self.assertEqual(history.query(event_filter, limit=limit), (1,))
+                finally:
+                    entered.set()
+                    thread.join(3.0)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(history.query(), (1, 2))
 
     def test_live_publish_waits_behind_subscription_replay(self) -> None:
         bus = EventBus[int](history=4)

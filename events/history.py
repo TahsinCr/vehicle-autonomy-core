@@ -57,14 +57,11 @@ class MemoryEventHistory(EventHistory[T]):
         with self._lock:
             if event_filter is None:
                 return self._events[-1] if self._events else None
-            return next(
-                (
-                    event
-                    for event in reversed(self._events)
-                    if event_filter.matches(event)
-                ),
-                None,
-            )
+            events = tuple(self._events)
+        return next(
+            (event for event in reversed(events) if event_filter.matches(event)),
+            None,
+        )
 
     def query(
         self,
@@ -81,20 +78,17 @@ class MemoryEventHistory(EventHistory[T]):
                 recent = list(islice(reversed(self._events), limit))
                 recent.reverse()
                 return tuple(recent)
-            if limit is None:
-                return tuple(
-                    event
-                    for event in self._events
-                    if event_filter.matches(event)
-                )
-            matched: list[T] = []
-            for event in reversed(self._events):
-                if event_filter.matches(event):
-                    matched.append(event)
-                    if len(matched) == limit:
-                        break
-            matched.reverse()
-            return tuple(matched)
+            events = tuple(self._events)
+        if limit is None:
+            return tuple(event for event in events if event_filter.matches(event))
+        matched: list[T] = []
+        for event in reversed(events):
+            if event_filter.matches(event):
+                matched.append(event)
+                if len(matched) == limit:
+                    break
+        matched.reverse()
+        return tuple(matched)
 
     def clear(self) -> None:
         with self._lock:

@@ -387,6 +387,11 @@ Replay kesin bir abonelik sınırıdır: replay sırasında gelen eşleşen canl
 event'ler geçmişin önüne geçmez, replay bittikten sonra teslim edilir.
 Sıcak kod yollarında `query()` için `limit=` verilirse geriye doğru tarama,
 yeterli sayıda güncel eşleşme bulunduğu anda durur.
+Filtreli okumalar önce saklanan geçmişin snapshot'ını alır, ardından predicate'i
+kilit dışında çalıştırır. Eşzamanlı yazmalar veya predicate'in yaptığı
+değişiklikler bu snapshot'ı değiştirmez. `limit=` verilse de snapshot maliyeti
+geçmiş boyutuyla orantılıdır; filtresiz sınırlı okumalar yalnızca istenen son
+kayıtları kopyalar.
 
 `publish_every(event, interval, times=...)` aynı event'i daemon bir schedule
 üzerinde yayınlar ve iptal edilebilir bir `Subscription` döndürür. Bir bus
