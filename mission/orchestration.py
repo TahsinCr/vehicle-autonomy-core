@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
+
+from ..compatibility import ExceptionGroup
 
 from .background import MissionBackgroundExecutor
 from .chain import MissionChainExecutor
@@ -59,3 +62,16 @@ class MissionOrchestrator:
         self.chains.clear()
         self.parallel.clear()
         self.background.clear()
+
+    @staticmethod
+    def run_all(operations: Iterable[Callable[[], object]], message: str) -> None:
+        """Attempt every lifecycle command and report all failures together."""
+
+        errors: list[Exception] = []
+        for operation in operations:
+            try:
+                operation()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup(message, errors)

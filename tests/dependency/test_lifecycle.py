@@ -12,6 +12,7 @@ from src.core.dependency import (
     get_current_container,
     set_default_container,
 )
+from src.core.dependency.registration import InitializationGate
 from src.core.compatibility import ExceptionGroup
 
 
@@ -113,6 +114,52 @@ class DependencyLifecycleTests(unittest.TestCase):
 
         self.assertEqual(closed, ["scoped"])
         self.assertEqual(resource.close_count, 1)
+
+    def test_scope_shutdown_closes_resources_registered_on_that_scope(self) -> None:
+        resource = _SyncResource("local", [])
+        scope = DependencyContainer().create_scope()
+        scope.instance("local", resource)
+
+        scope.shutdown()
+
+        self.assertEqual(resource.close_count, 1)
+
+    def test_unregister_waits_for_inflight_singleton_and_closes_it(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        resource = _SyncResource("inflight", [])
+
+        def factory() -> _SyncResource:
+            entered.set()
+            self.assertTrue(release.wait(1.0))
+            return resource
+
+        container = DependencyContainer()
+        container.singleton("resource", factory=factory)
+        resolver = threading.Thread(target=container.resolve, args=("resource",))
+        resolver.start()
+        self.assertTrue(entered.wait(1.0))
+
+        unregister_done = threading.Event()
+        unregister = threading.Thread(
+            target=lambda: (container.unregister("resource"), unregister_done.set())
+        )
+        unregister.start()
+        self.assertFalse(unregister_done.wait(0.02))
+        release.set()
+        resolver.join(1.0)
+        unregister.join(1.0)
+
+        self.assertTrue(unregister_done.is_set())
+        self.assertEqual(resource.close_count, 1)
+        self.assertFalse(container.has("resource"))
+
+    def test_sync_wait_rejects_async_initializer_on_same_thread(self) -> None:
+        gate = InitializationGate()
+        self.assertTrue(gate.claim(asynchronous=True))
+        with self.assertRaisesRegex(RuntimeError, "event-loop thread"):
+            gate.wait()
+        gate.release()
 
     def test_sync_unregister_rejects_async_only_cleanup_explicitly(self) -> None:
         resource = _AsyncResource("async", [])
@@ -339,6 +386,52 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(container.resolve("resource"), resource)
         await container.shutdown_async()
         self.assertEqual(resource.close_count, 1)
+
+    async def test_cancelled_shutdown_still_attempts_remaining_resources(self) -> None:
+        entered = asyncio.Event()
+
+        class _SlowResource:
+            async def aclose(inner_self) -> None:
+                entered.set()
+                await asyncio.Event().wait()
+
+        closed: list[str] = []
+        container = DependencyContainer()
+        container.instance("remaining", _AsyncResource("remaining", closed))
+        container.instance("slow", _SlowResource())
+
+        shutdown = asyncio.create_task(container.shutdown_async())
+        await asyncio.wait_for(entered.wait(), 1.0)
+        shutdown.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(shutdown, 1.0)
+
+        self.assertEqual(closed, ["remaining"])
+
+    async def test_cancelled_unregister_cleans_inflight_resource(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        closed: list[str] = []
+
+        async def factory() -> _AsyncResource:
+            started.set()
+            await release.wait()
+            return _AsyncResource("inflight", closed)
+
+        container = DependencyContainer()
+        container.singleton("resource", factory=factory)
+        resolution = asyncio.create_task(container.resolve_async("resource"))
+        await asyncio.wait_for(started.wait(), 1.0)
+        unregister = asyncio.create_task(container.unregister_async("resource"))
+        await asyncio.sleep(0)
+        unregister.cancel()
+        release.set()
+
+        await resolution
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(unregister, 1.0)
+        self.assertEqual(closed, ["inflight"])
+        self.assertFalse(container.has("resource"))
 
 
 if __name__ == "__main__":

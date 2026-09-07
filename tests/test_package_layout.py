@@ -90,6 +90,12 @@ class ProjectMetadataTests(unittest.TestCase):
         self.assertIn("dependencies = []", metadata)
         self.assertIn('mavlink = ["pymavlink>=2.4"]', metadata)
 
+    def test_development_runners_live_at_repository_root(self) -> None:
+        self.assertTrue((ROOT / "run_tests.py").is_file())
+        self.assertTrue((ROOT / "run_benchmarks.py").is_file())
+        self.assertFalse((ROOT / "tests" / "run.py").exists())
+        self.assertFalse((ROOT / "benchmarks").exists())
+
     def test_repository_contains_no_legacy_project_spelling(self) -> None:
         searchable_suffixes = {".md", ".py", ".toml"}
         legacy_spelling = "auth" + "onomy"

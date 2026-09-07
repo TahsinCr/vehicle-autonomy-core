@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 
+from src.core.compatibility import ExceptionGroup
 from src.core.mission import (
     BackgroundFailurePolicy,
     Mission,
@@ -12,10 +13,12 @@ from src.core.mission import (
     MissionEngine,
     MissionEventType,
     MissionNode,
+    MissionNotFoundError,
     MissionParallelGroup,
     MissionParallelStage,
     MissionPhase,
     MissionRetryPolicy,
+    MissionScheduler,
     OwnerTerminationPolicy,
     ParallelFailurePolicy,
 )
@@ -293,6 +296,34 @@ class MissionOrchestrationTests(unittest.TestCase):
         self.assertIs(finished.phases["blocker"], MissionPhase.CANCELLED)
         self.assertTrue(finished.failed)
 
+    def test_early_parallel_failure_cancels_registered_sibling(self) -> None:
+        class OrderedScheduler(MissionScheduler):
+            def launch(self, mission: object, **options: object):
+                snapshot = super().launch(mission, **options)  # type: ignore[arg-type]
+                if isinstance(mission, FailingMission):
+                    self.engine._runtime(mission).worker.join(1.0)
+                return snapshot
+
+        with MissionEngine(
+            scheduler=OrderedScheduler(),
+            scheduler_interval=0.001,
+        ) as engine:
+            run = engine.start_parallel(
+                MissionParallelGroup(
+                    "early-failure",
+                    (FailingMission, NeverStartedMission),
+                    ParallelFailurePolicy.CANCEL_REMAINING,
+                )
+            )
+            finished = engine.wait_parallel(run.execution_id, 1.0)
+
+        self.assertIsNotNone(finished)
+        self.assertIs(
+            finished.phases["NeverStartedMission"],  # type: ignore[union-attr]
+            MissionPhase.CANCELLED,
+        )
+        self.assertFalse(NeverStartedMission.started.is_set())
+
     def test_wait_all_keeps_siblings_running_until_each_is_terminal(self) -> None:
         blocker = IdleMission()
 
@@ -336,6 +367,101 @@ class MissionOrchestrationTests(unittest.TestCase):
 
         self.assertTrue(finished.stopped)
         self.assertTrue(all(phase is MissionPhase.STOPPED for phase in finished.phases.values()))
+
+    def test_parallel_stop_attempts_every_child_and_can_be_retried(self) -> None:
+        class StuckMission(IdleMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release = threading.Event()
+
+            def start(self) -> None:
+                self.started.set()
+                self.release.wait()
+
+        stuck = StuckMission()
+        sibling = IdleMission()
+
+        def factory(mission_type: type[Mission]) -> Mission:
+            return stuck if mission_type is StuckMission else sibling
+
+        engine = MissionEngine(
+            mission_factory=factory,
+            scheduler_interval=0.001,
+            stop_timeout=0.01,
+        )
+        try:
+            run = engine.start_parallel(
+                MissionParallelGroup("retry-stop", (StuckMission, IdleMission))
+            )
+            self.assertTrue(stuck.started.wait(1.0))
+            self.assertTrue(sibling.started.wait(1.0))
+
+            with self.assertRaises(ExceptionGroup):
+                engine.stop_parallel(run.execution_id)
+            self.assertIs(engine.snapshot(sibling).phase, MissionPhase.STOPPED)
+            self.assertTrue(engine.parallel_snapshot(run.execution_id).active)
+
+            stuck.release.set()
+            finished = engine.stop_parallel(run.execution_id)
+            self.assertTrue(finished.stopped)
+        finally:
+            stuck.release.set()
+            engine.close()
+
+    def test_parallel_snapshot_is_live_and_execution_history_is_bounded(self) -> None:
+        with MissionEngine(
+            scheduler_interval=0.001,
+            execution_history=2,
+        ) as engine:
+            group = MissionParallelGroup(
+                "live",
+                (MissionNode("left", IdleMission), MissionNode("right", IdleMission)),
+            )
+            run = engine.start_parallel(group)
+            wait_until(
+                lambda: all(
+                    engine.snapshot(mission_id).phase is MissionPhase.RUNNING
+                    for mission_id in run.children.values()
+                )
+            )
+            self.assertTrue(
+                all(
+                    phase is MissionPhase.RUNNING
+                    for phase in engine.parallel_snapshot(run.execution_id).phases.values()
+                )
+            )
+            for mission_id in run.children.values():
+                engine.complete(mission_id)
+            self.assertIsNotNone(engine.wait_parallel(run.execution_id, 1.0))
+            parallel_children = tuple(run.children.values())
+            self.assertTrue(engine.forget_parallel(run.execution_id))
+            self.assertTrue(
+                set(parallel_children).isdisjoint(
+                    engine.manager_snapshot().registered_missions
+                )
+            )
+
+            chain_runs = []
+            for index in range(3):
+                chain_run = engine.start_chain(
+                    MissionChain(f"bounded-{index}", (ProducerMission,)),
+                    input={"value": index},
+                )
+                self.assertIsNotNone(engine.wait_chain(chain_run.execution_id, 1.0))
+                chain_runs.append(chain_run)
+            with self.assertRaises(MissionNotFoundError):
+                engine.chain_snapshot(chain_runs[0].execution_id)
+            self.assertNotIn(
+                chain_runs[0].child_mission_ids[0],
+                engine.manager_snapshot().registered_missions,
+            )
+            second_child = chain_runs[1].child_mission_ids[0]
+            self.assertTrue(engine.forget_chain(chain_runs[1].execution_id))
+            self.assertNotIn(
+                second_child,
+                engine.manager_snapshot().registered_missions,
+            )
+            self.assertFalse(engine.forget_chain(chain_runs[1].execution_id))
 
     def test_parallel_launch_failure_keeps_failed_group_snapshot(self) -> None:
         owner = ExclusiveA()
@@ -469,6 +595,28 @@ class MissionOrchestrationTests(unittest.TestCase):
             )
             wait_until(lambda: engine.snapshot(owner).phase.terminal)
             self.assertIs(engine.snapshot(owner).phase, MissionPhase.FAILED)
+
+    def test_background_registration_rechecks_owner_atomically(self) -> None:
+        owner = IdleMission()
+        background = IdleMission()
+        with MissionEngine(scheduler_interval=0.001) as engine:
+            engine.launch(owner)
+            self.assertTrue(owner.started.wait(1.0))
+            engine.events.subscribe(
+                lambda _event: engine.stop_mission(owner),
+                predicate=lambda event: event.mission_id == background.id
+                and event.message.startswith("Mission registered:"),
+                times=1,
+            )
+
+            with self.assertRaises(MissionConflictError):
+                engine.launch_background(background, owner=owner)
+
+            self.assertIs(engine.snapshot(owner).phase, MissionPhase.STOPPED)
+            self.assertNotIn(
+                background.id,
+                {snapshot.mission_id for snapshot in engine.snapshots()},
+            )
 
     def test_background_cancel_policy_and_engine_shutdown(self) -> None:
         owner = IdleMission()

@@ -5,7 +5,7 @@
 
 # Vehicle Autonomy Core
 
-Vehicle Autonomy Core, Kırlangıç Team'in araç projelerinde kullandığı ortak
+Vehicle Autonomy Core, otonom araç projeleri için yeniden kullanılabilir bir
 Python çekirdeğidir. Bir hava, kara veya başka tür otonom araç projesinde tekrar
 tekrar ihtiyaç duyulan altyapıyı bir araya getirir: dependency injection,
 uygulama içi event'ler, mission yönetimi ve MAVLink haberleşmesi.
@@ -385,9 +385,15 @@ History açıksa `latest()` son eşleşmeyi, `query()` saklanan eşleşmeleri d�
 `wait_for()` bir eşleşme gelene kadar bekler ve timeout olursa `None` verir.
 Replay kesin bir abonelik sınırıdır: replay sırasında gelen eşleşen canlı
 event'ler geçmişin önüne geçmez, replay bittikten sonra teslim edilir.
+Sıcak kod yollarında `query()` için `limit=` verilirse geriye doğru tarama,
+yeterli sayıda güncel eşleşme bulunduğu anda durur.
 
 `publish_every(event, interval, times=...)` aynı event'i daemon bir schedule
-üzerinde yayınlar ve iptal edilebilir bir `Subscription` döndürür.
+üzerinde yayınlar ve iptal edilebilir bir `Subscription` döndürür. Bir bus
+varsayılan olarak aynı anda en fazla 64 periyodik schedule kabul eder;
+uygulamanın bilinçli olarak farklı bir sınıra ihtiyacı varsa `max_schedules=`
+kullanılabilir. `replay_buffer_limit=`, yavaş bir replay arkasında biriken
+canlı event'leri sınırlar ve en yeni değerleri korur.
 
 ### Hook'lar ve hata politikası
 
@@ -552,6 +558,12 @@ başlatır. Çakışmalar ortak `resources` ve `blocks` üzerinden bulunur. `QUE
 politikası bekler; `PREEMPT_LOWER` yalnızca kesin olarak daha yüksek önceliğe
 sahip mission'ın çakışan işi durdurmasına izin verir.
 
+Uygulama genelinde backpressure gerektiğinde
+`MissionEngine(max_active_missions=..., max_queued_missions=...)`
+kullanılabilir. İki sınır da opsiyoneldir. Aktif kapasite dolduğunda normalde
+başlatılabilecek iş öncelik sırasında bekler; kuyruk kapasitesi dolduğunda
+yeni mission açık bir hatayla reddedilir.
+
 Motor komutları bir `Mission` nesnesi veya integer ID kabul eder:
 
 ```python
@@ -670,7 +682,7 @@ group = MissionParallelGroup(
     ParallelFailurePolicy.CANCEL_REMAINING,
 )
 run = engine.start_parallel(group)
-state = engine.parallel_snapshot(run.execution_id)
+state = engine.wait_parallel(run.execution_id, timeout=5.0)
 engine.cancel_parallel(run.execution_id)  # aktif child'lara yayılır
 ```
 
@@ -718,6 +730,13 @@ Güvenli varsayılan, owner bittiğinde background mission'ı durdurur.
 seçilmelidir. `stop_chain()`, `cancel_chain()`, `stop_parallel()` ve
 `cancel_parallel()` işlemleri normal mission lifecycle çağrılarıyla child'lara
 yayılır; ek bir worker thread mekanizması kullanılmaz.
+
+`wait_chain()` ve `wait_parallel()` polling yapmadan terminal sonucu bekler.
+Tamamlanan zincir ve paralel snapshot'lar `execution_history` kadar saklanır;
+varsayılan değer 256'dır. Uygulama bir sonucu daha erken bırakmak isterse
+`forget_chain()` ve `forget_parallel()` kullanabilir. Unutulan orkestrasyon
+çalışması için oluşturulan mission instance'ları terminal durumdaysa engine
+registry'sinden de bırakılır.
 
 Zincir ve grup girdileri instance değil sınıftır. Varsayılan durumda argümansız
 oluşturulabilmeleri gerekir. Uygulama dependency destekli oluşturma istiyorsa
@@ -991,7 +1010,7 @@ sözleşmelerdir; bunlardan miras almak gerekmez.
 Donanım gerektirmeyen bütün testleri depo kökünden çalıştırın:
 
 ```bash
-python tests/run.py
+python run_tests.py
 ```
 
 Script `tests` altındaki bütün `test*.py` dosyalarını bulur ve herhangi bir test
@@ -1029,6 +1048,22 @@ python -m unittest tests.mavlink.test_pymavlink_integration -v
 GitHub Actions, donanımsız testleri Python 3.10 ile 3.14 arasında çalıştırır;
 ayrıca wheel kurulumunu ve ayrı bir `pymavlink` işinde bu loopback testini
 doğrular.
+
+### Performans regresyon ölçümü
+
+Depo kökündeki benchmark; donanım veya ağ bağlantısı açmadan model, senkron ve
+asenkron event, dependency, MAVLink ve mission yollarını ölçer:
+
+```bash
+python run_benchmarks.py --quick
+python run_benchmarks.py --json > benchmark.json
+```
+
+Sonuçlar genel yapılardan alana özel işlemlere doğru sıralanır. Beş zamanlı
+çalışmanın medyanı; duvar zamanı, CPU zamanı, boş fonksiyon çağrısına
+oran, işlem başına kalıcı bellek ve tek işlemin tepe bellek değeri verir.
+Mutlak süreler sisteme göre değişir; regresyon karşılaştırmasını aynı donanım
+ve Python sürümüyle yapmak gerekir.
 
 ## Katkı
 

@@ -7,7 +7,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ..abstracts import Model, _copy_model_value, _freeze_model_value
+from ..abstracts import (
+    Model,
+    _FrozenMapping,
+    _copy_model_value,
+    _freeze_model_value,
+)
 from .enums import (
     BackgroundFailurePolicy,
     MissionPhase,
@@ -20,6 +25,8 @@ if TYPE_CHECKING:
 
 
 def _json_mapping(value: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    if isinstance(value, _FrozenMapping):
+        return value
     frozen = _freeze_model_value(value)
     try:
         json.dumps(_copy_model_value(value, lists=True), allow_nan=False)
@@ -185,21 +192,22 @@ class MissionChain(Model):
         from .base import Mission
 
         chain_id = str(self.chain_id).strip()
+        stages = tuple(self.stages)
         if not chain_id:
             raise ValueError("Mission chain ID cannot be empty")
-        if not self.stages:
+        if not stages:
             raise ValueError("Mission chain must contain at least one mission")
         if any(
             not isinstance(entry, (MissionNode, MissionParallelStage))
             and (not isinstance(entry, type) or not issubclass(entry, Mission))
-            for entry in self.stages
+            for entry in stages
         ):
             raise ValueError(
                 "Mission chain entries must be missions, nodes, or parallel stages"
             )
         node_names: list[str] = []
         type_counts: dict[type[Mission], int] = {}
-        for entry in self.stages:
+        for entry in stages:
             if isinstance(entry, MissionParallelStage):
                 node_names.append(entry.name)
             elif isinstance(entry, MissionNode):
@@ -215,6 +223,7 @@ class MissionChain(Model):
         if len(node_names) != len(set(node_names)):
             raise ValueError("Mission chain node and stage names must be unique")
         object.__setattr__(self, "chain_id", chain_id)
+        object.__setattr__(self, "stages", stages)
 
 
 @dataclass(frozen=True, slots=True)

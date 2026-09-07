@@ -29,6 +29,7 @@ class MissionRuntime:
     launch_lock: threading.RLock = field(default_factory=threading.RLock)
     active_elapsed: float = 0.0
     active_started_monotonic: float | None = None
+    attempt_started_monotonic: float | None = None
     queued_monotonic: float | None = None
     chain_context: MissionExecutionContext | None = None
     execution_node: str | None = None

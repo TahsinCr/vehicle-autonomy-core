@@ -12,7 +12,7 @@ The test suite is organized around the public packages:
 Run the complete suite from the repository root:
 
 ```bash
-python tests/run.py
+python run_tests.py
 ```
 
 The runner discovers every `test*.py` file under `tests` and exits with a

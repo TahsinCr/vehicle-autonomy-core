@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import MappingProxyType
 
 from src.core import Model
 from src.core.mission import (
@@ -8,6 +9,7 @@ from src.core.mission import (
     MissionChain,
     MissionChainSnapshot,
     MissionController,
+    MissionExecutionContext,
     MissionEvent,
     MissionEventLevel,
     MissionEventQuery,
@@ -111,6 +113,21 @@ class MissionContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MissionSnapshot(mission.id, mission.name, progress=1.1)
 
+    def test_execution_context_detaches_external_read_only_mappings(self) -> None:
+        source = {"path": {"points": [1, 2]}}
+        context = MissionExecutionContext(
+            "chain",
+            "execution",
+            0,
+            input=MappingProxyType(source),
+        )
+        source["path"]["points"].append(3)  # type: ignore[index,union-attr]
+
+        self.assertEqual(tuple(context.input["path"]["points"]), (1, 2))
+        serialized = context.to_dict()
+        serialized["input"]["path"]["points"] += (4,)
+        self.assertEqual(tuple(context.input["path"]["points"]), (1, 2))
+
     def test_event_query_filters_cursor_level_mission_and_type(self) -> None:
         event = MissionEvent(
             MissionEventType.LOG,
@@ -166,6 +183,10 @@ class MissionContractTests(unittest.TestCase):
             (PrimaryMission, PrimaryMission),
         )
         self.assertEqual(len(repeated.stages), 2)
+        mutable_stages = [PrimaryMission]
+        detached = MissionChain("detached.chain", mutable_stages)  # type: ignore[arg-type]
+        mutable_stages.clear()
+        self.assertEqual(detached.stages, (PrimaryMission,))
         with self.assertRaises(ValueError):
             MissionChain("survey.chain", (str,))  # type: ignore[arg-type]
         with self.assertRaises(ValueError):

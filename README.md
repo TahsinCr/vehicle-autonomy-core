@@ -5,10 +5,10 @@
 
 # Vehicle Autonomy Core
 
-Vehicle Autonomy Core is the shared Python core used by Kırlangıç Team's
-vehicle projects. It brings together the infrastructure that an aircraft,
-ground vehicle or another autonomous platform commonly needs: dependency
-injection, in-process events, mission orchestration and MAVLink communication.
+Vehicle Autonomy Core is a reusable Python core for autonomous vehicle
+projects. It brings together the infrastructure that an aircraft, ground
+vehicle or another autonomous platform commonly needs: dependency injection,
+in-process events, mission orchestration and MAVLink communication.
 
 This repository is a toolkit, not a finished autonomy application. It does not
 decide where a vehicle should move, which target should be selected or how a
@@ -388,9 +388,14 @@ history enabled, `latest()` returns the newest match and `query()` returns
 stored matches. `wait_for()` blocks until a match arrives and returns `None` on
 timeout. Replay is a strict subscription boundary: matching live events that
 arrive during replay are delivered afterwards, so they cannot overtake history.
+For hot paths, pass `limit=` to `query()` so the backward scan stops as soon as
+enough recent matches have been found.
 
 `publish_every(event, interval, times=...)` publishes the same event on a
-daemon schedule and returns a cancellable `Subscription`.
+daemon schedule and returns a cancellable `Subscription`. A bus accepts at
+most 64 live periodic schedules by default; set `max_schedules=` when the
+application has a different, deliberate limit. `replay_buffer_limit=` bounds
+live events arriving behind a slow replay and keeps the newest values.
 
 ### Hooks and error policy
 
@@ -553,6 +558,11 @@ missions. Conflicts are detected from shared resources and `blocks`. A mission
 with `QUEUE` waits; `PREEMPT_LOWER` can stop conflicting work only when it has
 strictly greater priority.
 
+`MissionEngine(max_active_missions=..., max_queued_missions=...)` adds global
+backpressure when the application needs it. Both limits are optional. Once the
+active limit is reached, otherwise launchable work waits in priority order;
+the engine rejects another queued mission after the queue limit is reached.
+
 Engine commands accept either a `Mission` object or its integer ID:
 
 ```python
@@ -671,7 +681,7 @@ group = MissionParallelGroup(
     ParallelFailurePolicy.CANCEL_REMAINING,
 )
 run = engine.start_parallel(group)
-state = engine.parallel_snapshot(run.execution_id)
+state = engine.wait_parallel(run.execution_id, timeout=5.0)
 engine.cancel_parallel(run.execution_id)  # propagated to active children
 ```
 
@@ -718,6 +728,13 @@ The safe default stops the background mission when its owner ends.
 be selected explicitly. `stop_chain()`, `cancel_chain()`, `stop_parallel()` and
 `cancel_parallel()` propagate through normal mission lifecycle calls; no extra
 worker-thread mechanism is introduced.
+
+`wait_chain()` and `wait_parallel()` provide blocking terminal waits without
+polling. Completed chain and parallel snapshots are retained up to
+`execution_history` (256 by default). `forget_chain()` and
+`forget_parallel()` remove a retained result earlier when the application no
+longer needs it. Mission instances created for a forgotten orchestration run
+are also released from the engine registry once they are terminal.
 
 Chain and group entries are classes rather than instances. By default they must
 support a no-argument constructor. Supply `mission_factory=` to
@@ -984,7 +1001,7 @@ adapters; users do not need to subclass them.
 Run the complete hardware-free suite from the repository root:
 
 ```bash
-python tests/run.py
+python run_tests.py
 ```
 
 The script discovers every `test*.py` file below `tests` and returns a non-zero
@@ -1021,6 +1038,23 @@ python -m unittest tests.mavlink.test_pymavlink_integration -v
 
 GitHub Actions runs the hardware-free suite on Python 3.10 through 3.14, checks
 the built wheel and runs this loopback test in a separate `pymavlink` job.
+
+### Performance regression probe
+
+The root-level benchmark exercises core model, synchronous and asynchronous
+event, dependency, MAVLink and mission paths without opening hardware or
+network connections:
+
+```bash
+python run_benchmarks.py --quick
+python run_benchmarks.py --json > benchmark.json
+```
+
+Results are ordered from general primitives to domain-specific operations. The
+median of five timed runs is reported as wall time, CPU time, ratio to a no-op
+call, retained bytes per operation and peak bytes for one operation. Absolute
+timings vary by machine; compare runs made with the same Python build and
+hardware when checking a regression.
 
 ## Contributing
 

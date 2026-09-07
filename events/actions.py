@@ -13,19 +13,19 @@ from .filtering import EventFilter
 T = TypeVar("T")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class EventErrorContext(Generic[T]):
     event: T
     error: Exception
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class EventTimeoutContext(Generic[T]):
     event_filter: EventFilter[T]
     timeout: float | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class EventBusActions(Generic[T]):
     on_error: Callable[[EventErrorContext[T]], None] | None = None
     on_timeout: Callable[[EventTimeoutContext[T]], None] | None = None
@@ -39,7 +39,7 @@ class EventBusActions(Generic[T]):
                 raise TypeError(f"Event action {name} must be callable")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class AsyncEventBusActions(Generic[T]):
     on_error: Callable[[EventErrorContext[T]], Awaitable[None]] | None = None
     on_timeout: Callable[[EventTimeoutContext[T]], Awaitable[None]] | None = None

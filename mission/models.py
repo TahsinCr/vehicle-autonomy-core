@@ -6,10 +6,9 @@ import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from types import MappingProxyType
 from typing import Any
 
-from ..abstracts import Model, _freeze_model_value
+from ..abstracts import Model, _FrozenMapping, _freeze_model_value
 from .enums import (
     MissionEventLevel,
     MissionEventType,
@@ -70,11 +69,8 @@ class MissionSnapshot(Model):
             "checkpoints",
             _freeze_model_value(
                 self.checkpoints
-                if isinstance(self.checkpoints, MappingProxyType)
-                else {
-                    str(name): value
-                    for name, value in self.checkpoints.items()
-                }
+                if isinstance(self.checkpoints, _FrozenMapping)
+                else {str(name): value for name, value in self.checkpoints.items()}
             ),
         )
 

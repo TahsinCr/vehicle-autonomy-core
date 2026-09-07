@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from abc import ABC, abstractmethod
 from collections import deque
+from itertools import islice
 from typing import Generic, TypeVar
 
 from .filtering import EventFilter
@@ -53,10 +54,17 @@ class MemoryEventHistory(EventHistory[T]):
             self._events.append(event)
 
     def latest(self, event_filter: EventFilter[T] | None = None) -> T | None:
-        matcher = event_filter or EventFilter()
         with self._lock:
-            events = tuple(reversed(self._events))
-        return next((event for event in events if matcher.matches(event)), None)
+            if event_filter is None:
+                return self._events[-1] if self._events else None
+            return next(
+                (
+                    event
+                    for event in reversed(self._events)
+                    if event_filter.matches(event)
+                ),
+                None,
+            )
 
     def query(
         self,
@@ -66,11 +74,27 @@ class MemoryEventHistory(EventHistory[T]):
     ) -> tuple[T, ...]:
         if limit is not None and limit <= 0:
             raise ValueError("Event history query limit must be positive")
-        matcher = event_filter or EventFilter()
         with self._lock:
-            events = tuple(self._events)
-        matched = tuple(event for event in events if matcher.matches(event))
-        return matched[-limit:] if limit is not None else matched
+            if event_filter is None:
+                if limit is None:
+                    return tuple(self._events)
+                recent = list(islice(reversed(self._events), limit))
+                recent.reverse()
+                return tuple(recent)
+            if limit is None:
+                return tuple(
+                    event
+                    for event in self._events
+                    if event_filter.matches(event)
+                )
+            matched: list[T] = []
+            for event in reversed(self._events):
+                if event_filter.matches(event):
+                    matched.append(event)
+                    if len(matched) == limit:
+                        break
+            matched.reverse()
+            return tuple(matched)
 
     def clear(self) -> None:
         with self._lock:

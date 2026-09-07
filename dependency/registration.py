@@ -36,25 +36,53 @@ class _Missing:
 MISSING = _Missing()
 
 
+class InitializationRetiredError(RuntimeError):
+    """Raised when a registration is removed during cached resolution."""
+
+
 class InitializationGate:
     """Coordinate one cached value across sync threads and async tasks."""
 
-    __slots__ = ("_condition", "_initializing")
+    __slots__ = (
+        "_condition",
+        "_initializing",
+        "_owner_async",
+        "_owner_thread",
+        "_retired",
+    )
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
         self._initializing = False
+        self._owner_async = False
+        self._owner_thread: int | None = None
+        self._retired = False
 
-    def claim(self) -> bool:
+    def claim(self, *, asynchronous: bool = False) -> bool:
         with self._condition:
+            if self._retired:
+                raise InitializationRetiredError("Dependency registration is retired")
             if self._initializing:
                 return False
             self._initializing = True
+            self._owner_async = asynchronous
+            self._owner_thread = threading.get_ident()
             return True
 
     def wait(self) -> None:
         with self._condition:
+            if (
+                self._initializing
+                and self._owner_async
+                and self._owner_thread == threading.get_ident()
+            ):
+                raise InitializationRetiredError(
+                    "Synchronous resolution cannot wait for an async provider "
+                    "on its owning event-loop thread"
+                )
             self._condition.wait_for(lambda: not self._initializing)
+            if self._retired:
+                raise InitializationRetiredError("Dependency registration is retired")
 
     async def wait_async(self) -> None:
         await asyncio.to_thread(self.wait)
@@ -62,7 +90,31 @@ class InitializationGate:
     def release(self) -> None:
         with self._condition:
             self._initializing = False
+            self._owner_async = False
+            self._owner_thread = None
             self._condition.notify_all()
+
+    def retire(self) -> None:
+        with self._condition:
+            self._retired = True
+            self._condition.wait_for(lambda: not self._initializing)
+
+    async def retire_async(self) -> None:
+        self.begin_retire()
+        await asyncio.to_thread(self._wait_until_idle)
+
+    def begin_retire(self) -> None:
+        with self._condition:
+            self._retired = True
+
+    def reactivate(self) -> None:
+        with self._condition:
+            self._retired = False
+            self._condition.notify_all()
+
+    def _wait_until_idle(self) -> None:
+        with self._condition:
+            self._condition.wait_for(lambda: not self._initializing)
 
 
 class Lifetime(StrEnum):

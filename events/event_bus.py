@@ -15,7 +15,7 @@ from ..compatibility import ExceptionGroup
 from .actions import EventBusActions, EventErrorContext, EventTimeoutContext
 from .base import BaseEventBus
 from .contracts import ErrorPolicy, EventBusStats, PublishResult
-from .errors import InvalidEventHandlerError
+from .errors import EventBusError, InvalidEventHandlerError
 from .filtering import EventFilter, EventType, coerce_event_filter
 from .history import EventHistory
 from .subscription import Subscription
@@ -73,6 +73,8 @@ class EventBus(BaseEventBus[T]):
         history: EventHistory[T] | int | None = None,
         error_policy: ErrorPolicy = ErrorPolicy.ISOLATE,
         executor: Executor | None = None,
+        replay_buffer_limit: int = 1_000,
+        max_schedules: int = 64,
         actions: EventBusActions[T] | None = None,
         on_before: Callable[[T], None] | None = None,
         on_after: Callable[[T, PublishResult], None] | None = None,
@@ -80,6 +82,14 @@ class EventBus(BaseEventBus[T]):
         on_timeout: Callable[[EventTimeoutContext[T]], None] | None = None,
     ) -> None:
         super().__init__(history=history, error_policy=error_policy)
+        if replay_buffer_limit <= 0:
+            raise ValueError("Replay buffer limit must be positive")
+        if (
+            isinstance(max_schedules, bool)
+            or not isinstance(max_schedules, int)
+            or max_schedules <= 0
+        ):
+            raise ValueError("Maximum periodic schedules must be a positive integer")
         direct_actions = (on_before, on_after, on_error, on_timeout)
         if actions is not None and any(action is not None for action in direct_actions):
             raise ValueError("Use actions or direct on_* callbacks, not both")
@@ -100,6 +110,9 @@ class EventBus(BaseEventBus[T]):
                     "EventBus actions must be synchronous"
                 )
         self._executor = executor
+        self._executor_context = threading.local()
+        self._replay_buffer_limit = int(replay_buffer_limit)
+        self._max_schedules = max_schedules
         self._subscribers: dict[int, _Subscriber[T]] = {}
         self._next_id = 0
         self._closed = False
@@ -163,6 +176,7 @@ class EventBus(BaseEventBus[T]):
                 delivery_limit,
                 subscription,
                 replaying=bool(replay and self._history is not None),
+                pending=deque(maxlen=self._replay_buffer_limit),
             )
             self._subscribers[subscription_id] = subscriber
             replay_events = (
@@ -248,7 +262,7 @@ class EventBus(BaseEventBus[T]):
                 matched.append(subscriber)
 
         delivered = 0
-        if self._executor is None:
+        if self._executor is None or getattr(self._executor_context, "active", False):
             for subscriber in matched:
                 was_delivered, error = self._deliver(subscriber, event)
                 if was_delivered:
@@ -264,7 +278,11 @@ class EventBus(BaseEventBus[T]):
                 if final:
                     subscriber.subscription._consume()
                 try:
-                    future = self._executor.submit(subscriber.callback, event)
+                    future = self._executor.submit(
+                        self._invoke_executor_callback,
+                        subscriber.callback,
+                        event,
+                    )
                 except Exception as exc:
                     errors.append(exc)
                 else:
@@ -303,6 +321,14 @@ class EventBus(BaseEventBus[T]):
         if errors and self._error_policy is ErrorPolicy.RAISE:
             raise ExceptionGroup("Event delivery failed", errors)
         return result
+
+    def _invoke_executor_callback(self, callback: Callable[[T], None], event: T) -> None:
+        previous = getattr(self._executor_context, "active", False)
+        self._executor_context.active = True
+        try:
+            callback(event)
+        finally:
+            self._executor_context.active = previous
 
     def _notify_errors(
         self,
@@ -357,6 +383,8 @@ class EventBus(BaseEventBus[T]):
         stopped = threading.Event()
         with self._lock:
             self._ensure_open()
+            if len(self._schedules) >= self._max_schedules:
+                raise EventBusError("Maximum periodic schedule capacity reached")
             schedule_id = self._next_id
             self._next_id += 1
 

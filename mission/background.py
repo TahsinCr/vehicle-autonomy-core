@@ -59,10 +59,15 @@ class MissionBackgroundExecutor:
             termination_policy,
             failure_policy,
         )
-        with self.engine._condition:
-            self._missions[mission.id] = snapshot
-            runtime = self.engine._runtime_locked(mission.id)
-            runtime.chain_context = self._owner_context(owner_kind, owner_id)
+        try:
+            with self.engine._condition:
+                self._ensure_owner_active(owner_kind, owner_id)
+                self._missions[mission.id] = snapshot
+                runtime = self.engine._runtime_locked(mission.id)
+                runtime.chain_context = self._owner_context(owner_kind, owner_id)
+        except Exception:
+            self.engine.unregister(mission)
+            raise
         self.engine._emit(
             MissionEventType.BACKGROUND,
             f"Background mission started: {mission.name}",
@@ -145,6 +150,7 @@ class MissionBackgroundExecutor:
                 and item.owner_kind == owner_kind
                 and item.owner_id == owner_id
             )
+        operations = []
         for background in backgrounds:
             if background.termination_policy is OwnerTerminationPolicy.KEEP_RUNNING:
                 continue
@@ -153,15 +159,23 @@ class MissionBackgroundExecutor:
                 is OwnerTerminationPolicy.CANCEL_WITH_OWNER
                 and phase in {MissionPhase.CANCELLED, MissionPhase.FAILED}
             ):
-                self.engine.cancel(
-                    background.mission_id,
-                    reason="Background owner terminated",
+                operations.append(
+                    lambda mission_id=background.mission_id: self.engine.cancel(
+                        mission_id,
+                        reason="Background owner terminated",
+                    )
                 )
             else:
-                self.engine.stop_mission(
-                    background.mission_id,
-                    reason="Background owner terminated",
+                operations.append(
+                    lambda mission_id=background.mission_id: self.engine.stop_mission(
+                        mission_id,
+                        reason="Background owner terminated",
+                    )
                 )
+        self.orchestrator.run_all(
+            operations,
+            "Background missions could not all be terminated",
+        )
 
     def clear(self) -> None:
         with self.engine._condition:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -31,6 +32,7 @@ class MissionParallelExecutor:
         self._latest: dict[str, str] = {}
         self._mission_runs: dict[int, str] = {}
         self._chain_runs: dict[str, str] = {}
+        self._completed: deque[str] = deque()
 
     @property
     def engine(self) -> "MissionEngine":
@@ -100,11 +102,48 @@ class MissionParallelExecutor:
         with self.engine._condition:
             execution_id = self._latest.get(identifier, identifier)
             try:
-                return self._runs[execution_id]
+                snapshot = self._runs[execution_id]
             except KeyError as exc:
                 raise MissionNotFoundError(
                     f"Parallel execution not found: {identifier}"
                 ) from exc
+            if snapshot.active:
+                phases = {
+                    name: self.engine._runtime_locked(mission_id).snapshot.phase
+                    for name, mission_id in snapshot.children.items()
+                }
+                if phases != snapshot.phases:
+                    snapshot = replace(snapshot, phases=phases)
+                    self._runs[execution_id] = snapshot
+            return snapshot
+
+    def wait(
+        self,
+        identifier: str,
+        timeout: float | None = None,
+    ) -> MissionParallelSnapshot | None:
+        with self.engine._condition:
+            execution_id = self._latest.get(identifier, identifier)
+            if execution_id not in self._runs:
+                raise MissionNotFoundError(
+                    f"Parallel execution not found: {identifier}"
+                )
+            ready = self.engine._condition.wait_for(
+                lambda: not self._runs[execution_id].active,
+                timeout=timeout,
+            )
+            return self.snapshot(execution_id) if ready else None
+
+    def forget(self, identifier: str) -> bool:
+        with self.engine._condition:
+            execution_id = self._latest.get(identifier, identifier)
+            snapshot = self._runs.get(execution_id)
+            if snapshot is None:
+                return False
+            if snapshot.active:
+                raise ValueError("Active parallel execution cannot be forgotten")
+            self._remove_run_locked(execution_id)
+            return True
 
     def stop(self, identifier: str) -> MissionParallelSnapshot:
         return self._terminate(identifier, cancelled=False)
@@ -125,7 +164,7 @@ class MissionParallelExecutor:
     def fail(self, execution_id: str, reason: str) -> None:
         with self.engine._condition:
             snapshot = self._runs.get(execution_id)
-            if snapshot is None:
+            if snapshot is None or not snapshot.active:
                 return
             self._runs[execution_id] = replace(
                 snapshot,
@@ -135,15 +174,19 @@ class MissionParallelExecutor:
             )
             children = tuple(snapshot.children.values())
             chain_id = self._chain_runs.pop(execution_id, None)
-        for mission_id in children:
-            runtime = self.engine._runtime(mission_id)
-            phase = runtime.snapshot.phase
-            if (
-                phase.active
-                or phase is MissionPhase.QUEUED
-                or phase is MissionPhase.REGISTERED
-            ):
-                self.engine.stop_mission(mission_id, reason=reason)
+            self._retain_terminal_locked(execution_id)
+            self.engine._condition.notify_all()
+        self.orchestrator.run_all(
+            (
+                lambda mission_id=mission_id: self.engine.stop_mission(
+                    mission_id,
+                    reason=reason,
+                )
+                for mission_id in children
+                if self._is_pending(mission_id)
+            ),
+            "Parallel children could not all be stopped",
+        )
         self.orchestrator.background.owner_terminated(
             "parallel",
             execution_id,
@@ -180,6 +223,7 @@ class MissionParallelExecutor:
             self._latest.clear()
             self._mission_runs.clear()
             self._chain_runs.clear()
+            self._completed.clear()
 
     def _advance(self, execution_id: str, mission_id: int) -> None:
         actions: tuple[str, tuple[int, ...]] | None = None
@@ -207,7 +251,7 @@ class MissionParallelExecutor:
                 child_id
                 for child_name, child_id in snapshot.children.items()
                 if child_name != node
-                and self.engine._runtime_locked(child_id).snapshot.phase.active
+                and self._is_pending(child_id)
             )
             reason = snapshot.reason
             if phase is MissionPhase.FAILED and remaining and not reason:
@@ -256,6 +300,9 @@ class MissionParallelExecutor:
                 )
             self._runs[execution_id] = updated
             self._mission_runs.pop(mission_id, None)
+            if owner_phase is not None:
+                self._retain_terminal_locked(execution_id)
+                self.engine._condition.notify_all()
         if actions is not None:
             operation, mission_ids = actions
             self.engine._emit(
@@ -263,14 +310,25 @@ class MissionParallelExecutor:
                 f"Parallel sibling {operation} requested: {execution_id}",
                 fields={"execution_id": execution_id, "child_count": len(mission_ids)},
             )
-            for child_id in mission_ids:
-                if operation == "cancel":
-                    self.engine.cancel(child_id, reason="Parallel sibling failed")
-                else:
-                    self.engine.stop_mission(
-                        child_id,
-                        reason="Parallel sibling failed",
+            self.orchestrator.run_all(
+                (
+                    (
+                        lambda child_id=child_id: self.engine.cancel(
+                            child_id,
+                            reason="Parallel sibling failed",
+                        )
                     )
+                    if operation == "cancel"
+                    else (
+                        lambda child_id=child_id: self.engine.stop_mission(
+                            child_id,
+                            reason="Parallel sibling failed",
+                        )
+                    )
+                    for child_id in mission_ids
+                ),
+                "Parallel siblings could not all be terminated",
+            )
         if owner_phase is not None:
             self.engine._emit(
                 MissionEventType.PARALLEL,
@@ -308,19 +366,37 @@ class MissionParallelExecutor:
                 for mission_id in snapshot.children.values()
                 if self._is_pending(mission_id)
             )
+        self.orchestrator.run_all(
+            (
+                (
+                    lambda mission_id=mission_id: self.engine.cancel(
+                        mission_id,
+                        reason=reason,
+                    )
+                )
+                if cancelled
+                else (
+                    lambda mission_id=mission_id: self.engine.stop_mission(
+                        mission_id,
+                        reason=reason,
+                    )
+                )
+                for mission_id in children
+            ),
+            "Parallel children could not all be terminated",
+        )
+        with self.engine._condition:
+            current = self._runs[snapshot.execution_id]
             self._runs[snapshot.execution_id] = replace(
-                snapshot,
+                current,
                 active=False,
                 cancelled=cancelled,
                 stopped=not cancelled,
                 reason=reason,
             )
             self._chain_runs.pop(snapshot.execution_id, None)
-        for mission_id in children:
-            if cancelled:
-                self.engine.cancel(mission_id, reason=reason)
-            else:
-                self.engine.stop_mission(mission_id, reason=reason)
+            self._retain_terminal_locked(snapshot.execution_id)
+            self.engine._condition.notify_all()
         self.orchestrator.background.owner_terminated(
             "parallel",
             snapshot.execution_id,
@@ -329,11 +405,33 @@ class MissionParallelExecutor:
         return self.snapshot(snapshot.execution_id)
 
     def _is_pending(self, mission_id: int) -> bool:
-        phase = self.engine._runtime_locked(mission_id).snapshot.phase
-        return phase.active or phase in {
-            MissionPhase.REGISTERED,
-            MissionPhase.QUEUED,
-        }
+        with self.engine._condition:
+            phase = self.engine._runtime_locked(mission_id).snapshot.phase
+            return phase.active or phase in {
+                MissionPhase.REGISTERED,
+                MissionPhase.QUEUED,
+            }
+
+    def _retain_terminal_locked(self, execution_id: str) -> None:
+        if execution_id not in self._completed:
+            self._completed.append(execution_id)
+        while len(self._completed) > self.engine._execution_history_limit:
+            self._remove_run_locked(self._completed.popleft())
+
+    def _remove_run_locked(self, execution_id: str) -> None:
+        snapshot = self._runs.pop(execution_id, None)
+        if snapshot is not None:
+            self.engine._discard_orchestration_missions_locked(
+                snapshot.children.values()
+            )
+        self._chain_runs.pop(execution_id, None)
+        try:
+            self._completed.remove(execution_id)
+        except ValueError:
+            pass
+        for group_id, latest_id in tuple(self._latest.items()):
+            if latest_id == execution_id:
+                self._latest.pop(group_id, None)
 
     @staticmethod
     def _validate_conflicts(

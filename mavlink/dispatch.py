@@ -215,7 +215,7 @@ class MavlinkApplicationDispatcher(Service):
         handler = self._handlers.resolve(packet.packet_type)
         if handler is None:
             self.unhandled.publish(packet)
-            if packet.expects_response:
+            if packet.expects_response and self._is_generation_active(generation):
                 self._respond(
                     packet,
                     MavlinkApplicationResult.failure(
@@ -294,8 +294,10 @@ class MavlinkApplicationDispatcher(Service):
             return
         if error is not None:
             self.errors.publish(error)
+            if not self._is_generation_active(generation):
+                return
         self.handled.publish(MavlinkApplicationDispatch(packet, result))
-        if packet.expects_response:
+        if packet.expects_response and self._is_generation_active(generation):
             self._respond(packet, result)
 
     def _respond(

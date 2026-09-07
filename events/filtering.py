@@ -11,7 +11,7 @@ T = TypeVar("T")
 EventType = type[Any] | tuple[type[Any], ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class EventFilter(Generic[T]):
     event_type: EventType | None = None
     predicate: Callable[[T], bool] | None = None

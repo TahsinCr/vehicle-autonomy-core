@@ -2,6 +2,77 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.4] - 2026-09-07
+
+### Added
+
+- Added blocking waits and explicit history removal for chain and parallel
+  executions. Completed execution history is bounded and configurable through
+  `MissionEngine(execution_history=...)`.
+- Added optional engine-wide active and queued mission limits for predictable
+  backpressure under load.
+- Added bounded replay buffers and periodic schedule capacity to both event bus
+  implementations.
+- Added the root-level `run_benchmarks.py`, which measures model, synchronous
+  and asynchronous event, dependency, MAVLink and mission paths. It reports
+  normalized wall time, CPU time and memory use as a table or JSON.
+- Added deterministic concurrency tests for in-flight dependency removal,
+  callback-driven dispatcher shutdown, response source correlation, blocked
+  mission timeouts, group cleanup, background ownership and event replay
+  cancellation.
+- Moved the complete test launcher from `tests/run.py` to the repository root
+  as `run_tests.py`, next to the benchmark launcher.
+
+### Changed
+
+- Replaced repeated full mission registry scans with active, queued, resource
+  owner and successful-type indexes. Queue promotion now considers queued
+  missions only.
+- Event history now reads an unfiltered latest value in constant time and scans
+  backward only as far as a limited query requires. Limited and filtered reads
+  no longer copy the complete history before scanning it.
+- Dependency resource tracking now uses identity indexes instead of repeatedly
+  scanning every remembered object. Async cleanup remains deterministic when
+  its caller is cancelled.
+- Mission execution mappings preserve already validated immutable values across
+  snapshot updates, avoiding repeated deep copies and JSON validation.
+- Terminal missions owned by expired or explicitly forgotten orchestration
+  runs are released from the engine registry with their snapshots.
+- Parallel snapshots refresh child phases while running. Chain and group stop
+  paths attempt cleanup for every child and report failures together.
+- Kept the benchmark's terminal table within 90 columns, with compact headings
+  and safely shortened labels; the complete values remain available as JSON.
+- Reworded both README introductions around the repository's general-purpose
+  scope without tying the core to a particular team or application.
+
+### Fixed
+
+- Kept failed mission workers in `STOPPING` while their thread is still alive,
+  preserving resource ownership until cleanup can safely be retried.
+- Prevented terminal missions from being unregistered while their worker is
+  still returning from its final callback.
+- Prevented transition callbacks from launching new work while the mission
+  engine is stopping, and observed timeouts even when `start()` is blocked.
+- Closed registration and shutdown races in dependency caches, including child
+  scope resources, replacement during initialization and same-loop sync waits
+  on async factories.
+- Prevented one failing dependency cleanup from skipping later resources and
+  guaranteed context reset after sync or async shutdown errors.
+- Prevented one-worker event executors from deadlocking on a reentrant publish
+  and removed subscriptions whose async replay is cancelled.
+- Made parametrized generic event filters and action models constructible on
+  Python 3.10 while retaining their frozen public contract.
+- Suppressed dispatcher responses after any shutdown callback and required a
+  correlated peer response to come from the requested MAVLink source.
+- Avoided repeated router history scans while waiting for a predicate.
+- Tightened MAVLink endpoint and application codec validation for non-finite
+  timeouts and malformed wire field types.
+- Detached caller-owned sequences and read-only mapping proxies before storing
+  them in frozen models, and fixed nested model serialization.
+- Closed owner-registration and early parallel-failure races in mission
+  orchestration. Registered siblings are now terminated along with running or
+  queued siblings.
+
 ## [v1.3.1] - 2026-08-18
 
 ### Added

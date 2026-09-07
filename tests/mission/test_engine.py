@@ -7,9 +7,11 @@ import unittest
 from src.core.mission import (
     Mission,
     MissionChain,
+    MissionConflictError,
     MissionConflictPolicy,
     MissionEngine,
     MissionLifecycle,
+    MissionNotFoundError,
     MissionPermissionError,
     MissionPhase,
     MissionPrerequisitePolicy,
@@ -133,6 +135,21 @@ class StuckMission(Mission):
 
     def start(self) -> None:
         self.entered.set()
+        self.release.wait()
+
+    def stop(self) -> None:
+        pass
+
+
+class TerminalBeforeReturnMission(Mission):
+    def __init__(self) -> None:
+        super().__init__()
+        self.completed = threading.Event()
+        self.release = threading.Event()
+
+    def start(self) -> None:
+        self.complete()
+        self.completed.set()
         self.release.wait()
 
     def stop(self) -> None:
@@ -278,6 +295,26 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(mission.stop_count, 1)
         self.assertGreaterEqual(len(self.engine.query_events()), 4)
 
+    def test_unregister_waits_for_terminal_worker_to_return(self) -> None:
+        mission = TerminalBeforeReturnMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.completed.wait(1.0))
+        self.assertEqual(self.engine.snapshot(mission).phase, MissionPhase.SUCCEEDED)
+
+        result: list[bool] = []
+        unregistering = threading.Thread(
+            target=lambda: result.append(self.engine.unregister(mission))
+        )
+        unregistering.start()
+        time.sleep(0.01)
+        self.assertTrue(unregistering.is_alive())
+
+        mission.release.set()
+        unregistering.join(1.0)
+        self.assertEqual(result, [True])
+        with self.assertRaises(MissionNotFoundError):
+            self.engine.snapshot(mission)
+
     def test_concurrent_launch_is_idempotent_for_one_mission(self) -> None:
         mission = BlockingMission()
         callers = 8
@@ -373,6 +410,53 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertTrue(first.stopped.is_set())
         self.assertTrue(second.stopped.is_set())
 
+    def test_active_and_queue_capacities_apply_backpressure(self) -> None:
+        engine = MissionEngine(
+            scheduler_interval=0.001,
+            max_active_missions=1,
+            max_queued_missions=1,
+        )
+        first = BlockingMission(name="Active")
+        second = BlockingMission(name="Queued")
+        third = BlockingMission(name="Rejected")
+        try:
+            self.assertEqual(engine.max_active_missions, 1)
+            self.assertEqual(engine.max_queued_missions, 1)
+            engine.launch(first)
+            self.assertTrue(first.started.wait(1.0))
+            self.assertEqual(engine.launch(second).phase, MissionPhase.QUEUED)
+            with self.assertRaisesRegex(MissionConflictError, "capacity"):
+                engine.launch(third)
+
+            engine.stop_mission(first)
+            self.assertTrue(second.started.wait(1.0))
+            self.assertEqual(engine.snapshot(second).phase, MissionPhase.RUNNING)
+            self.assertEqual(engine.snapshot(third).phase, MissionPhase.REGISTERED)
+        finally:
+            engine.close()
+
+    def test_retry_stays_failed_when_bounded_queue_is_full(self) -> None:
+        class RetryableBlockingMission(BlockingMission):
+            retry = MissionRetryPolicy(attempts=2)
+
+        engine = MissionEngine(
+            scheduler_interval=0.001,
+            max_active_missions=1,
+            max_queued_missions=1,
+        )
+        failing = RetryableBlockingMission()
+        waiting = BlockingMission()
+        try:
+            engine.launch(failing)
+            self.assertTrue(failing.started.wait(1.0))
+            self.assertEqual(engine.launch(waiting).phase, MissionPhase.QUEUED)
+
+            failed = engine.fail(failing, "failed", retryable=True)
+            self.assertEqual(failed.phase, MissionPhase.FAILED)
+            self.assertTrue(waiting.started.wait(1.0))
+        finally:
+            engine.close()
+
     def test_resource_conflict_queues_then_releases_mission(self) -> None:
         first = ExclusiveMission(name="Owner")
         second = ExclusiveMission(name="Waiting")
@@ -450,6 +534,60 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         finally:
             mission.release.set()
             engine.close()
+
+    def test_failed_worker_keeps_resource_ownership_until_it_exits(self) -> None:
+        class StuckExclusiveMission(StuckMission):
+            resources = frozenset({"flight-control"})
+
+        engine = MissionEngine(scheduler_interval=0.001, stop_timeout=0.01)
+        stuck = StuckExclusiveMission()
+        waiting = RejectingExclusiveMission()
+        try:
+            engine.launch(stuck)
+            self.assertTrue(stuck.entered.wait(1.0))
+
+            with self.assertRaises(MissionTimeoutError):
+                engine.fail(stuck, "external failure")
+            self.assertEqual(engine.snapshot(stuck).phase, MissionPhase.STOPPING)
+            with self.assertRaises(MissionConflictError):
+                engine.launch(waiting)
+
+            stuck.release.set()
+            failed = engine.fail(stuck, "external failure")
+            self.assertEqual(failed.phase, MissionPhase.FAILED)
+        finally:
+            stuck.release.set()
+            engine.close()
+
+    def test_engine_stop_rejects_reentrant_launch(self) -> None:
+        active = BlockingMission()
+        late = BlockingMission()
+        self.engine.launch(active)
+        self.assertTrue(active.started.wait(1.0))
+
+        self.engine.transitions.subscribe(
+            lambda transition: self.engine.launch(late)
+            if transition.mission_id == active.id
+            and transition.current is MissionPhase.STOPPED
+            else None
+        )
+        self.engine.stop()
+
+        self.assertFalse(self.engine.running)
+        self.assertFalse(self.engine.stopping)
+        self.assertNotIn(late.id, {item.mission_id for item in self.engine.snapshots()})
+
+    def test_start_timeout_is_observed_outside_blocked_callback(self) -> None:
+        class StartTimedMission(StuckMission):
+            timeout_seconds = 0.01
+
+        mission = StartTimedMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.entered.wait(1.0))
+
+        wait_for_phase(self.engine, mission, MissionPhase.STOPPING, timeout=0.3)
+        mission.release.set()
+        wait_for_phase(self.engine, mission, MissionPhase.FAILED, timeout=1.0)
 
     def test_execution_and_queue_timeouts_fail_deterministically(self) -> None:
         timed = TimedMission()

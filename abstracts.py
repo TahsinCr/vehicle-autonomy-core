@@ -8,6 +8,30 @@ from types import MappingProxyType
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 
+class _FrozenMapping(Mapping[Any, Any]):
+    """Internal immutable mapping whose contents are already detached."""
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: dict[Any, Any]) -> None:
+        self._items = MappingProxyType(items)
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._items[key]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        return repr(self._items)
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_FrozenMapping":
+        return self
+
+
 class Model(ABC):
     """Domain model contract independent from UI and storage technologies."""
 
@@ -41,10 +65,10 @@ class Model(ABC):
 def _freeze_model_value(value: Any) -> Any:
     """Detach and recursively freeze a value stored by a public model."""
 
-    if isinstance(value, MappingProxyType):
+    if isinstance(value, _FrozenMapping):
         return value
     if isinstance(value, Mapping):
-        return MappingProxyType(
+        return _FrozenMapping(
             {deepcopy(key): _freeze_model_value(item) for key, item in value.items()}
         )
     if isinstance(value, tuple):
@@ -62,6 +86,14 @@ def _freeze_model_value(value: Any) -> Any:
 def _copy_model_value(value: Any, *, lists: bool = False) -> Any:
     """Return a detached, mutable representation of a frozen model value."""
 
+    if isinstance(value, Model):
+        return value.to_dict()
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _copy_model_value(getattr(value, field.name), lists=lists)
+            for field in fields(value)
+            if not field.name.startswith("_")
+        }
     if isinstance(value, Mapping):
         return {
             deepcopy(key): _copy_model_value(item, lists=lists)
@@ -70,6 +102,8 @@ def _copy_model_value(value: Any, *, lists: bool = False) -> Any:
     if isinstance(value, tuple):
         copied = tuple(_copy_model_value(item, lists=lists) for item in value)
         return list(copied) if lists else copied
+    if isinstance(value, list):
+        return [_copy_model_value(item, lists=lists) for item in value]
     if isinstance(value, frozenset):
         return {_copy_model_value(item, lists=lists) for item in value}
     return deepcopy(value)

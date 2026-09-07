@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import inspect
 import threading
@@ -22,6 +23,7 @@ from .registration import (
     DependencyMap,
     Lifetime,
     InitializationGate,
+    InitializationRetiredError,
     MISSING,
     Provider,
     ProviderCallable,
@@ -60,7 +62,10 @@ class DependencyContainer:
         "auto_wire",
         "parent",
         "_context_tokens",
+        "_async_operations",
+        "_async_shutdown",
         "_providers",
+        "_registration_lock",
         "_scope_cache",
         "_scope_initializers",
         "_scope_lock",
@@ -76,10 +81,13 @@ class DependencyContainer:
         self.parent = parent
         self.auto_wire = auto_wire
         self._providers: dict[Token, Provider] = {}
+        self._registration_lock = threading.RLock()
         self._scope_cache: dict[Token, Any] = {}
         self._scope_lock = threading.RLock()
         self._scope_initializers: dict[Token, InitializationGate] = {}
         self._tracker = ResourceTracker()
+        self._async_operations: dict[Token, asyncio.Task[None]] = {}
+        self._async_shutdown: asyncio.Task[None] | None = None
         self._context_tokens: list[
             contextvars.Token[DependencyContainer | None]
         ] = []
@@ -133,21 +141,22 @@ class DependencyContainer:
             dependencies=dependencies,
             priority=priority,
         )
-        if (
-            registration.token in self._providers
-            or registration.token in self._scope_cache
-        ):
-            self.unregister(registration.token)
-        self._providers[registration.token] = Provider(
-            token=registration.token,
-            factory=registration.factory,
-            lifetime=registration.lifetime,
-            dependencies=registration.dependencies,
-            priority=registration.priority,
-            instance=registration.instance,
-        )
-        if registration.instance is not MISSING:
-            self._tracker.remember(registration.instance)
+        with self._registration_lock:
+            if (
+                registration.token in self._providers
+                or registration.token in self._scope_cache
+            ):
+                self.unregister(registration.token)
+            self._providers[registration.token] = Provider(
+                token=registration.token,
+                factory=registration.factory,
+                lifetime=registration.lifetime,
+                dependencies=registration.dependencies,
+                priority=registration.priority,
+                instance=registration.instance,
+            )
+            if registration.instance is not MISSING:
+                self._tracker.remember(registration.instance)
         return self
 
     def singleton(
@@ -285,10 +294,38 @@ class DependencyContainer:
                 f"{format_token(type(async_only))} async kapanıyor; "
                 "unregister_async kullan."
             )
+        gates = self._retire_token(token)
+        candidates = self._token_instances(token)
+        async_only = next(
+            (item for item in candidates if requires_async_disposal(item)),
+            None,
+        )
+        if async_only is not None:
+            for gate in gates:
+                gate.reactivate()
+            raise AsyncDependencyError(
+                f"{format_token(type(async_only))} async kapanıyor; "
+                "unregister_async kullan."
+            )
         dispose_many(self._detach_token_instances(token))
 
     async def unregister_async(self, token: Token) -> None:
-        await dispose_many_async(self._detach_token_instances(token))
+        task = self._async_operations.get(token)
+        if task is None:
+            task = asyncio.create_task(self._unregister_async(token))
+            self._async_operations[token] = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.cancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pass
+            raise
+        finally:
+            if task.done() and self._async_operations.get(token) is task:
+                self._async_operations.pop(token, None)
 
     def has(self, token: Token) -> bool:
         return self._find_provider(token) is not None
@@ -353,10 +390,54 @@ class DependencyContainer:
                 f"{format_token(type(async_only))} async kapanıyor; "
                 "shutdown_async kullan."
             )
+        self._retire_all()
         dispose_many(self._detach_shutdown_instances())
 
     async def shutdown_async(self) -> None:
-        await dispose_many_async(self._detach_shutdown_instances())
+        task = self._async_shutdown
+        if task is None:
+            task = asyncio.create_task(self._shutdown_async())
+            self._async_shutdown = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.cancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pass
+            raise
+        finally:
+            if task.done() and self._async_shutdown is task:
+                self._async_shutdown = None
+
+    async def _unregister_async(self, token: Token) -> None:
+        cancelled = False
+        try:
+            await self._retire_token_async(token)
+        except asyncio.CancelledError:
+            cancelled = True
+            await self._retire_token_async(token)
+        try:
+            await dispose_many_async(self._detach_token_instances(token))
+        except asyncio.CancelledError:
+            cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _shutdown_async(self) -> None:
+        cancelled = False
+        try:
+            await self._retire_all_async()
+        except asyncio.CancelledError:
+            cancelled = True
+            await self._retire_all_async()
+        try:
+            await dispose_many_async(self._detach_shutdown_instances())
+        except asyncio.CancelledError:
+            cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _normalize_registration(
         self,
@@ -419,7 +500,8 @@ class DependencyContainer:
             _current_container.reset(self._context_tokens.pop())
 
     def _find_provider(self, token: Token) -> Provider | None:
-        provider = self._providers.get(token)
+        with self._registration_lock:
+            provider = self._providers.get(token)
         if provider is not None:
             return provider
         return self.parent._find_provider(token) if self.parent is not None else None
@@ -568,6 +650,50 @@ class DependencyContainer:
         with self._scope_lock:
             return self._scope_initializers.setdefault(token, InitializationGate())
 
+    def _token_gates(self, token: Token) -> tuple[InitializationGate, ...]:
+        gates: list[InitializationGate] = []
+        with self._registration_lock, self._scope_lock:
+            provider = self._providers.get(token)
+            if provider is not None:
+                gates.append(provider.initialization)
+            scoped = self._scope_initializers.get(token)
+            if scoped is not None and scoped not in gates:
+                gates.append(scoped)
+        return tuple(gates)
+
+    def _retire_token(self, token: Token) -> tuple[InitializationGate, ...]:
+        gates = self._token_gates(token)
+        for gate in gates:
+            gate.retire()
+        return gates
+
+    async def _retire_token_async(self, token: Token) -> None:
+        gates = self._token_gates(token)
+        for gate in gates:
+            gate.begin_retire()
+        await asyncio.gather(*(gate.retire_async() for gate in gates))
+
+    def _all_local_gates(self) -> tuple[InitializationGate, ...]:
+        with self._registration_lock, self._scope_lock:
+            return tuple(
+                dict.fromkeys(
+                    [
+                        *(provider.initialization for provider in self._providers.values()),
+                        *self._scope_initializers.values(),
+                    ]
+                )
+            )
+
+    def _retire_all(self) -> None:
+        for gate in self._all_local_gates():
+            gate.retire()
+
+    async def _retire_all_async(self) -> None:
+        gates = self._all_local_gates()
+        for gate in gates:
+            gate.begin_retire()
+        await asyncio.gather(*(gate.retire_async() for gate in gates))
+
     @staticmethod
     def _resolve_cached_sync(
         gate: InitializationGate,
@@ -579,9 +705,14 @@ class DependencyContainer:
             cached = read()
             if cached is not MISSING:
                 return cached
-            if gate.claim():
-                break
-            gate.wait()
+            try:
+                if gate.claim():
+                    break
+                gate.wait()
+            except InitializationRetiredError as exc:
+                if "Synchronous resolution" in str(exc):
+                    raise AsyncDependencyError(str(exc)) from exc
+                raise DependencyResolutionError(str(exc)) from exc
         try:
             value = create()
             store(value)
@@ -600,9 +731,12 @@ class DependencyContainer:
             cached = read()
             if cached is not MISSING:
                 return cached
-            if gate.claim():
-                break
-            await gate.wait_async()
+            try:
+                if gate.claim(asynchronous=True):
+                    break
+                await gate.wait_async()
+            except InitializationRetiredError as exc:
+                raise DependencyResolutionError(str(exc)) from exc
         try:
             value = await create()
             store(value)
@@ -645,9 +779,8 @@ class DependencyContainer:
 
     def _shutdown_instances(self) -> tuple[Any, ...]:
         candidates = list(self._scope_cache.values())
-        if self.parent is None:
-            for provider in self._providers.values():
-                candidates.extend(cached_instances(provider))
+        for provider in self._providers.values():
+            candidates.extend(cached_instances(provider))
         return self._tracker.ordered(candidates)
 
     def _detach_shutdown_instances(self) -> tuple[Any, ...]:
@@ -655,10 +788,9 @@ class DependencyContainer:
         self._scope_cache.clear()
         with self._scope_lock:
             self._scope_initializers.clear()
-        if self.parent is None:
-            for provider in self._providers.values():
-                provider.instance = MISSING
-                provider.singleton = MISSING
+        for provider in self._providers.values():
+            provider.instance = MISSING
+            provider.singleton = MISSING
         ordered = self._tracker.ordered(candidates)
         self._tracker.forget(ordered)
         return ordered

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Iterable
 from typing import Any
@@ -15,12 +16,13 @@ from .resolution import close_awaitable, format_token, maybe_await
 class ResourceTracker:
     def __init__(self) -> None:
         self._creation_order: list[Any] = []
+        self._identities: set[int] = set()
 
     def remember(self, instance: Any) -> None:
-        if instance is not MISSING and not any(
-            item is instance for item in self._creation_order
-        ):
+        identity = id(instance)
+        if instance is not MISSING and identity not in self._identities:
             self._creation_order.append(instance)
+            self._identities.add(identity)
 
     def ordered(self, candidates: Iterable[Any]) -> tuple[Any, ...]:
         values = tuple(item for item in candidates if item is not MISSING)
@@ -44,6 +46,7 @@ class ResourceTracker:
         self._creation_order = [
             item for item in self._creation_order if id(item) not in identities
         ]
+        self._identities.difference_update(identities)
 
 
 def cached_instances(provider: Provider) -> tuple[Any, ...]:
@@ -111,6 +114,7 @@ def dispose_many(instances: Iterable[Any]) -> None:
 
 async def dispose_many_async(instances: Iterable[Any]) -> None:
     errors: list[Exception] = []
+    cancellation: asyncio.CancelledError | None = None
     seen: set[int] = set()
     for instance in instances:
         if instance is MISSING or id(instance) in seen:
@@ -118,9 +122,13 @@ async def dispose_many_async(instances: Iterable[Any]) -> None:
         seen.add(id(instance))
         try:
             await dispose_async(instance)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
         except Exception as exc:
             errors.append(exc)
     raise_disposal_errors(errors)
+    if cancellation is not None:
+        raise cancellation
 
 
 def raise_disposal_errors(errors: Iterable[Exception]) -> None:

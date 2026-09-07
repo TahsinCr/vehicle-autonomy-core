@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 import unittest
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 from src.core.events import (
@@ -15,6 +16,7 @@ from src.core.events import (
     EventBus,
     EventBusActions,
     EventBusClosedError,
+    EventBusError,
     EventFilter,
     EventErrorContext,
     EventTimeoutContext,
@@ -26,6 +28,19 @@ from src.core.compatibility import ExceptionGroup
 
 
 class EventBusTests(unittest.TestCase):
+    def test_parametrized_event_contracts_construct_on_python_310(self) -> None:
+        event_filter = EventFilter[int](predicate=lambda value: value > 0)
+        error = EventErrorContext[int](1, RuntimeError("broken"))
+        timeout = EventTimeoutContext[int](event_filter, 0.1)
+
+        self.assertTrue(event_filter.matches(1))
+        self.assertEqual(str(error.error), "broken")
+        self.assertEqual(timeout.timeout, 0.1)
+        self.assertIsInstance(EventBusActions[int](), EventBusActions)
+        self.assertIsInstance(AsyncEventBusActions[int](), AsyncEventBusActions)
+        with self.assertRaises(AttributeError):
+            event_filter.predicate = None  # type: ignore[misc]
+
     def test_bus_inherits_base_and_filters_by_type_and_predicate(self) -> None:
         bus = EventBus[object]()
         received: list[int] = []
@@ -100,6 +115,27 @@ class EventBusTests(unittest.TestCase):
         replayed: list[int] = []
         bus.subscribe(replayed.append, replay=2)
         self.assertEqual(replayed, [3, 4])
+
+    def test_limited_history_reads_do_not_copy_the_complete_buffer(self) -> None:
+        class NoFullIterationDeque(deque[int]):
+            def __iter__(self):  # type: ignore[override]
+                raise AssertionError("limited reads copied the complete history")
+
+        history = MemoryEventHistory[int](capacity=10_000)
+        history._events = NoFullIterationDeque(  # type: ignore[attr-defined]
+            range(10_000),
+            maxlen=10_000,
+        )
+        divisible_by_seven = EventFilter[int](
+            predicate=lambda value: value % 7 == 0
+        )
+
+        self.assertEqual(history.query(limit=2), (9_998, 9_999))
+        self.assertEqual(
+            history.query(divisible_by_seven, limit=2),
+            (9_989, 9_996),
+        )
+        self.assertEqual(history.latest(divisible_by_seven), 9_996)
 
     def test_live_publish_waits_behind_subscription_replay(self) -> None:
         bus = EventBus[int](history=4)
@@ -206,6 +242,16 @@ class EventBusTests(unittest.TestCase):
         bus.close()
         self.assertFalse(waiting.active)
 
+    def test_periodic_schedule_capacity_is_bounded(self) -> None:
+        bus = EventBus[str](max_schedules=1)
+        schedule = bus.publish_every("first", 60.0, immediately=False)
+        try:
+            with self.assertRaisesRegex(EventBusError, "capacity"):
+                bus.publish_every("second", 60.0, immediately=False)
+        finally:
+            schedule.cancel()
+            bus.close()
+
     def test_wait_for_receives_matching_event_and_close_wakes_waiter(self) -> None:
         bus = EventBus[int]()
         result: list[int | None] = []
@@ -261,6 +307,22 @@ class EventBusTests(unittest.TestCase):
             )
             threaded_bus.publish(1)
         self.assertTrue(callback_threads[0].startswith("EventWorker"))
+
+    def test_executor_handler_can_publish_reentrantly_with_one_worker(self) -> None:
+        received: list[int] = []
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            bus = EventBus[int](executor=executor)
+
+            def handler(value: int) -> None:
+                received.append(value)
+                if value == 1:
+                    bus.publish(2)
+
+            bus.subscribe(handler)
+            result = bus.publish(1)
+
+        self.assertTrue(result.successful)
+        self.assertEqual(received, [1, 2])
 
     def test_sync_bus_rejects_async_handler(self) -> None:
         async def handler(_event: int) -> None:
@@ -392,6 +454,24 @@ class AsyncEventBusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(received, [1, 2])
 
+    async def test_cancelled_replay_removes_unreachable_subscription(self) -> None:
+        bus = AsyncEventBus[int](history=2, replay_buffer_limit=4)
+        await bus.publish(1)
+        entered = asyncio.Event()
+
+        async def handler(_event: int) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        subscribing = asyncio.create_task(bus.subscribe(handler, replay=1))
+        await asyncio.wait_for(entered.wait(), 1.0)
+        subscribing.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await subscribing
+
+        self.assertEqual(bus.subscriber_count, 0)
+        await bus.close()
+
     async def test_async_wait_subscription_is_atomic_with_publish(self) -> None:
         bus = AsyncEventBus[int]()
         await bus._lock.acquire()
@@ -487,6 +567,16 @@ class AsyncEventBusTests(unittest.IsolatedAsyncioTestCase):
         waiting = await bus.publish_every("late", 60.0, immediately=False)
         await bus.close()
         self.assertFalse(waiting.active)
+
+    async def test_async_periodic_schedule_capacity_is_bounded(self) -> None:
+        bus = AsyncEventBus[str](max_schedules=1)
+        schedule = await bus.publish_every("first", 60.0, immediately=False)
+        try:
+            with self.assertRaisesRegex(EventBusError, "capacity"):
+                await bus.publish_every("second", 60.0, immediately=False)
+        finally:
+            await schedule.cancel()
+            await bus.close()
 
     async def test_threadsafe_publish_uses_owning_loop(self) -> None:
         bus = AsyncEventBus[int]()

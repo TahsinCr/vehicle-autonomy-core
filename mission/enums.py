@@ -120,6 +120,7 @@ _TRANSITIONS: dict[MissionPhase, frozenset[MissionPhase]] = {
             MissionPhase.STARTING,
             MissionPhase.STOPPED,
             MissionPhase.CANCELLED,
+            MissionPhase.FAILED,
         }
     ),
     MissionPhase.QUEUED: frozenset(

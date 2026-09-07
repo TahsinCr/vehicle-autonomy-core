@@ -176,6 +176,14 @@ class ApplicationCodecTests(unittest.TestCase):
                 1,
                 b'{"type":"status","payload":{"value":NaN},"sent_at":1}',
             )
+        for body in (
+            b'{"type":null,"payload":{},"sent_at":1}',
+            b'{"type":"status","payload":{},"sent_at":1,"reply":"false"}',
+        ):
+            with self.subTest(body=body), self.assertRaises(
+                MavlinkApplicationProtocolError
+            ):
+                MavlinkApplicationCodec.decode_packet(1, body)
 
     def test_unsupported_protocol_version_is_rejected(self) -> None:
         packet = MavlinkApplicationPacket("status")

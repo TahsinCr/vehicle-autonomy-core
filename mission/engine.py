@@ -66,6 +66,9 @@ class MissionEngine(Service):
         scheduler_interval: float = 0.05,
         stop_timeout: float = 2.0,
         event_history: int = 1_000,
+        execution_history: int = 256,
+        max_active_missions: int | None = None,
+        max_queued_missions: int | None = None,
         mission_factory: MissionFactory | None = None,
         lifecycle: MissionLifecycle | None = None,
         scheduler: MissionScheduler | None = None,
@@ -76,6 +79,18 @@ class MissionEngine(Service):
             raise ValueError("Mission scheduler interval must be positive and finite")
         if not math.isfinite(stop_timeout) or stop_timeout <= 0:
             raise ValueError("Mission stop timeout must be positive and finite")
+        if isinstance(execution_history, bool) or execution_history <= 0:
+            raise ValueError("Mission execution history must be a positive integer")
+        for name, value in (
+            ("Maximum active missions", max_active_missions),
+            ("Maximum queued missions", max_queued_missions),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer or None")
         if lifecycle is not None and not isinstance(lifecycle, MissionLifecycle):
             raise TypeError("Mission engine lifecycle must be MissionLifecycle")
         if scheduler is not None and not isinstance(scheduler, MissionScheduler):
@@ -83,11 +98,19 @@ class MissionEngine(Service):
         self._scheduler_interval = scheduler_interval
         self._stop_timeout = stop_timeout
         self._mission_factory = mission_factory or (lambda mission_type: mission_type())
+        self._execution_history_limit = int(execution_history)
+        self._max_active_missions = max_active_missions
+        self._max_queued_missions = max_queued_missions
         self._runtimes: dict[int, MissionRuntime] = {}
+        self._active_ids: set[int] = set()
+        self._queued_ids: set[int] = set()
+        self._resource_owners: dict[str, set[int]] = {}
+        self._succeeded_type_counts: dict[type[Mission], int] = {}
         self._event_sequence = 0
         self._pending_transitions: deque[tuple[MissionTransition, int]] = deque()
         self._transition_publish_lock = threading.RLock()
         self._running = False
+        self._stopping = False
         self._closed = False
         self._scheduler_stop = threading.Event()
         self._scheduler_wake = threading.Event()
@@ -110,12 +133,27 @@ class MissionEngine(Service):
         with self._condition:
             return self._closed
 
+    @property
+    def stopping(self) -> bool:
+        with self._condition:
+            return self._stopping
+
+    @property
+    def max_active_missions(self) -> int | None:
+        return self._max_active_missions
+
+    @property
+    def max_queued_missions(self) -> int | None:
+        return self._max_queued_missions
+
     def start(self) -> None:
         """Start queue and retry scheduling; safe to call repeatedly."""
 
         with self._condition:
             if self._closed:
                 raise MissionError("Mission engine is closed")
+            if self._stopping:
+                raise MissionError("Mission engine is stopping")
             if self._running:
                 return
             self._running = True
@@ -134,16 +172,8 @@ class MissionEngine(Service):
         """Stop active work and the scheduler while keeping registrations."""
 
         with self._condition:
-            active_ids = tuple(
-                mission_id
-                for mission_id, runtime in self._runtimes.items()
-                if runtime.snapshot.phase.active
-            )
-            queued_ids = tuple(
-                mission_id
-                for mission_id, runtime in self._runtimes.items()
-                if runtime.snapshot.phase is MissionPhase.QUEUED
-            )
+            active_ids = tuple(self._active_ids)
+            queued_ids = tuple(self._queued_ids)
             thread = self._scheduler_thread
             if (
                 not self._running
@@ -152,6 +182,7 @@ class MissionEngine(Service):
                 and (thread is None or not thread.is_alive())
             ):
                 return
+            self._stopping = True
             self._running = False
             self._scheduler_stop.set()
             self._scheduler_wake.set()
@@ -179,9 +210,17 @@ class MissionEngine(Service):
                 and not thread.is_alive()
             ):
                 self._scheduler_thread = None
-        self._emit(MissionEventType.MANAGER, "Mission engine stopped")
+            if not errors:
+                self._stopping = False
+            self._condition.notify_all()
         if errors:
+            self._emit(
+                MissionEventType.ERROR,
+                "Mission engine stop incomplete; cleanup can be retried",
+                fields={"error_count": len(errors)},
+            )
             raise ExceptionGroup("Mission engine shutdown failed", errors)
+        self._emit(MissionEventType.MANAGER, "Mission engine stopped")
 
     def close(self) -> None:
         """Stop the engine, unbind missions, and close public event channels."""
@@ -194,6 +233,10 @@ class MissionEngine(Service):
             self._closed = True
             runtimes = tuple(self._runtimes.values())
             self._runtimes.clear()
+            self._active_ids.clear()
+            self._queued_ids.clear()
+            self._resource_owners.clear()
+            self._succeeded_type_counts.clear()
             self._orchestrator.clear()
         for runtime in runtimes:
             runtime.mission.unbind_control(runtime.control)
@@ -268,6 +311,20 @@ class MissionEngine(Service):
 
         return self._orchestrator.chains.cancel(chain_id)
 
+    def wait_chain(
+        self,
+        chain_id: str,
+        timeout: float | None = None,
+    ) -> MissionChainSnapshot | None:
+        """Wait for one chain execution to become terminal."""
+
+        return self._orchestrator.chains.wait(chain_id, timeout)
+
+    def forget_chain(self, chain_id: str) -> bool:
+        """Remove one completed chain execution from in-memory history."""
+
+        return self._orchestrator.chains.forget(chain_id)
+
     def start_parallel(self, group: MissionParallelGroup) -> MissionParallelSnapshot:
         """Start a named, policy-controlled parallel mission group."""
 
@@ -287,6 +344,20 @@ class MissionEngine(Service):
         """Cancel every active child in a parallel execution."""
 
         return self._orchestrator.parallel.cancel(group_id)
+
+    def wait_parallel(
+        self,
+        group_id: str,
+        timeout: float | None = None,
+    ) -> MissionParallelSnapshot | None:
+        """Wait for one parallel execution to become terminal."""
+
+        return self._orchestrator.parallel.wait(group_id, timeout)
+
+    def forget_parallel(self, group_id: str) -> bool:
+        """Remove one completed parallel execution from in-memory history."""
+
+        return self._orchestrator.parallel.forget(group_id)
 
     def launch_background(
         self,
@@ -422,6 +493,8 @@ class MissionEngine(Service):
         with self._condition:
             if self._closed:
                 raise MissionError("Mission engine is closed")
+            if self._stopping:
+                raise MissionError("Mission engine is stopping")
             if mission.id in self._runtimes:
                 raise MissionRegistrationError(
                     f"Mission {mission.id} is already registered"
@@ -453,7 +526,31 @@ class MissionEngine(Service):
                 raise MissionRegistrationError(
                     f"Active or queued mission {mission_id} cannot be unregistered"
                 )
+            worker = runtime.worker
+        if worker is threading.current_thread():
+            raise MissionRegistrationError(
+                f"Mission {mission_id} cannot unregister its own worker"
+            )
+        if worker is not None and worker.is_alive():
+            worker.join(self._stop_timeout)
+            if worker.is_alive():
+                raise MissionTimeoutError(
+                    f"Mission {mission_id} worker did not finish before unregister"
+                )
+        with self._condition:
+            current = self._runtimes.get(mission_id)
+            if current is None:
+                return False
+            if current is not runtime:
+                raise MissionRegistrationError(
+                    f"Mission {mission_id} registration changed during unregister"
+                )
+            if runtime.snapshot.phase.active or runtime.snapshot.phase is MissionPhase.QUEUED:
+                raise MissionRegistrationError(
+                    f"Active or queued mission {mission_id} cannot be unregistered"
+                )
             self._runtimes.pop(mission_id)
+            self._remove_runtime_indexes_locked(runtime)
             self._orchestrator.forget_mission(mission_id)
         runtime.mission.unbind_control(runtime.control)
         self._emit(
@@ -462,6 +559,69 @@ class MissionEngine(Service):
             mission_id=mission_id,
         )
         return True
+
+    def _ensure_launchable(self) -> None:
+        with self._condition:
+            if self._closed:
+                raise MissionError("Mission engine is closed")
+            if self._stopping:
+                raise MissionError("Mission engine is stopping")
+
+    def _update_phase_indexes_locked(
+        self,
+        runtime: MissionRuntime,
+        previous: MissionPhase,
+        current: MissionPhase,
+    ) -> None:
+        mission_id = runtime.mission.id
+        if previous.active and not current.active:
+            self._active_ids.discard(mission_id)
+            for resource in runtime.mission.resources:
+                owners = self._resource_owners.get(resource)
+                if owners is not None:
+                    owners.discard(mission_id)
+                    if not owners:
+                        self._resource_owners.pop(resource, None)
+        elif current.active and not previous.active:
+            self._active_ids.add(mission_id)
+            for resource in runtime.mission.resources:
+                self._resource_owners.setdefault(resource, set()).add(mission_id)
+
+        if previous is MissionPhase.QUEUED:
+            self._queued_ids.discard(mission_id)
+        if current is MissionPhase.QUEUED:
+            self._queued_ids.add(mission_id)
+
+        mission_type = type(runtime.mission)
+        if previous is MissionPhase.SUCCEEDED:
+            count = self._succeeded_type_counts.get(mission_type, 0) - 1
+            if count > 0:
+                self._succeeded_type_counts[mission_type] = count
+            else:
+                self._succeeded_type_counts.pop(mission_type, None)
+        if current is MissionPhase.SUCCEEDED:
+            self._succeeded_type_counts[mission_type] = (
+                self._succeeded_type_counts.get(mission_type, 0) + 1
+            )
+
+    def _remove_runtime_indexes_locked(self, runtime: MissionRuntime) -> None:
+        phase = runtime.snapshot.phase
+        self._update_phase_indexes_locked(runtime, phase, MissionPhase.REGISTERED)
+
+    def _discard_orchestration_missions_locked(
+        self,
+        mission_ids: Iterable[int],
+    ) -> None:
+        """Release terminal missions owned only by a forgotten execution."""
+
+        for mission_id in mission_ids:
+            runtime = self._runtimes.get(mission_id)
+            if runtime is None or not runtime.snapshot.phase.terminal:
+                continue
+            self._runtimes.pop(mission_id, None)
+            self._remove_runtime_indexes_locked(runtime)
+            self._orchestrator.forget_mission(mission_id)
+            runtime.mission.unbind_control(runtime.control)
 
     def mission(self, mission: MissionReference) -> Mission:
         return self._runtime(mission).mission

@@ -264,6 +264,7 @@ class MavlinkMessageRouter(Service):
                     predicate is None or predicate(envelope.message)
                 ):
                     return envelope.message
+            cursor = observed_sequence
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:

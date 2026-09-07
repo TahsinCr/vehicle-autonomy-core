@@ -130,6 +130,15 @@ class CoreTests(unittest.TestCase):
             "altitude": 3,
         })
 
+        child = _AutomaticModel()
+        child.values = [3]
+        nested = _AutomaticModel()
+        nested.values = [child]
+        self.assertEqual(
+            nested.to_dict(),
+            {"name": "automatic", "values": [{"name": "automatic", "values": [3]}]},
+        )
+
     def test_event_bus_subscription_can_be_cancelled(self) -> None:
         stream = EventBus[int]()
         received: list[int] = []

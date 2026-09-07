@@ -69,6 +69,8 @@ class AsyncEventBus(BaseEventBus[T]):
         history: EventHistory[T] | int | None = None,
         error_policy: ErrorPolicy = ErrorPolicy.ISOLATE,
         delivery_mode: DeliveryMode = DeliveryMode.SEQUENTIAL,
+        replay_buffer_limit: int = 1_000,
+        max_schedules: int = 64,
         actions: AsyncEventBusActions[T] | None = None,
         on_before: Callable[[T], Awaitable[None]] | None = None,
         on_after: Callable[[T, PublishResult], Awaitable[None]] | None = None,
@@ -76,6 +78,14 @@ class AsyncEventBus(BaseEventBus[T]):
         on_timeout: Callable[[EventTimeoutContext[T]], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(history=history, error_policy=error_policy)
+        if replay_buffer_limit <= 0:
+            raise ValueError("Replay buffer limit must be positive")
+        if (
+            isinstance(max_schedules, bool)
+            or not isinstance(max_schedules, int)
+            or max_schedules <= 0
+        ):
+            raise ValueError("Maximum periodic schedules must be a positive integer")
         direct_actions = (on_before, on_after, on_error, on_timeout)
         if actions is not None and any(action is not None for action in direct_actions):
             raise ValueError("Use actions or direct on_* callbacks, not both")
@@ -96,6 +106,8 @@ class AsyncEventBus(BaseEventBus[T]):
                     "AsyncEventBus actions must be async"
                 )
         self._delivery_mode = DeliveryMode(delivery_mode)
+        self._replay_buffer_limit = int(replay_buffer_limit)
+        self._max_schedules = max_schedules
         self._subscribers: dict[int, _AsyncSubscriber[T]] = {}
         self._next_id = 0
         self._closed = False
@@ -167,30 +179,34 @@ class AsyncEventBus(BaseEventBus[T]):
             )
 
         if subscriber.replaying:
-            pending: tuple[T, ...] | None = replay_events
-            while pending is not None:
-                for event in pending:
-                    claimed, final = subscriber.claim()
-                    if not claimed:
-                        break
-                    if final:
-                        await subscription._consume()
-                    try:
-                        await callback(event)
-                    except Exception as exc:
-                        action_errors = await self._notify_errors(event, (exc,))
-                        self._failed += 1 + len(action_errors)
-                        if self._error_policy is ErrorPolicy.RAISE:
-                            await subscription.cancel()
-                            raise ExceptionGroup(
-                                "Async event replay failed",
-                                [exc, *action_errors],
-                            )
-                    else:
-                        self._delivered += 1
-                        if final:
+            try:
+                pending: tuple[T, ...] | None = replay_events
+                while pending is not None:
+                    for event in pending:
+                        claimed, final = subscriber.claim()
+                        if not claimed:
                             break
-                pending = subscriber.finish_replay()
+                        if final:
+                            await subscription._consume()
+                        try:
+                            await callback(event)
+                        except Exception as exc:
+                            action_errors = await self._notify_errors(event, (exc,))
+                            self._failed += 1 + len(action_errors)
+                            if self._error_policy is ErrorPolicy.RAISE:
+                                await subscription.cancel()
+                                raise ExceptionGroup(
+                                    "Async event replay failed",
+                                    [exc, *action_errors],
+                                )
+                        else:
+                            self._delivered += 1
+                            if final:
+                                break
+                    pending = subscriber.finish_replay()
+            except BaseException:
+                await asyncio.shield(subscription.cancel())
+                raise
         return subscription
 
     def _subscribe_locked(
@@ -214,6 +230,7 @@ class AsyncEventBus(BaseEventBus[T]):
             delivery_limit,
             subscription,
             replaying=replaying,
+            pending=deque(maxlen=self._replay_buffer_limit),
         )
         self._subscribers[subscription_id] = subscriber
         return subscription, subscriber
@@ -362,6 +379,8 @@ class AsyncEventBus(BaseEventBus[T]):
 
         async with self._lock:
             self._ensure_open()
+            if len(self._schedules) >= self._max_schedules:
+                raise EventBusError("Maximum periodic schedule capacity reached")
             schedule_id = self._next_id
             self._next_id += 1
             task: asyncio.Task[None] | None = None

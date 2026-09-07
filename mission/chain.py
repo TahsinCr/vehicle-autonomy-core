@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,7 @@ class MissionChainExecutor:
         self._runs: dict[str, MissionChainSnapshot] = {}
         self._latest: dict[str, str] = {}
         self._mission_runs: dict[int, str] = {}
+        self._completed: deque[str] = deque()
 
     @property
     def engine(self) -> "MissionEngine":
@@ -84,6 +86,32 @@ class MissionChainExecutor:
                 raise MissionNotFoundError(
                     f"Mission chain execution not found: {identifier}"
                 ) from exc
+
+    def wait(
+        self,
+        identifier: str,
+        timeout: float | None = None,
+    ) -> MissionChainSnapshot | None:
+        with self.engine._condition:
+            execution_id = self._latest.get(identifier, identifier)
+            if execution_id not in self._runs:
+                raise MissionNotFoundError(f"Mission chain not found: {identifier}")
+            ready = self.engine._condition.wait_for(
+                lambda: not self._runs[execution_id].active,
+                timeout=timeout,
+            )
+            return self._runs[execution_id] if ready else None
+
+    def forget(self, identifier: str) -> bool:
+        with self.engine._condition:
+            execution_id = self._latest.get(identifier, identifier)
+            snapshot = self._runs.get(execution_id)
+            if snapshot is None:
+                return False
+            if snapshot.active:
+                raise ValueError("Active mission chain cannot be forgotten")
+            self._remove_run_locked(execution_id)
+            return True
 
     def stop(self, identifier: str) -> MissionChainSnapshot:
         return self._terminate(identifier, cancelled=False)
@@ -179,6 +207,9 @@ class MissionChainExecutor:
                     )
                     launch_next = True
         if owner_phase is not None:
+            with self.engine._condition:
+                self._retain_terminal_locked(execution_id)
+                self.engine._condition.notify_all()
             self.engine._emit(
                 MissionEventType.CHAIN,
                 f"Mission chain finished: {execution_id}",
@@ -218,8 +249,18 @@ class MissionChainExecutor:
                 reason=reason,
             )
             children = self._active_children_locked(execution_id)
-        for mission_id in children:
-            self.engine.stop_mission(mission_id, reason=reason)
+            self._retain_terminal_locked(execution_id)
+            self.engine._condition.notify_all()
+        self.orchestrator.run_all(
+            (
+                lambda mission_id=mission_id: self.engine.stop_mission(
+                    mission_id,
+                    reason=reason,
+                )
+                for mission_id in children
+            ),
+            "Mission chain children could not all be stopped",
+        )
         self.engine._emit(
             MissionEventType.CHAIN,
             reason,
@@ -250,6 +291,7 @@ class MissionChainExecutor:
             self._runs.clear()
             self._latest.clear()
             self._mission_runs.clear()
+            self._completed.clear()
 
     def _launch_stage(self, execution_id: str) -> None:
         with self.engine._condition:
@@ -333,19 +375,37 @@ class MissionChainExecutor:
             reason = (
                 "Mission chain cancelled" if cancelled else "Mission chain stopped"
             )
+            children = self._active_children_locked(snapshot.execution_id)
+        self.orchestrator.run_all(
+            (
+                (
+                    lambda mission_id=mission_id: self.engine.cancel(
+                        mission_id,
+                        reason=reason,
+                    )
+                )
+                if cancelled
+                else (
+                    lambda mission_id=mission_id: self.engine.stop_mission(
+                        mission_id,
+                        reason=reason,
+                    )
+                )
+                for mission_id in children
+            ),
+            "Mission chain children could not all be terminated",
+        )
+        with self.engine._condition:
+            current = self._runs[snapshot.execution_id]
             self._runs[snapshot.execution_id] = replace(
-                snapshot,
+                current,
                 active=False,
                 cancelled=cancelled,
                 stopped=not cancelled,
                 reason=reason,
             )
-            children = self._active_children_locked(snapshot.execution_id)
-        for mission_id in children:
-            if cancelled:
-                self.engine.cancel(mission_id, reason=reason)
-            else:
-                self.engine.stop_mission(mission_id, reason=reason)
+            self._retain_terminal_locked(snapshot.execution_id)
+            self.engine._condition.notify_all()
         phase = MissionPhase.CANCELLED if cancelled else MissionPhase.STOPPED
         self.orchestrator.background.owner_terminated(
             "chain",
@@ -353,6 +413,26 @@ class MissionChainExecutor:
             phase,
         )
         return self.snapshot(snapshot.execution_id)
+
+    def _retain_terminal_locked(self, execution_id: str) -> None:
+        if execution_id not in self._completed:
+            self._completed.append(execution_id)
+        while len(self._completed) > self.engine._execution_history_limit:
+            self._remove_run_locked(self._completed.popleft())
+
+    def _remove_run_locked(self, execution_id: str) -> None:
+        snapshot = self._runs.pop(execution_id, None)
+        if snapshot is not None:
+            self.engine._discard_orchestration_missions_locked(
+                snapshot.child_mission_ids
+            )
+        try:
+            self._completed.remove(execution_id)
+        except ValueError:
+            pass
+        for chain_id, latest_id in tuple(self._latest.items()):
+            if latest_id == execution_id:
+                self._latest.pop(chain_id, None)
 
     def _active_children_locked(self, execution_id: str) -> tuple[int, ...]:
         direct = tuple(
@@ -366,11 +446,12 @@ class MissionChainExecutor:
         )
 
     def _is_pending(self, mission_id: int) -> bool:
-        phase = self.engine._runtime_locked(mission_id).snapshot.phase
-        return phase.active or phase in {
-            MissionPhase.REGISTERED,
-            MissionPhase.QUEUED,
-        }
+        with self.engine._condition:
+            phase = self.engine._runtime_locked(mission_id).snapshot.phase
+            return phase.active or phase in {
+                MissionPhase.REGISTERED,
+                MissionPhase.QUEUED,
+            }
 
     @staticmethod
     def _node_name(snapshot: MissionChainSnapshot) -> str:

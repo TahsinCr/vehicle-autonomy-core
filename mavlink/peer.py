@@ -49,6 +49,8 @@ class _PendingRequest:
     event: threading.Event
     response_types: frozenset[str]
     started_monotonic: float
+    source_system: int | None = None
+    source_component: int | None = None
     response: MavlinkApplicationPacket | None = None
     error: str = ""
 
@@ -280,11 +282,23 @@ class MavlinkApplicationPeer(Service):
         if timeout <= 0:
             raise ValueError("MAVLink application request timeout must be positive")
         normalized_responses = self._normalize_types(response_types)
+        resolved_system = (
+            self._resolve_target(self._target_system)
+            if target_system is None
+            else int(target_system)
+        )
+        resolved_component = (
+            self._resolve_target(self._target_component)
+            if target_component is None
+            else int(target_component)
+        )
         packet_id = self._reserve_packet_id()
         pending = _PendingRequest(
             threading.Event(),
             normalized_responses,
             time.monotonic(),
+            resolved_system or None,
+            resolved_component or None,
         )
         with self._lock:
             if not self._state.running:
@@ -295,8 +309,8 @@ class MavlinkApplicationPeer(Service):
                 packet_type,
                 payload,
                 packet_id=packet_id,
-                target_system=target_system,
-                target_component=target_component,
+                target_system=resolved_system,
+                target_component=resolved_component,
                 expects_response=True,
             )
             if on_sent is not None:
@@ -361,7 +375,11 @@ class MavlinkApplicationPeer(Service):
             if probe_started is not None:
                 round_trip_ms = max(0.0, (now_monotonic - probe_started) * 1000.0)
             pending = self._pending.get(response_to) if response_to is not None else None
-            if pending is not None and packet.packet_type in pending.response_types:
+            if (
+                pending is not None
+                and packet.packet_type in pending.response_types
+                and self._matches_pending_source(pending, packet)
+            ):
                 pending.response = packet
                 pending.event.set()
             self._state = replace(
@@ -547,3 +565,16 @@ class MavlinkApplicationPeer(Service):
             return int(value) if value is not None else None
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _matches_pending_source(
+        pending: _PendingRequest,
+        packet: MavlinkApplicationPacket,
+    ) -> bool:
+        return (
+            pending.source_system is None
+            or packet.source_system == pending.source_system
+        ) and (
+            pending.source_component is None
+            or packet.source_component == pending.source_component
+        )

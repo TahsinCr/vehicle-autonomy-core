@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from .base import Mission
 from .enums import (
     MissionConflictPolicy,
+    MissionEventType,
     MissionPhase,
     MissionPrerequisitePolicy,
 )
@@ -69,6 +70,7 @@ class MissionScheduler:
     ) -> MissionSnapshot:
         """Register when needed and start or queue one mission."""
 
+        self.engine._ensure_launchable()
         if isinstance(mission, Mission):
             with self.engine._condition:
                 registered = self.engine._runtimes.get(mission.id)
@@ -112,6 +114,7 @@ class MissionScheduler:
                 return runtime.snapshot
             missing = self._missing_prerequisites_locked(runtime.mission)
             conflicts = self._conflicts_locked(runtime.mission)
+            at_capacity = self._at_active_capacity_locked()
             if missing:
                 if (
                     runtime.mission.prerequisite_policy
@@ -149,6 +152,11 @@ class MissionScheduler:
                     raise MissionConflictError(
                         self.engine._conflict_message(runtime, conflicts)
                     )
+            elif at_capacity:
+                queued = self.engine.lifecycle._queue_locked(
+                    runtime,
+                    reason or "Waiting for mission capacity",
+                )
 
         if queued is not None:
             snapshot, transition = queued
@@ -166,7 +174,12 @@ class MissionScheduler:
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission_id)
             conflicts = self._conflicts_locked(runtime.mission)
-            if conflicts:
+            if self._at_active_capacity_locked():
+                queued = self.engine.lifecycle._queue_locked(
+                    runtime,
+                    reason or "Waiting for mission capacity",
+                )
+            elif conflicts:
                 queued = self.engine.lifecycle._queue_locked(
                     runtime,
                     reason or "Waiting for resources",
@@ -232,7 +245,48 @@ class MissionScheduler:
             self.engine._scheduler_wake.clear()
             if self.engine._scheduler_stop.is_set():
                 break
+            self._expire_timeouts()
             self._promote_queued()
+
+    def _expire_timeouts(self) -> None:
+        now = time.monotonic()
+        with self.engine._condition:
+            expired = tuple(
+                mission_id
+                for mission_id in self.engine._active_ids
+                if self._timed_out_locked(
+                    self.engine._runtime_locked(mission_id),
+                    now,
+                )
+            )
+        for mission_id in expired:
+            try:
+                self.engine.fail(
+                    mission_id,
+                    "Mission execution timed out",
+                    retryable=True,
+                )
+            except Exception as exc:
+                self.engine._emit(
+                    MissionEventType.ERROR,
+                    f"Mission timeout cleanup failed: {exc}",
+                    mission_id=mission_id,
+                )
+
+    @staticmethod
+    def _timed_out_locked(runtime: MissionRuntime, now: float) -> bool:
+        timeout = runtime.mission.timeout_seconds
+        if timeout is None or runtime.snapshot.phase is MissionPhase.STOPPING:
+            return False
+        if runtime.snapshot.phase is MissionPhase.STARTING:
+            started = runtime.attempt_started_monotonic
+            return started is not None and now - started >= timeout
+        if runtime.snapshot.phase is not MissionPhase.RUNNING:
+            return False
+        elapsed = runtime.active_elapsed
+        if runtime.active_started_monotonic is not None:
+            elapsed += max(0.0, now - runtime.active_started_monotonic)
+        return elapsed >= timeout
 
     def _promote_queued(self) -> None:
         now = time.time()
@@ -246,8 +300,8 @@ class MissionScheduler:
                         runtime.queued_monotonic,
                         runtime.mission.priority,
                     )
-                    for runtime in self.engine._runtimes.values()
-                    if runtime.snapshot.phase is MissionPhase.QUEUED
+                    for mission_id in self.engine._queued_ids
+                    for runtime in (self.engine._runtime_locked(mission_id),)
                 ),
                 key=lambda item: (
                     item[3],
@@ -296,11 +350,7 @@ class MissionScheduler:
         self,
         mission: Mission,
     ) -> tuple[type[Mission], ...]:
-        succeeded_types = {
-            type(runtime.mission)
-            for runtime in self.engine._runtimes.values()
-            if runtime.snapshot.phase is MissionPhase.SUCCEEDED
-        }
+        succeeded_types = tuple(self.engine._succeeded_type_counts)
         return tuple(
             requirement
             for requirement in mission.prerequisites
@@ -312,7 +362,19 @@ class MissionScheduler:
 
     def _conflicts_locked(self, mission: Mission) -> tuple[MissionRuntime, ...]:
         conflicts: list[MissionRuntime] = []
-        for runtime in self.engine._runtimes.values():
+        resource_ids: set[int] = set()
+        for resource in mission.resources:
+            resource_ids.update(self.engine._resource_owners.get(resource, ()))
+        candidate_ids = (
+            self.engine._active_ids
+            if mission.blocks or any(
+                self.engine._runtime_locked(item).mission.blocks
+                for item in self.engine._active_ids
+            )
+            else resource_ids
+        )
+        for mission_id in candidate_ids:
+            runtime = self.engine._runtime_locked(mission_id)
             other = runtime.mission
             if other.id == mission.id or not runtime.snapshot.phase.active:
                 continue
@@ -326,3 +388,7 @@ class MissionScheduler:
             if resource_conflict or type_conflict or reverse_conflict:
                 conflicts.append(runtime)
         return tuple(conflicts)
+
+    def _at_active_capacity_locked(self) -> bool:
+        limit = self.engine._max_active_missions
+        return limit is not None and len(self.engine._active_ids) >= limit

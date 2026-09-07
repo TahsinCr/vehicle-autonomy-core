@@ -341,6 +341,52 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertFalse(requester.is_alive())
         self.assertEqual(responses[0].response.payload["accepted"], True)
 
+    def test_request_rejects_correlated_response_from_wrong_source(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel)
+        peer.start()
+        sent = threading.Event()
+        requests: list[MavlinkApplicationPacket] = []
+        responses: list[Any] = []
+
+        requester = threading.Thread(
+            target=lambda: responses.append(
+                peer.request(
+                    "camera.capture",
+                    response_types="system.ack",
+                    timeout=1.0,
+                    target_system=7,
+                    target_component=9,
+                    on_sent=lambda packet: (requests.append(packet), sent.set()),
+                )
+            )
+        )
+        requester.start()
+        self.assertTrue(sent.wait(1.0))
+        payload = {"request_id": requests[0].packet_id}
+        channel.packets.publish(
+            MavlinkApplicationPacket(
+                "system.ack",
+                payload,
+                source_system=8,
+                source_component=9,
+            )
+        )
+        self.assertTrue(requester.is_alive())
+        channel.packets.publish(
+            MavlinkApplicationPacket(
+                "system.ack",
+                payload,
+                source_system=7,
+                source_component=9,
+            )
+        )
+        requester.join(1.0)
+        peer.stop()
+
+        self.assertFalse(requester.is_alive())
+        self.assertEqual(responses[0].response.source_system, 7)
+
     def test_request_timeout_and_liveness_expiry(self) -> None:
         channel = _ChannelStub()
         peer = self._peer(channel)
@@ -452,6 +498,26 @@ class DispatcherLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(handled.wait(1.0))
         dispatcher.stop()
+
+    def test_stop_from_delivery_callbacks_suppresses_late_responses(self) -> None:
+        for packet_type, event_name in (("known", "handled"), ("unknown", "unhandled")):
+            with self.subTest(event=event_name):
+                peer = _PeerStub()
+                dispatcher = MavlinkApplicationDispatcher(peer)  # type: ignore[arg-type]
+                if packet_type == "known":
+                    dispatcher.register(packet_type, lambda _packet: {})
+                getattr(dispatcher, event_name).subscribe(lambda _event: dispatcher.stop())
+                dispatcher.start()
+
+                dispatcher.dispatch(
+                    MavlinkApplicationPacket(packet_type, expects_response=True)
+                )
+                deadline = time.monotonic() + 1.0
+                while dispatcher.running and time.monotonic() < deadline:
+                    time.sleep(0.001)
+
+                self.assertFalse(dispatcher.running)
+                self.assertFalse(peer.sent)
 
 
 if __name__ == "__main__":

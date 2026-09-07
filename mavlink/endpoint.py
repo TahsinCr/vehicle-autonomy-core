@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,8 +30,10 @@ class MavlinkEndpoint:
             raise ValueError("source_system 0..255 aralığında olmalı")
         if not 0 <= self.source_component <= 255:
             raise ValueError("source_component 0..255 aralığında olmalı")
-        if self.heartbeat_timeout <= 0:
+        heartbeat_timeout = float(self.heartbeat_timeout)
+        if not math.isfinite(heartbeat_timeout) or heartbeat_timeout <= 0:
             raise ValueError("Heartbeat timeout pozitif olmalı")
+        object.__setattr__(self, "heartbeat_timeout", heartbeat_timeout)
         self._validate_network_uri(normalized_uri)
 
     @staticmethod

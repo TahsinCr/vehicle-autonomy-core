@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import queue
+import threading
+import time
 import unittest
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +36,9 @@ class EndpointTests(unittest.TestCase):
             MavlinkEndpoint(source_system=256)
         with self.assertRaises(ValueError):
             MavlinkEndpoint(heartbeat_timeout=0)
+        for timeout in (math.nan, math.inf):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                MavlinkEndpoint(heartbeat_timeout=timeout)
 
 
 class _Header:
@@ -299,6 +304,44 @@ class RouterContractTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             router.wait_for("ATTITUDE", timeout=0.02)
         router.stop()
+
+    def test_router_wait_scans_each_observed_message_once(self) -> None:
+        connection = _RouterConnection()
+        router = MavlinkMessageRouter(
+            connection,  # type: ignore[arg-type]
+            poll_timeout=0.01,
+        )
+        checks = 0
+        result: list[Any] = []
+
+        def predicate(message: Any) -> bool:
+            nonlocal checks
+            checks += 1
+            return message.value == 10
+
+        router.start()
+        waiter = threading.Thread(
+            target=lambda: result.append(
+                router.wait_for("HEARTBEAT", predicate=predicate, timeout=1.0)
+            )
+        )
+        waiter.start()
+        for value in range(11):
+            connection.inbox.put(
+                _RichMessage(
+                    "HEARTBEAT",
+                    message_id=0,
+                    system=1,
+                    component=1,
+                    value=value,
+                )
+            )
+            time.sleep(0.002)
+        waiter.join(1.0)
+        router.stop()
+
+        self.assertEqual(result[0].value, 10)
+        self.assertEqual(checks, 11)
 
 
 class RemoteLogTests(unittest.TestCase):

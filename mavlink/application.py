@@ -223,15 +223,21 @@ class MavlinkApplicationCodec:
             ) from exc
         if not isinstance(decoded, dict) or not isinstance(decoded.get("payload", {}), dict):
             raise MavlinkApplicationProtocolError("Uygulama paket gövdesi nesne olmalı")
+        packet_type = decoded.get("type")
+        reply = decoded.get("reply", False)
+        if not isinstance(packet_type, str):
+            raise MavlinkApplicationProtocolError("Uygulama paket tipi metin olmalı")
+        if not isinstance(reply, bool):
+            raise MavlinkApplicationProtocolError("Uygulama cevap bayrağı boolean olmalı")
         try:
             return MavlinkApplicationPacket(
-                str(decoded.get("type", "")),
+                packet_type,
                 decoded.get("payload", {}),
                 packet_id,
                 float(decoded.get("sent_at", 0.0)),
                 source_system,
                 source_component,
-                bool(decoded.get("reply", False)),
+                reply,
             )
         except (TypeError, ValueError, OverflowError) as exc:
             raise MavlinkApplicationProtocolError(

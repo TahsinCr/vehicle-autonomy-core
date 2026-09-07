@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from .base import Mission
 from .enums import MissionEventType, MissionPhase, ensure_mission_transition
-from .errors import MissionTimeoutError, MissionTransitionError
+from .errors import MissionConflictError, MissionTimeoutError, MissionTransitionError
 from .models import MissionSnapshot, MissionTransition
 from .runtime import MissionRuntime
 
@@ -198,12 +198,26 @@ class MissionLifecycle:
     ) -> MissionSnapshot:
         runtime = self.engine._runtime(mission)
         failure_reason = str(reason).strip() or "Mission failed"
+        stopping_transition: MissionTransition | None = None
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
             runtime.stop_event.set()
+            if (
+                runtime.snapshot.phase.active
+                and runtime.snapshot.phase is not MissionPhase.STOPPING
+            ):
+                _, stopping_transition = self._transition_locked(
+                    runtime,
+                    MissionPhase.STOPPING,
+                    reason=failure_reason,
+                )
+        self._publish_transition(stopping_transition)
         try:
             self._join_worker(runtime)
+        except MissionTimeoutError:
+            raise
+        try:
             self._cleanup_runtime(runtime)
         except Exception as exc:
             failure_reason = f"{failure_reason}; cleanup failed: {exc}"
@@ -215,9 +229,15 @@ class MissionLifecycle:
                 MissionPhase.FAILED,
                 reason=failure_reason,
             )
-            should_retry = (
+            retry_available = (
                 retryable and snapshot.attempt < runtime.mission.retry.attempts
             )
+            queue_limit = self.engine._max_queued_missions
+            queue_has_capacity = (
+                queue_limit is None or len(self.engine._queued_ids) < queue_limit
+            )
+            should_retry = retry_available and queue_has_capacity
+            retry_rejected = retry_available and not queue_has_capacity
             if should_retry:
                 snapshot, queued_transition = self._queue_locked(
                     runtime,
@@ -230,6 +250,12 @@ class MissionLifecycle:
         self._publish_transition(queued_transition)
         if not should_retry:
             self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
+            if retry_rejected:
+                self.engine._emit(
+                    MissionEventType.ERROR,
+                    "Mission retry rejected because queue capacity was reached",
+                    mission_id=runtime.mission.id,
+                )
         else:
             self.engine._emit(
                 MissionEventType.RETRY,
@@ -485,6 +511,7 @@ class MissionLifecycle:
             )
             runtime.active_elapsed = 0.0
             runtime.active_started_monotonic = None
+            runtime.attempt_started_monotonic = time.monotonic()
             runtime.queued_monotonic = None
         if current is MissionPhase.RUNNING:
             runtime.active_started_monotonic = time.monotonic()
@@ -493,11 +520,13 @@ class MissionLifecycle:
             runtime.active_started_monotonic = None
         if current.terminal:
             changes["finished_at"] = now
+            runtime.attempt_started_monotonic = None
         if result is not None:
             changes["result"] = dict(result)
         if progress is not None:
             changes["progress"] = progress
         runtime.snapshot = runtime.snapshot.evolve(**changes)
+        self.engine._update_phase_indexes_locked(runtime, previous, current)
         transition = MissionTransition(
             runtime.mission.id,
             previous,
@@ -551,6 +580,9 @@ class MissionLifecycle:
             if next_retry_at is not None:
                 runtime.snapshot = runtime.snapshot.evolve(next_retry_at=next_retry_at)
             return runtime.snapshot, None
+        queue_limit = self.engine._max_queued_missions
+        if queue_limit is not None and len(self.engine._queued_ids) >= queue_limit:
+            raise MissionConflictError("Mission queue capacity reached")
         snapshot, transition = self._transition_locked(
             runtime,
             MissionPhase.QUEUED,
