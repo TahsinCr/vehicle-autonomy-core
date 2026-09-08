@@ -12,6 +12,7 @@ from ..events import AsyncEventBus, Subscription
 from .actions import AsyncDelivery, MavlinkAction
 from .runtime import MavlinkRuntime
 from .history import MessageHistory
+from .router import MavlinkIngressFilter
 
 
 class AsyncMavlinkRuntime:
@@ -80,21 +81,30 @@ class AsyncMavlinkRuntime:
     def add_history(self, history: MessageHistory) -> Subscription:
         return self._runtime.add_history(history)
 
+    def add_filter(self, predicate: MavlinkIngressFilter) -> Subscription:
+        """Register a synchronous ingress filter on the shared reader."""
+
+        return self._runtime.add_filter(predicate)
+
     async def notify(self, packet_type, payload=None):
         self._delivery.raise_if_failed()
-        return await asyncio.to_thread(self._runtime.notify, packet_type, payload)
+        return await self._finish_io(lambda: self._runtime.notify(packet_type, payload))
 
     async def request(self, packet_type, payload=None, **options):
         self._delivery.raise_if_failed()
-        return await asyncio.to_thread(self._runtime.request, packet_type, payload, **options)
+        return await self._finish_io(
+            lambda: self._runtime.request(packet_type, payload, **options)
+        )
 
     async def send(self, message):
         self._delivery.raise_if_failed()
-        return await asyncio.to_thread(self._runtime.send, message)
+        return await self._finish_io(lambda: self._runtime.send(message))
 
     async def send_named(self, message_name, **parameters):
         self._delivery.raise_if_failed()
-        return await asyncio.to_thread(self._runtime.send_named, message_name, **parameters)
+        return await self._finish_io(
+            lambda: self._runtime.send_named(message_name, **parameters)
+        )
 
     def latest(self, message_filter=None):
         return self._runtime.latest(message_filter)
@@ -167,9 +177,13 @@ class AsyncMavlinkRuntime:
 
     async def wait_for(self, message_types, *, predicate=None, timeout=3.0, after_sequence=None):
         self._delivery.raise_if_failed()
-        result = await asyncio.to_thread(
-            self._runtime.wait_for, message_types, predicate=predicate,
-            timeout=timeout, after_sequence=after_sequence,
+        result = await self._finish_io(
+            lambda: self._runtime.wait_for(
+                message_types,
+                predicate=predicate,
+                timeout=timeout,
+                after_sequence=after_sequence,
+            )
         )
         self._delivery.raise_if_failed()
         return result

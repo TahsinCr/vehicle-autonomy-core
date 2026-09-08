@@ -403,7 +403,8 @@ with `limit=`; unfiltered limited reads copy only the requested tail.
 daemon schedule and returns a cancellable `Subscription`. A bus accepts at
 most 64 live periodic schedules by default; set `max_schedules=` when the
 application has a different, deliberate limit. `replay_buffer_limit=` bounds
-live events arriving behind a slow replay and keeps the newest values.
+live events arriving behind a slow replay. Overflow raises `BufferError`
+instead of silently producing an incomplete event sequence.
 
 ### Hooks and error policy
 
@@ -755,12 +756,42 @@ raises `MissionTimeoutError` and keeps the stopping state visible so shutdown
 can be retried. The engine never calls `start()`, `tick()`, `pause()`, `resume()`
 or `stop()` concurrently on the same mission instance. Transition subscribers
 run outside the engine state lock and may issue another lifecycle command.
+Calling `complete()` or `fail()` inside `start()`/`tick()` ends that callback
+immediately; terminal state and resource release occur only after it unwinds.
+Parallel stage results identify their group through `node` and carry
+`mission_id=None` instead of a completion-order-dependent child ID.
 
 ## MAVLink
 
 The MAVLink package can be used at two levels. `MavlinkRuntime` is the usual
 entry point. The connection, router, async channel, application channel, peer
 and dispatcher remain public when an application needs custom ownership.
+
+The router can reject unwanted traffic before it reaches latest state, cache,
+history, vehicle discovery or subscribers. `add_filter()` accepts any number
+of synchronous envelope predicates and returns a cancellable `Subscription`.
+It works both directly and as a decorator:
+
+```python
+@link.add_filter
+def known_systems(envelope):
+    return envelope.source_system in {1, 2, 3}
+
+message_types = link.add_filter(
+    lambda envelope: envelope.message_type in {
+        "HEARTBEAT",
+        "ATTITUDE",
+        "GLOBAL_POSITION_INT",
+    }
+)
+
+# Stop applying only the message-type filter.
+message_types.cancel()
+```
+
+Filters run in registration order and stop at the first rejection. They execute
+on the receive thread, so keep them fast and non-blocking. An exception rejects
+that message and is published as a router error with phase `filter`.
 
 ### Endpoints and high-level runtime
 
@@ -929,20 +960,23 @@ records. Memory tail queries stop once enough matches are found; queries with
 no matches can still scan the full history. SQLite applies filters and limits
 in SQL. Source IDs must be integers from 0 to 255; time bounds must be finite
 and ordered, and message types cannot be empty.
-Messages must implement JSON-compatible `to_dict()`.
+Messages must implement JSON-compatible `to_dict()`. MAVLink non-finite float
+sentinels (`NaN`, positive infinity and negative infinity) are stored as JSON
+`null`; the live message object is not modified.
 
 `add_history` is synchronous in both runtime modes, records future traffic and
 returns a cancellable subscription. Runtime close detaches it; the application
 owns storage and closes it after runtime shutdown. Subclass `MessageHistory`
 for another backend. Storage errors are reported with runtime error source
-`history`. SQLite commits run on a dedicated bounded writer, not the receive
-thread. `queue_capacity=1024` limits pending writes. Queue overflow rejects the
+`history`. SQLite JSON encoding and batched commits run on a dedicated bounded
+writer, not the receive thread. `queue_capacity=1024` limits pending messages;
+`batch_size=64` and `flush_interval=0.02` tune transaction batching. Queue
+overflow rejects the
 new record and marks `recording_error`; disk failures are visible through that
 property and raised by `flush()`, queries and `close()`. Check these errors even
 when no more messages arrive. `flush(timeout=5.0)` waits for previously accepted
 records; queries/clear flush before accessing SQLite and close drains the writer.
-JSON snapshot encoding still runs on receipt; custom slow serializers can delay
-reading. No bounded recorder guarantees lossless storage under unlimited load.
+No bounded recorder guarantees lossless storage under unlimited load.
 Unlimited storage
 requires monitoring available memory/disk space. Existing `vehicle.history()`
 remains a bounded diagnostic view, independent of these optional recorders.
@@ -962,8 +996,8 @@ for component in link.vehicles.get_component(1):
 Async lookup/registration/cancellation remain local synchronous operations;
 message waits, sending, application requests and lifecycle operations are
 awaitable. Blocking transport operations use the loop's shared executor.
-Cancelling an async transport call cannot retract a message already sent;
-an in-flight blocking application request can remain until its timeout or peer shutdown.
+Cancellation waits for an already-started transport operation to finish, so
+executor work is not left detached; it cannot retract a message already sent.
 Async callback delivery uses one consumer with coalesced cross-thread wakeups.
 Telemetry and lifecycle actions have separate bounded queues. When telemetry
 is full, its oldest callback is dropped; `link.dropped_callbacks` exposes the
@@ -1028,7 +1062,9 @@ attitude.enable()
 at registration or added as methods/decorators. They receive `CallbackContext`
 with `event`, `result`, `error`, and elapsed seconds. Async registrations require
 async callbacks/hooks. Sync timeouts are observed after return; async timeouts
-request cancellation of the callback. Hooks themselves have no separate time
+request cancellation of the callback. Framework overruns raise
+`CallbackTimeoutError`; a `TimeoutError` raised by user code follows the normal
+error path. Hooks themselves have no separate time
 budget. Blocking async code or code ignoring cancellation cannot be forcibly
 interrupted. `on_after` runs in cleanup after an admitted invocation; skipped
 events have no execution hooks. Calling the decorator result directly invokes

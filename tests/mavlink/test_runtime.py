@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
-from src.core.events import EventBus
+from src.core.events import EventBus, Subscription
 from src.core.compatibility import ExceptionGroup
 from src.core.mavlink import (
     AsyncMavlinkRuntime,
@@ -32,6 +32,12 @@ class FakeRouter:
         self.messages = EventBus[Any]()
         self.envelopes = EventBus[Any]()
         self.errors = EventBus[Any]()
+        self.filters: dict[int, Any] = {}
+
+    def add_filter(self, predicate: Any) -> Subscription:
+        identifier = len(self.filters)
+        self.filters[identifier] = predicate
+        return Subscription(identifier, lambda: self.filters.pop(identifier, None))
 
     @property
     def stats(self) -> MavlinkRouterStats:
@@ -130,6 +136,25 @@ class FailingStopPeer(FakePeer):
 
 
 class MavlinkRuntimeTests(unittest.TestCase):
+    def test_runtime_ingress_filter_is_decorator_and_closes_with_runtime(self):
+        client = FakeClient([])
+        runtime = MavlinkRuntime(client=client)
+
+        @runtime.add_filter
+        def only_vehicle_12(envelope: MavlinkMessageEnvelope) -> bool:
+            return envelope.source_system == 12
+
+        runtime.start()
+        try:
+            emit(client, 13, 1)
+            emit(client, 12, 1)
+            self.assertIsNone(runtime.vehicles.get(13))
+            self.assertIsNotNone(runtime.vehicles.get(12))
+            self.assertTrue(only_vehicle_12.active)
+        finally:
+            runtime.close()
+        self.assertFalse(only_vehicle_12.active)
+
     def test_same_thread_close_during_start_is_rejected_without_mixed_state(self):
         client = FakeClient([])
         runtime = MavlinkRuntime(client=client)
@@ -765,7 +790,9 @@ class WireMessage:
 
 def emit(client, system, component, message_type="HEARTBEAT", autopilot=3):
     message = WireMessage(system, component, message_type, autopilot)
-    client.router.envelopes.publish(MavlinkMessageEnvelope.wrap(1, message))
+    envelope = MavlinkMessageEnvelope.wrap(1, message)
+    if all(predicate(envelope) for predicate in client.router.filters.values()):
+        client.router.envelopes.publish(envelope)
 
 
 class AsyncMavlinkRuntimeTests(unittest.IsolatedAsyncioTestCase):

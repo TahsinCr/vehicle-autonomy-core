@@ -23,9 +23,12 @@ class MavlinkMessageEnvelope:
     source_component: int | None
     message_id: int | None
     received_monotonic: float
+    received_at: float
 
     @classmethod
     def wrap(cls, sequence: int, message: Any) -> "MavlinkMessageEnvelope":
+        received_at = time.time()
+        received_monotonic = time.monotonic()
         return cls(
             sequence=sequence,
             message=message,
@@ -33,7 +36,8 @@ class MavlinkMessageEnvelope:
             source_system=mavlink_source_system(message),
             source_component=mavlink_source_component(message),
             message_id=mavlink_message_id(message),
-            received_monotonic=time.monotonic(),
+            received_monotonic=received_monotonic,
+            received_at=received_at,
         )
 
     def to_dict(self, *, include_payload: bool = False) -> dict[str, Any]:
@@ -44,6 +48,7 @@ class MavlinkMessageEnvelope:
             "source_component": self.source_component,
             "message_id": self.message_id,
             "received_monotonic": self.received_monotonic,
+            "received_at": self.received_at,
         }
         if include_payload:
             serializer = getattr(self.message, "to_dict", None)

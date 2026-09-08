@@ -224,6 +224,39 @@ class DependencyLifecycleTests(unittest.TestCase):
         self.assertEqual(resource.close_count, 1)
 
 
+    def test_cross_thread_initialization_cycle_fails_instead_of_deadlocking(self) -> None:
+        container = DependencyContainer()
+        barrier = threading.Barrier(2)
+        calls = {"a": 0, "b": 0}
+        calls_lock = threading.Lock()
+
+        def synchronize(name: str) -> None:
+            with calls_lock:
+                calls[name] += 1
+                first = calls[name] == 1
+            if first:
+                barrier.wait()
+
+        def build_a():
+            synchronize("a")
+            return container.resolve("b")
+
+        def build_b():
+            synchronize("b")
+            return container.resolve("a")
+
+        container.singleton("a", factory=build_a)
+        container.singleton("b", factory=build_b)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = (executor.submit(container.resolve, "a"), executor.submit(container.resolve, "b"))
+            errors = []
+            for future in futures:
+                with self.assertRaises(Exception) as caught:
+                    future.result(timeout=1.0)
+                errors.append(caught.exception)
+        self.assertTrue(any("cycle" in str(error).lower() for error in errors))
+
+
 class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.default = DependencyContainer()

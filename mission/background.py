@@ -65,6 +65,9 @@ class MissionBackgroundExecutor:
                 self._missions[mission.id] = snapshot
                 runtime = self.engine._runtime_locked(mission.id)
                 runtime.chain_context = self._owner_context(owner_kind, owner_id)
+                runtime.activation_guard = lambda: self._owner_is_active(
+                    owner_kind, owner_id
+                )
         except Exception:
             self.engine.unregister(mission)
             raise
@@ -190,7 +193,10 @@ class MissionBackgroundExecutor:
             return
         if background.owner_kind == "mission":
             owner_id = int(background.owner_id)
-            runtime = self.engine._runtime(owner_id)
+            try:
+                runtime = self.engine._runtime(owner_id)
+            except MissionNotFoundError:
+                return
             if not runtime.snapshot.phase.active:
                 return
             if background.failure_policy is BackgroundFailurePolicy.FAIL_OWNER:
@@ -228,14 +234,18 @@ class MissionBackgroundExecutor:
         return "mission", str(int(owner))
 
     def _ensure_owner_active(self, owner_kind: str, owner_id: str) -> None:
-        if owner_kind == "mission":
-            active = self.engine._runtime(int(owner_id)).snapshot.phase.active
-        elif owner_kind == "chain":
-            active = self.orchestrator.chains.is_active(owner_id)
-        else:
-            active = self.orchestrator.parallel.is_active(owner_id)
-        if not active:
+        if not self._owner_is_active(owner_kind, owner_id):
             raise MissionConflictError("Background mission owner must be active")
+
+    def _owner_is_active(self, owner_kind: str, owner_id: str) -> bool:
+        if owner_kind == "mission":
+            try:
+                return self.engine._runtime_locked(int(owner_id)).snapshot.phase.active
+            except MissionNotFoundError:
+                return False
+        elif owner_kind == "chain":
+            return self.orchestrator.chains.is_active(owner_id)
+        return self.orchestrator.parallel.is_active(owner_id)
 
     def _owner_context(
         self,

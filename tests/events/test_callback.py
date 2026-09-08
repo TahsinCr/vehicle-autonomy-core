@@ -3,7 +3,7 @@ import unittest
 import time
 from unittest.mock import patch
 
-from src.core.events import CallbackSubscription
+from src.core.events import CallbackSubscription, CallbackTimeoutError
 
 
 class CallbackTests(unittest.TestCase):
@@ -106,6 +106,18 @@ class AsyncCallbackTests(unittest.IsolatedAsyncioTestCase):
         @sub.on_after
         async def after(context):
             hooks.append("after")
-        with self.assertRaises(asyncio.TimeoutError):
+        with self.assertRaises(CallbackTimeoutError):
             await sub.invoke_async(1)
         self.assertEqual(hooks, ["timeout", "after"])
+
+    async def test_user_timeout_error_uses_error_hook(self):
+        hooks = []
+        async def callback(_event):
+            raise TimeoutError("domain timeout")
+        sub = CallbackSubscription(1, lambda: None, callback, asynchronous=True, timeout=1)
+        @sub.on_error
+        async def error(_context):
+            hooks.append("error")
+        with self.assertRaisesRegex(TimeoutError, "domain timeout"):
+            await sub.invoke_async(1)
+        self.assertEqual(hooks, ["error"])

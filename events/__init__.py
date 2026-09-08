@@ -15,7 +15,7 @@ else:
     )
     from .base import BaseEventBus
     from .contracts import DeliveryMode, ErrorPolicy, EventBusStats, PublishResult
-    from .errors import EventBusClosedError, EventBusError, InvalidEventHandlerError
+    from .errors import CallbackTimeoutError, EventBusClosedError, EventBusError, InvalidEventHandlerError
     from .engine import AsyncEventEngine, EventEngine
     from .event_bus import EventBus
     from .filtering import EventFilter
@@ -46,5 +46,6 @@ else:
         "PublishResult",
         "Subscription",
         "CallbackContext",
+        "CallbackTimeoutError",
         "CallbackSubscription",
     ]

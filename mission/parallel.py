@@ -294,7 +294,7 @@ class MissionParallelExecutor:
                 chain_id = self._chain_runs.pop(execution_id, None)
                 terminal = MissionExecutionResult(
                     snapshot.group.group_id,
-                    mission_id,
+                    None,
                     owner_phase,
                     results,
                 )

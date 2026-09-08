@@ -51,6 +51,8 @@ class _Subscriber(Generic[T]):
         with self.lock:
             if not self.replaying:
                 return False
+            if self.pending.maxlen is not None and len(self.pending) >= self.pending.maxlen:
+                raise BufferError("Event replay buffer is full")
             self.pending.append(event)
             return True
 
@@ -179,11 +181,15 @@ class EventBus(BaseEventBus[T]):
                 pending=deque(maxlen=self._replay_buffer_limit),
             )
             self._subscribers[subscription_id] = subscriber
-            replay_events = (
-                self._history.query(normalized_filter, limit=replay)
+            replay_snapshot = (
+                self._history.query()
                 if subscriber.replaying
                 else ()
             )
+
+        replay_events = tuple(
+            event for event in replay_snapshot if normalized_filter.matches(event)
+        )[-replay:]
 
         if subscriber.replaying:
             pending: tuple[T, ...] | None = replay_events

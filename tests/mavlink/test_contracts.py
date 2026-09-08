@@ -11,6 +11,7 @@ from typing import Any
 from src.core.mavlink.connection import MavlinkConnection
 from src.core.mavlink.endpoint import MavlinkEndpoint
 from src.core.mavlink.filter import MavlinkMessageFilter
+from src.core.mavlink.message import MavlinkMessageEnvelope
 from src.core.mavlink.remote_log import (
     MavlinkRemoteLogBatch,
     MavlinkRemoteLogLevel,
@@ -267,8 +268,88 @@ class _RouterConnection:
     def evaluate_condition(self, condition: str) -> bool:
         return condition == "ready"
 
+    def evaluate_condition_for_state(
+        self, condition: str, message_state: dict[str, Any]
+    ) -> bool:
+        if condition == "ready":
+            return True
+        message = message_state.get("HEARTBEAT")
+        return condition == "value == 2" and getattr(message, "value", None) == 2
+
 
 class RouterContractTests(unittest.TestCase):
+    def test_ingress_filter_rejects_async_predicates(self) -> None:
+        router = MavlinkMessageRouter(_RouterConnection(), poll_timeout=0.01)  # type: ignore[arg-type]
+
+        async def asynchronous(_envelope: MavlinkMessageEnvelope) -> bool:
+            return True
+
+        with self.assertRaisesRegex(TypeError, "synchronous"):
+            router.add_filter(asynchronous)
+
+    def test_ingress_filters_compose_support_decorators_and_report_errors(self) -> None:
+        connection = _RouterConnection()
+        router = MavlinkMessageRouter(connection, poll_timeout=0.01)
+        accepted: list[tuple[int, str]] = []
+        errors = []
+
+        @router.add_filter
+        def allowed_vehicle(envelope: MavlinkMessageEnvelope) -> bool:
+            return envelope.source_system == 1
+
+        message_types = router.add_filter(
+            lambda envelope: envelope.message_type == "HEARTBEAT"
+        )
+        router.subscribe(
+            lambda message: accepted.append(
+                (message.get_srcSystem(), message.get_type())
+            )
+        )
+        router.errors.subscribe(errors.append)
+        router.start()
+        try:
+            connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=2, component=1))
+            connection.inbox.put(_RichMessage("ATTITUDE", message_id=30, system=1, component=1))
+            connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=1, component=1))
+            router.wait_for("HEARTBEAT", timeout=1)
+            self.assertEqual(accepted, [(1, "HEARTBEAT")])
+            self.assertEqual(len(router.history()), 1)
+
+            allowed_vehicle.cancel()
+            message_types.cancel()
+            broken = router.add_filter(
+                lambda _envelope: (_ for _ in ()).throw(ValueError("bad filter"))
+            )
+            connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=3, component=1))
+            deadline = time.monotonic() + 1
+            while not errors and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertEqual(errors[-1].phase, "filter")
+            self.assertIsInstance(errors[-1].error, ValueError)
+            self.assertIsNone(
+                router.latest(MavlinkMessageFilter(source_systems=3))
+            )
+            broken.cancel()
+        finally:
+            router.stop()
+
+    def test_native_conditions_use_only_the_current_source_state(self) -> None:
+        connection = _RouterConnection()
+        router = MavlinkMessageRouter(connection, poll_timeout=0.01)
+        received: list[tuple[int, int]] = []
+        router.subscribe(
+            lambda message: received.append((message.get_srcSystem(), message.value)),
+            MavlinkMessageFilter(message_types="HEARTBEAT", condition="value == 2"),
+        )
+        router.start()
+        try:
+            connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=1, component=1, value=2))
+            connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=2, component=1, value=1))
+            router.wait_for(MavlinkMessageFilter("HEARTBEAT", source_systems=2), timeout=1)
+            self.assertEqual(received, [(1, 2)])
+        finally:
+            router.stop()
+
     def test_router_filters_history_latest_and_wait_timeout(self) -> None:
         connection = _RouterConnection()
         router = MavlinkMessageRouter(

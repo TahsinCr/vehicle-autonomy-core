@@ -48,7 +48,12 @@ else:
         REMOTE_LOG_PACKET_TYPE,
         REMOTE_LOG_PROTOCOL_VERSION,
     )
-    from .router import MavlinkMessageRouter, MavlinkRouterError, MavlinkRouterStats
+    from .router import (
+        MavlinkIngressFilter,
+        MavlinkMessageRouter,
+        MavlinkRouterError,
+        MavlinkRouterStats,
+    )
     from .runtime import MavlinkRuntime, MavlinkRuntimeError, MavlinkRuntimeState
     from .async_runtime import AsyncMavlinkRuntime
     from .actions import MavlinkAction
@@ -91,6 +96,7 @@ else:
         "MavlinkEndpoint",
         "MavlinkUnavailableError",
         "MavlinkMessageRouter",
+        "MavlinkIngressFilter",
         "MavlinkMessageEnvelope",
         "MavlinkMessageFilter",
         "MavlinkHeader",

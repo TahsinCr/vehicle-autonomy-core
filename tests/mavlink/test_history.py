@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import threading
+import math
 from pathlib import Path
 
 from src.core.mavlink import MessageHistory, SqliteMessageHistory, MavlinkMessageEnvelope, MavlinkRuntime, AsyncMavlinkRuntime, MavlinkMessageRouter, MavlinkMessageFilter
@@ -20,13 +21,41 @@ def envelope(sequence, system=12, component=1, kind="ATTITUDE"):
 
 
 class MessageHistoryTests(unittest.TestCase):
+    def test_nonfinite_mavlink_values_are_recorded_as_json_null(self):
+        class NonFiniteMessage(RecordedMessage):
+            def to_dict(self):
+                return {
+                    "nan": math.nan,
+                    "nested": [math.inf, {"value": -math.inf}],
+                    "finite": 1.5,
+                }
+
+        item = MavlinkMessageEnvelope.wrap(1, NonFiniteMessage(12, 1, "ATTITUDE"))
+        with tempfile.TemporaryDirectory() as directory:
+            histories = (
+                MessageHistory(limit=None),
+                SqliteMessageHistory(Path(directory) / "nonfinite.db", limit=None),
+            )
+            for history in histories:
+                with self.subTest(history=type(history).__name__), history:
+                    history.append(item)
+                    payload = history.latest().payload
+                    self.assertEqual(
+                        payload,
+                        {
+                            "nan": None,
+                            "nested": [None, {"value": None}],
+                            "finite": 1.5,
+                        },
+                    )
+
     def test_slow_sql_writer_does_not_block_append_and_reports_overflow(self):
         entered, release = threading.Event(), threading.Event()
         class SlowHistory(SqliteMessageHistory):
-            def _write(self, row):
+            def _write_batch(self, rows):
                 entered.set()
                 release.wait(2)
-                super()._write(row)
+                super()._write_batch(rows)
         with tempfile.TemporaryDirectory() as directory:
             history = SlowHistory(Path(directory) / "slow.db", queue_capacity=1)
             try:
@@ -45,7 +74,7 @@ class MessageHistoryTests(unittest.TestCase):
 
     def test_background_write_failure_is_visible_on_flush_and_close(self):
         class BrokenHistory(SqliteMessageHistory):
-            def _write(self, row):
+            def _write_batch(self, rows):
                 raise OSError("disk failed")
         with tempfile.TemporaryDirectory() as directory:
             history = BrokenHistory(Path(directory) / "broken.db")

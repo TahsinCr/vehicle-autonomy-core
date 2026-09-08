@@ -165,7 +165,12 @@ _TRANSITIONS: dict[MissionPhase, frozenset[MissionPhase]] = {
         }
     ),
     MissionPhase.STOPPING: frozenset(
-        {MissionPhase.STOPPED, MissionPhase.FAILED, MissionPhase.CANCELLED}
+        {
+            MissionPhase.STOPPED,
+            MissionPhase.SUCCEEDED,
+            MissionPhase.FAILED,
+            MissionPhase.CANCELLED,
+        }
     ),
     MissionPhase.STOPPED: frozenset(
         {MissionPhase.QUEUED, MissionPhase.STARTING, MissionPhase.CANCELLED}

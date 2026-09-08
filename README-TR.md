@@ -402,7 +402,8 @@ kayıtları kopyalar.
 varsayılan olarak aynı anda en fazla 64 periyodik schedule kabul eder;
 uygulamanın bilinçli olarak farklı bir sınıra ihtiyacı varsa `max_schedules=`
 kullanılabilir. `replay_buffer_limit=`, yavaş bir replay arkasında biriken
-canlı event'leri sınırlar ve en yeni değerleri korur.
+canlı event'leri sınırlar. Taşma, eksik bir zinciri sessizce üretmek yerine
+`BufferError` verir.
 
 ### Hook'lar ve hata politikası
 
@@ -759,12 +760,42 @@ stopping durumunu görünür tutar. Motor aynı mission nesnesi üzerinde `start
 `tick()`, `pause()`, `resume()` veya `stop()` callback'lerini eşzamanlı çağırmaz.
 Transition aboneleri engine state lock'u dışında çalışır ve başka bir lifecycle
 komutu verebilir.
+`start()`/`tick()` içinden `complete()` veya `fail()` çağrılırsa callback hemen
+sonlanır; terminal durum ve kaynak bırakma stack açıldıktan sonra yapılır.
+Paralel aşama sonucu grubu `node` ile tanımlar ve bitiş sırasına bağlı bir
+child ID yerine `mission_id=None` taşır.
 
 ## MAVLink
 
 MAVLink paketi iki seviyede kullanılabilir. Normal giriş noktası
 `MavlinkRuntime` sınıfıdır. Özel sahiplik gerektiğinde connection, router,
 async channel, application channel, peer ve dispatcher ayrı ayrı da public'tir.
+
+Router, istenmeyen trafiği latest state, cache, history, araç keşfi ve
+abonelere ulaşmadan reddedebilir. `add_filter()` istenen sayıda senkron envelope
+predicate'i kabul eder ve iptal edilebilir bir `Subscription` döndürür. Hem
+doğrudan hem decorator olarak kullanılabilir:
+
+```python
+@link.add_filter
+def bilinen_sistemler(envelope):
+    return envelope.source_system in {1, 2, 3}
+
+mesaj_turleri = link.add_filter(
+    lambda envelope: envelope.message_type in {
+        "HEARTBEAT",
+        "ATTITUDE",
+        "GLOBAL_POSITION_INT",
+    }
+)
+
+# Yalnızca mesaj türü filtresini kaldır.
+mesaj_turleri.cancel()
+```
+
+Filtreler kayıt sırasıyla çalışır ve ilk ret sonucunda durur. Receive thread
+üzerinde koştukları için hızlı ve bloklamayan işlemler olmalıdır. Bir filtre
+hatası mesajı reddeder ve `filter` aşamalı router hatası olarak yayınlanır.
 
 ### Endpoint ve üst seviye runtime
 
@@ -854,7 +885,9 @@ oturumlardaki kayıtları da kapsar. `query()` eskiden yeniye, bağımsız JSON
 payload taşıyan `MessageRecord` nesneleri döndürür. Kaynak/tür filtrelerine
 ek olarak `since`/`until` dahil Unix zaman sınırlarıdır. Sorgudaki `limit`, en
 yeni eşleşen N kaydı seçer. `clear()` bütün kayıtları siler. Mesajlar JSON
-uyumlu `to_dict()` sağlamalıdır.
+uyumlu `to_dict()` sağlamalıdır. MAVLink'in sonlu olmayan float sentinel
+değerleri (`NaN`, pozitif ve negatif sonsuzluk) JSON `null` olarak saklanır;
+canlı mesaj nesnesi değiştirilmez.
 Bellekte son N sorgusu yeterli eşleşmeyi bulunca durur; eşleşme yoksa tüm
 geçmiş taranabilir. SQLite filtre ve limiti SQL içinde uygular. Kaynak ID'leri
 0..255 arası tamsayı, zaman sınırları sonlu ve sıralı olmalıdır; mesaj türü
@@ -864,13 +897,14 @@ boş bırakılamaz.
 sonraki trafiği kaydeder. Dönen abonelik iptal edilebilir. Runtime kapanırken
 kayıt ayrılır; depolamayı kapatmak uygulamanın sorumluluğudur. Başka backend
 için `MessageHistory` sınıfından türetilebilir. Kayıt hataları runtime'a
-`history` kaynağıyla bildirilir. SQLite commit'leri ayrı yazıcı thread'indedir.
-`queue_capacity=1024` bekleyen yazıları sınırlar. Taşmada yeni kayıt reddedilir
+`history` kaynağıyla bildirilir. SQLite JSON dönüşümü ve toplu commit'ler
+ayrı yazıcı thread'indedir. `queue_capacity=1024` bekleyen mesajları sınırlar;
+`batch_size=64` ve `flush_interval=0.02` transaction gruplamasını ayarlar.
+Taşmada yeni kayıt reddedilir
 ve `recording_error` ayarlanır; disk hataları bu alandan ve `flush()`, sorgu,
 `close()` çağrılarından görülür. Mesaj akışı bitse bile bu hatalar kontrol
 edilmelidir. `flush(timeout=5.0)` önceden kabul edilmiş kayıtları bekler; sorgu
-ve clear önce flush yapar, close yazıcıyı boşaltıp kapatır. JSON snapshot
-üretimi alım sırasında yapılır; özel yavaş serializer okuyucuyu geciktirebilir.
+ve clear önce flush yapar, close yazıcıyı boşaltıp kapatır.
 Sınırlı kuyruk sınırsız yükte kayıpsız kayıt garantisi vermez.
 Sınırsız kullanımda bellek/disk izlenmelidir. Mevcut
 `vehicle.history()` kısa tanılama tamponu olarak kalır; bu kayıttan bağımsızdır.
@@ -962,7 +996,9 @@ for component in link.vehicles.get_component(1):
 abonelik kaydı ve iptali senkron kalır; wait, gönderim, application request ve
 yaşam döngüsü işlemleri await edilir. Bloklayan taşıma işlemleri loop'un ortak
 executor'ünü kullanır. Async callback'ler tek tüketiciyle çalışır; thread'den
-loop'a bildirimler birleştirilir. Telemetri ve yaşam döngüsü aksiyonlarının
+loop'a bildirimler birleştirilir. İptal edilen bir taşıma coroutine'i, altta
+başlamış iş bitene kadar onu sahipli tutar; gönderilmiş mesajı geri alamaz.
+Telemetri ve yaşam döngüsü aksiyonlarının
 sınırlı kuyrukları ayrıdır. Telemetri kuyruğu dolduğunda en eski callback
 bırakılır; sayı `link.dropped_callbacks` ile okunur. Aksiyonlar öncelikli ve
 sıralıdır: `on_added` içinde aynı keşif için `on_connected` veya component
@@ -1031,7 +1067,9 @@ attitude.enable()
 parametre veya sonradan metot/decorator olarak eklenir. `CallbackContext`
 içinde `event`, `result`, `error` ve saniye cinsinden `elapsed` bulunur.
 Async kayıtta callback/hook'lar async olmalıdır. Senkron timeout fonksiyon
-döndükten sonra ölçülür; async timeout iptal talep eder. Hook'ların ayrı süre
+döndükten sonra ölçülür; async timeout iptal talep eder. Altyapı timeout'u
+`CallbackTimeoutError` verir; kullanıcı kodunun attığı `TimeoutError` normal
+error akışına girer. Hook'ların ayrı süre
 sınırı yoktur. Bloklayan async kod ve iptali reddeden kod zorla durdurulamaz.
 `on_after` kabul edilen çağrının temizliğinde çalışır; atlanan olaylarda hook
 çalışmaz. Decorator sonucunu doğrudan çağırmak, ayarları uygulamadan orijinal

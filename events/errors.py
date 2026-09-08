@@ -11,3 +11,7 @@ class EventBusClosedError(EventBusError):
 
 class InvalidEventHandlerError(EventBusError, TypeError):
     """Raised when a handler is not compatible with the selected bus."""
+
+
+class CallbackTimeoutError(EventBusError, TimeoutError):
+    """Raised when a callback exceeds its configured execution budget."""

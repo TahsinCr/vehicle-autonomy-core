@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-import time
 import math
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import islice
 from os import PathLike
@@ -20,6 +20,25 @@ from .recording import HistoryWriter
 JsonValue: TypeAlias = "None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]"
 _Row: TypeAlias = tuple[int, int | None, int | None, str, float, str]
 _History = TypeVar("_History", bound="MessageHistory")
+
+
+def _normalize_json_value(value: object) -> JsonValue:
+    """Return strict JSON data while preserving MAVLink unknown values as null."""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(item) for item in value]
+    # Keep unsupported values intact long enough for json.dumps() to report
+    # its normal, useful TypeError rather than hiding malformed serializers.
+    return value  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +77,7 @@ class MessageHistory:
         serializer = getattr(envelope.message, "to_dict", None)
         if not callable(serializer):
             raise TypeError("History messages must provide to_dict()")
-        return json.dumps(serializer(), allow_nan=False)
+        return json.dumps(_normalize_json_value(serializer()), allow_nan=False)
 
     def append(self, envelope: MavlinkMessageEnvelope) -> None:
         payload = self._encode(envelope)
@@ -66,7 +85,7 @@ class MessageHistory:
             self._check_open()
             self._records.append((envelope.sequence, envelope.source_system,
                                   envelope.source_component, envelope.message_type,
-                                  time.time(), payload))
+                                  envelope.received_at, payload))
 
     def query(self, *, system_id: int | None = None, component_id: int | None = None,
               message_type: str | None = None, since: float | None = None,
@@ -137,7 +156,8 @@ class SqliteMessageHistory(MessageHistory):
     """
 
     def __init__(self, path: str | PathLike[str], *, limit: int | None = 1000,
-                 queue_capacity: int = 1024) -> None:
+                 queue_capacity: int = 1024, batch_size: int = 64,
+                 flush_interval: float = 0.02) -> None:
         super().__init__(limit=limit)
         self._database = sqlite3.connect(path, check_same_thread=False)
         try:
@@ -147,7 +167,12 @@ class SqliteMessageHistory(MessageHistory):
                     component_id INTEGER, message_type TEXT, received_at REAL, payload TEXT)""")
                 self._database.execute("CREATE INDEX IF NOT EXISTS messages_source ON messages(system_id, component_id, message_type, id)")
                 self._trim()
-            self._writer = HistoryWriter(self._write, queue_capacity)
+            self._writer = HistoryWriter(
+                self._write_batch,
+                queue_capacity,
+                batch_size=batch_size,
+                flush_interval=flush_interval,
+            )
         except BaseException:
             self._database.close()
             raise
@@ -157,9 +182,7 @@ class SqliteMessageHistory(MessageHistory):
             self._database.execute("DELETE FROM messages WHERE id <= (SELECT id FROM messages ORDER BY id DESC LIMIT 1 OFFSET ?)", (self.limit,))
 
     def append(self, envelope: MavlinkMessageEnvelope) -> None:
-        payload = self._encode(envelope)
-        self._writer.submit((envelope.sequence, envelope.source_system, envelope.source_component,
-                             envelope.message_type, time.time(), payload))
+        self._writer.submit(envelope)
 
     @property
     def recording_error(self) -> Exception | None:
@@ -175,12 +198,25 @@ class SqliteMessageHistory(MessageHistory):
         return super().query(system_id=system_id, component_id=component_id,
                              message_type=message_type, since=since, until=until, limit=limit)
 
-    def _write(self, row: _Row) -> None:
+    def _write_batch(self, envelopes: tuple[MavlinkMessageEnvelope, ...]) -> None:
+        rows = tuple(
+            (
+                envelope.sequence,
+                envelope.source_system,
+                envelope.source_component,
+                envelope.message_type,
+                envelope.received_at,
+                self._encode(envelope),
+            )
+            for envelope in envelopes
+        )
         with self._lock:
             self._check_open()
             with self._database:
-                self._database.execute("INSERT INTO messages(sequence, system_id, component_id, message_type, received_at, payload) VALUES (?, ?, ?, ?, ?, ?)",
-                                       row)
+                self._database.executemany(
+                    "INSERT INTO messages(sequence, system_id, component_id, message_type, received_at, payload) VALUES (?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
                 self._trim()
 
     def _select(self, system: int | None, component: int | None, kind: str | None,

@@ -14,6 +14,7 @@ from typing import Any
 
 from .subscription import Subscription
 from ..compatibility import ExceptionGroup
+from .errors import CallbackTimeoutError
 
 
 @dataclass(slots=True)
@@ -191,10 +192,10 @@ class CallbackSubscription(Subscription):
                 raise TypeError("Sync callback returned an awaitable")
             context.elapsed = time.monotonic() - started
             if self.timeout is not None and context.elapsed > self.timeout:
-                raise TimeoutError("Callback exceeded its synchronous time budget")
+                raise CallbackTimeoutError("Callback exceeded its synchronous time budget")
             self._run_hooks("success", context)
         except Exception as error:
-            self._report_failure("timeout" if isinstance(error, TimeoutError) else "error", context, error)
+            self._report_failure("timeout" if isinstance(error, CallbackTimeoutError) else "error", context, error)
             raise
         else:
             return context.result
@@ -227,14 +228,28 @@ class CallbackSubscription(Subscription):
         try:
             await self._run_hooks_async("before", context)
             operation = self.callback(event)
-            context.result = await operation if self.timeout is None else await asyncio.wait_for(operation, self.timeout)
+            if self.timeout is None:
+                context.result = await operation
+            else:
+                remaining = self.timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    if inspect.iscoroutine(operation):
+                        operation.close()
+                    raise CallbackTimeoutError("Callback exceeded its asynchronous time budget")
+                task = asyncio.ensure_future(operation)
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+                if task not in done:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise CallbackTimeoutError("Callback exceeded its asynchronous time budget")
+                context.result = await task
             context.elapsed = time.monotonic() - started
             await self._run_hooks_async("success", context)
         except asyncio.CancelledError as error:
             context.error = error
             raise
         except Exception as error:
-            await self._report_failure_async("timeout" if isinstance(error, asyncio.TimeoutError) else "error", context, error)
+            await self._report_failure_async("timeout" if isinstance(error, CallbackTimeoutError) else "error", context, error)
             raise
         else:
             return context.result

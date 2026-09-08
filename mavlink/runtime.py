@@ -22,7 +22,7 @@ from .history import MessageHistory
 from .delivery import CallbackWorker
 from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
 from .peer import MavlinkApplicationPeer, MavlinkApplicationResponse
-from .router import MavlinkRouterStats
+from .router import MavlinkIngressFilter, MavlinkRouterStats
 from .actions import MavlinkAction, MavlinkActions
 from .vehicles import VehicleRegistry
 from .handlers import ApplicationHandlers
@@ -109,6 +109,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         self.errors = EventBus[MavlinkRuntimeError](history=100)
         self._error_subscriptions: list[Subscription] = []
         self._histories: dict[MessageHistory, Subscription] = {}
+        self._ingress_filters: dict[int, Subscription] = {}
         self._running = False
         self._cleanup_pending = False
         self._closed = False
@@ -181,6 +182,23 @@ class MavlinkRuntime(MavlinkActions, Service):
 
             subscription = Subscription(source.id, cancel)
             self._histories[history] = subscription
+            return subscription
+
+    def add_filter(self, predicate: MavlinkIngressFilter) -> Subscription:
+        """Reject unwanted traffic before runtime state and discovery update."""
+
+        with self._lock:
+            if self._closed or self._closing:
+                raise RuntimeError("Runtime is closed")
+            source = self.router.add_filter(predicate)
+
+            def cancel() -> None:
+                source.cancel()
+                with self._lock:
+                    self._ingress_filters.pop(source.id, None)
+
+            subscription = Subscription(source.id, cancel)
+            self._ingress_filters[source.id] = subscription
             return subscription
 
     @property
@@ -346,6 +364,8 @@ class MavlinkRuntime(MavlinkActions, Service):
             self._registry.close()
             self._application_handlers.close()
             for subscription in tuple(self._histories.values()):
+                subscription.cancel()
+            for subscription in tuple(self._ingress_filters.values()):
                 subscription.cancel()
             with self._lock:
                 self._closed = True

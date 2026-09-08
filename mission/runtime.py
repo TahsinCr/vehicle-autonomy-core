@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +33,7 @@ class MissionRuntime:
     queued_monotonic: float | None = None
     chain_context: MissionExecutionContext | None = None
     execution_node: str | None = None
+    activation_guard: Callable[[], bool] | None = None
 
 
 class BoundMissionController(MissionController):

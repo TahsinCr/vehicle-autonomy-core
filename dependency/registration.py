@@ -22,6 +22,9 @@ DependencyMap: TypeAlias = Mapping[str, Token]
 DEFAULT_PRIORITY = 100
 NONE_TYPE = type(None)
 
+_WAIT_GRAPH_LOCK = threading.Lock()
+_THREAD_WAITS_FOR: dict[int, int] = {}
+
 
 class _Missing:
     __slots__ = ()
@@ -70,6 +73,7 @@ class InitializationGate:
             return True
 
     def wait(self) -> None:
+        waiter = threading.get_ident()
         with self._condition:
             if (
                 self._initializing
@@ -80,9 +84,24 @@ class InitializationGate:
                     "Synchronous resolution cannot wait for an async provider "
                     "on its owning event-loop thread"
                 )
-            self._condition.wait_for(lambda: not self._initializing)
-            if self._retired:
-                raise InitializationRetiredError("Dependency registration is retired")
+            owner = self._owner_thread
+            if owner is not None:
+                with _WAIT_GRAPH_LOCK:
+                    current: int | None = owner
+                    while current is not None:
+                        if current == waiter:
+                            raise InitializationRetiredError(
+                                "Cross-thread dependency initialization cycle detected"
+                            )
+                        current = _THREAD_WAITS_FOR.get(current)
+                    _THREAD_WAITS_FOR[waiter] = owner
+            try:
+                self._condition.wait_for(lambda: not self._initializing)
+                if self._retired:
+                    raise InitializationRetiredError("Dependency registration is retired")
+            finally:
+                with _WAIT_GRAPH_LOCK:
+                    _THREAD_WAITS_FOR.pop(waiter, None)
 
     async def wait_async(self) -> None:
         await asyncio.to_thread(self.wait)

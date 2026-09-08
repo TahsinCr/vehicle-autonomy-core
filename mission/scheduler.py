@@ -166,24 +166,52 @@ class MissionScheduler:
         for conflict_id in preempt_ids:
             self.engine.stop_mission(
                 conflict_id,
-                requester_id=mission_id,
                 reason=f"Preempted by {runtime.mission.name}",
             )
 
         queued = None
+        retry_preempt_ids: tuple[int, ...] = ()
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission_id)
+            missing = self._missing_prerequisites_locked(runtime.mission)
             conflicts = self._conflicts_locked(runtime.mission)
-            if self._at_active_capacity_locked():
+            if missing:
+                if runtime.mission.prerequisite_policy is MissionPrerequisitePolicy.QUEUE:
+                    queued = self.engine.lifecycle._queue_locked(
+                        runtime, reason or "Waiting for prerequisites"
+                    )
+                else:
+                    names = ", ".join(item.__name__ for item in missing)
+                    raise MissionConflictError(
+                        f"Missing mission prerequisites: {names}"
+                    )
+            elif self._at_active_capacity_locked():
                 queued = self.engine.lifecycle._queue_locked(
                     runtime,
                     reason or "Waiting for mission capacity",
                 )
             elif conflicts:
-                queued = self.engine.lifecycle._queue_locked(
-                    runtime,
-                    reason or "Waiting for resources",
-                )
+                policy = runtime.mission.conflict_policy
+                if policy is MissionConflictPolicy.QUEUE:
+                    queued = self.engine.lifecycle._queue_locked(
+                        runtime, reason or "Waiting for resources"
+                    )
+                elif policy is MissionConflictPolicy.PREEMPT_LOWER:
+                    lower = tuple(
+                        item
+                        for item in conflicts
+                        if runtime.mission.priority < item.mission.priority
+                    )
+                    if len(lower) != len(conflicts):
+                        raise MissionConflictError(
+                            "Mission cannot preempt an equal or "
+                            "higher-priority conflict"
+                        )
+                    retry_preempt_ids = tuple(item.mission.id for item in lower)
+                else:
+                    raise MissionConflictError(
+                        self.engine._conflict_message(runtime, conflicts)
+                    )
             else:
                 runtime.stop_event.clear()
                 runtime.cleaned = False
@@ -194,6 +222,17 @@ class MissionScheduler:
                     requester_id=requester_id,
                 )
                 generation = snapshot.generation
+        if retry_preempt_ids:
+            for conflict_id in retry_preempt_ids:
+                self.engine.stop_mission(
+                    conflict_id,
+                    reason=f"Preempted by {runtime.mission.name}",
+                )
+            return self._launch_serialized(
+                mission_id,
+                requester_id=requester_id,
+                reason=reason,
+            )
         if queued is not None:
             snapshot, transition = queued
         self.engine.lifecycle._publish_transition(transition)

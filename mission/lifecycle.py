@@ -21,6 +21,25 @@ if TYPE_CHECKING:
 MissionReference = Mission | int
 
 
+class _MissionExit(BaseException):
+    """Unwind a mission callback before publishing its terminal state."""
+
+    def __init__(
+        self,
+        phase: MissionPhase,
+        *,
+        result: Mapping[str, Any] | None = None,
+        reason: str = "",
+        retryable: bool = False,
+        transition: MissionTransition | None = None,
+    ) -> None:
+        self.phase = phase
+        self.result = result
+        self.reason = reason
+        self.retryable = retryable
+        self.transition = transition
+
+
 class MissionLifecycle:
     """Manage mission commands and transitions for one bound engine.
 
@@ -160,6 +179,7 @@ class MissionLifecycle:
         result: Mapping[str, Any] | None = None,
     ) -> MissionSnapshot:
         runtime = self.engine._runtime(mission)
+        stopping_transition: MissionTransition | None = None
         with self.engine._condition:
             if runtime.snapshot.phase is MissionPhase.SUCCEEDED:
                 return runtime.snapshot
@@ -170,13 +190,36 @@ class MissionLifecycle:
                     "Only a running mission can complete"
                 )
             runtime.stop_event.set()
+            if runtime.snapshot.phase is MissionPhase.RUNNING:
+                _, stopping_transition = self._transition_locked(
+                    runtime,
+                    MissionPhase.STOPPING,
+                    reason="Mission completion requested",
+                )
+            if (
+                runtime.worker is threading.current_thread()
+                and stopping_transition is not None
+            ):
+                raise _MissionExit(
+                    MissionPhase.SUCCEEDED,
+                    result=result,
+                    transition=stopping_transition,
+                )
+        self._publish_transition(stopping_transition)
+        return self._complete_stopping(runtime, result)
+
+    def _complete_stopping(
+        self,
+        runtime: MissionRuntime,
+        result: Mapping[str, Any] | None,
+    ) -> MissionSnapshot:
         try:
             self._join_worker(runtime)
             self._cleanup_runtime(runtime)
         except Exception as exc:
             return self.fail(runtime.mission.id, f"Mission cleanup failed: {exc}")
         with self.engine._condition:
-            if runtime.snapshot.phase is MissionPhase.STOPPING:
+            if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
             snapshot, transition = self._transition_locked(
                 runtime,
@@ -211,6 +254,13 @@ class MissionLifecycle:
                     runtime,
                     MissionPhase.STOPPING,
                     reason=failure_reason,
+                )
+            if runtime.worker is threading.current_thread():
+                raise _MissionExit(
+                    MissionPhase.FAILED,
+                    reason=failure_reason,
+                    retryable=retryable,
+                    transition=stopping_transition,
                 )
         self._publish_transition(stopping_transition)
         try:
@@ -364,6 +414,23 @@ class MissionLifecycle:
                         or runtime.snapshot.phase is not MissionPhase.STARTING
                     ):
                         return
+                    if (
+                        runtime.activation_guard is not None
+                        and not runtime.activation_guard()
+                    ):
+                        runtime.activation_guard = None
+                        runtime.stop_event.set()
+                        _, transition = self._transition_locked(
+                            runtime,
+                            MissionPhase.CANCELLED,
+                            reason="Mission activation guard rejected startup",
+                        )
+                        raise _MissionExit(
+                            MissionPhase.CANCELLED,
+                            reason="Mission activation guard rejected startup",
+                            transition=transition,
+                        )
+                    runtime.activation_guard = None
                     _, transition = self._transition_locked(
                         runtime, MissionPhase.RUNNING
                     )
@@ -396,7 +463,25 @@ class MissionLifecycle:
                             continue
                         elapsed = self._active_elapsed_locked(runtime)
                     runtime.mission.tick(elapsed)
+        except _MissionExit as exit_request:
+            # The callback stack has now fully unwound. Clear the worker
+            # reference so the regular terminal path can dispose resources
+            # without attempting to join the current thread.
+            runtime.worker = None
+            self._publish_transition(exit_request.transition)
+            if exit_request.phase is MissionPhase.SUCCEEDED:
+                self._complete_stopping(runtime, exit_request.result)
+            elif exit_request.phase is MissionPhase.FAILED:
+                self.fail(
+                    mission_id,
+                    exit_request.reason,
+                    retryable=exit_request.retryable,
+                )
+            else:
+                self._cleanup_runtime(runtime)
+                self.engine.scheduler._after_terminal(mission_id, succeeded=False)
         except Exception as exc:
+            runtime.worker = None
             self.fail(mission_id, str(exc), retryable=True)
 
     def _finish_by_command(

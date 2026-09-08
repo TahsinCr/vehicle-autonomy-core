@@ -722,6 +722,10 @@ class MissionEngine(Service):
         if requester_id is None or requester_id == target.mission.id:
             return
         requester = self._runtime_locked(requester_id)
+        if requester.snapshot.phase is not MissionPhase.RUNNING:
+            raise MissionPermissionError(
+                f"Mission {requester_id} is not running and cannot control other missions"
+            )
         if requester.mission.priority > target.mission.priority:
             raise MissionPermissionError(
                 f"Mission {requester_id} has insufficient priority over {target.mission.id}"
@@ -738,6 +742,10 @@ class MissionEngine(Service):
         required_resources = frozenset(str(value) for value in resources)
         with self._condition:
             requester = self._runtime_locked(requester_id)
+            if requester.snapshot.phase is not MissionPhase.RUNNING:
+                raise MissionPermissionError(
+                    f"Mission {requester_id} is not running and cannot control other missions"
+                )
             targets = tuple(
                 runtime.mission.id
                 for runtime in self._runtimes.values()

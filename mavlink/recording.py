@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+import time
+import math
 from collections import deque
 from collections.abc import Callable
 from typing import Generic, TypeVar
@@ -11,11 +13,28 @@ T = TypeVar("T")
 
 
 class HistoryWriter(Generic[T]):
-    def __init__(self, write: Callable[[T], None], capacity: int) -> None:
+    def __init__(
+        self,
+        write: Callable[[tuple[T, ...]], None],
+        capacity: int,
+        *,
+        batch_size: int = 64,
+        flush_interval: float = 0.02,
+    ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError("Writer capacity must be a positive integer")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("Writer batch size must be a positive integer")
+        if (
+            isinstance(flush_interval, bool)
+            or not math.isfinite(flush_interval)
+            or flush_interval < 0
+        ):
+            raise ValueError("Writer flush interval must be finite and non-negative")
         self._write = write
         self._capacity = capacity
+        self._batch_size = batch_size
+        self._flush_interval = flush_interval
         self._condition = threading.Condition()
         self._queue: deque[T] = deque()
         self._busy = False
@@ -45,17 +64,26 @@ class HistoryWriter(Generic[T]):
                 self._condition.wait_for(lambda: self._queue or self._closed)
                 if not self._queue:
                     return
-                record = self._queue.popleft()
+                deadline = time.monotonic() + self._flush_interval
+                while len(self._queue) < self._batch_size and not self._closed:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(remaining)
+                records = tuple(
+                    self._queue.popleft()
+                    for _ in range(min(len(self._queue), self._batch_size))
+                )
                 self._busy = True
             try:
-                self._write(record)
+                self._write(records)
             except BaseException as error:
                 with self._condition:
                     self.failure = error if isinstance(error, Exception) else RuntimeError(str(error))
             finally:
                 with self._condition:
                     self._busy = False
-                    self._completed += 1
+                    self._completed += len(records)
                     self._condition.notify_all()
 
     def flush(self, timeout: float = 5.0) -> None:

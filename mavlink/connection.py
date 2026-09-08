@@ -182,11 +182,23 @@ class MavlinkConnection(Service):
             raise
 
     def evaluate_condition(self, condition: str) -> bool:
+        return self.evaluate_condition_for_state(condition, self.message_state)
+
+    def evaluate_condition_for_state(
+        self,
+        condition: str,
+        message_state: dict[str, Any],
+    ) -> bool:
         normalized = condition.strip()
         if not normalized:
             raise ValueError("MAVLink condition boş olamaz")
         mavutil = self._load_mavutil()
-        return bool(mavutil.evaluate_condition(normalized, self.message_state))
+        return bool(
+            mavutil.evaluate_condition(
+                normalized,
+                message_state,
+            )
+        )
 
     def send(self, message: Any) -> None:
         self.call_mav("send", message)

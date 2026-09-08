@@ -40,7 +40,7 @@ class MissionExecutionResult(Model):
     """Immutable terminal information passed between execution stages."""
 
     node: str
-    mission_id: int
+    mission_id: int | None
     phase: MissionPhase
     result: Mapping[str, Any] = field(default_factory=dict)
 
@@ -48,7 +48,7 @@ class MissionExecutionResult(Model):
         node = str(self.node).strip()
         if not node:
             raise ValueError("Mission execution node cannot be empty")
-        if self.mission_id <= 0:
+        if self.mission_id is not None and self.mission_id <= 0:
             raise ValueError("Mission execution result ID must be positive")
         phase = MissionPhase(self.phase)
         if not phase.terminal:

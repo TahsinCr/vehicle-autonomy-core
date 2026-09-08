@@ -295,23 +295,14 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(mission.stop_count, 1)
         self.assertGreaterEqual(len(self.engine.query_events()), 4)
 
-    def test_unregister_waits_for_terminal_worker_to_return(self) -> None:
+    def test_complete_unwinds_callback_before_terminal_cleanup(self) -> None:
         mission = TerminalBeforeReturnMission()
         self.engine.launch(mission)
-        self.assertTrue(mission.completed.wait(1.0))
-        self.assertEqual(self.engine.snapshot(mission).phase, MissionPhase.SUCCEEDED)
-
-        result: list[bool] = []
-        unregistering = threading.Thread(
-            target=lambda: result.append(self.engine.unregister(mission))
-        )
-        unregistering.start()
-        time.sleep(0.01)
-        self.assertTrue(unregistering.is_alive())
-
-        mission.release.set()
-        unregistering.join(1.0)
-        self.assertEqual(result, [True])
+        snapshot = self.engine.wait(mission, timeout=1.0)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.phase, MissionPhase.SUCCEEDED)
+        self.assertFalse(mission.completed.is_set())
+        self.assertTrue(self.engine.unregister(mission))
         with self.assertRaises(MissionNotFoundError):
             self.engine.snapshot(mission)
 
@@ -516,6 +507,12 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         stopped = coordinator.stop_missions(tags={"background"})
         self.assertEqual(tuple(item.mission_id for item in stopped), (background.id,))
         self.assertEqual(self.engine.snapshot(background).phase, MissionPhase.STOPPED)
+        self.engine.stop_mission(coordinator)
+        replacement = LowPriorityMission()
+        self.engine.launch(replacement)
+        self.assertTrue(replacement.started.wait(1.0))
+        with self.assertRaises(MissionPermissionError):
+            coordinator.stop_missions(tags={"background"})
 
     def test_stuck_worker_is_retained_until_shutdown_can_be_retried(self) -> None:
         engine = MissionEngine(scheduler_interval=0.001, stop_timeout=0.01)

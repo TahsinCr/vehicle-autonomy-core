@@ -142,11 +142,19 @@ class DependencyContainer:
             priority=priority,
         )
         with self._registration_lock:
-            if (
+            replacing = (
                 registration.token in self._providers
                 or registration.token in self._scope_cache
-            ):
-                self.unregister(registration.token)
+            )
+        if replacing:
+            # Disposal executes user code and must never run while the
+            # registration lock is held.
+            self.unregister(registration.token)
+        with self._registration_lock:
+            if registration.token in self._providers:
+                raise RuntimeError(
+                    f"Concurrent registration for {format_token(registration.token)}"
+                )
             self._providers[registration.token] = Provider(
                 token=registration.token,
                 factory=registration.factory,
@@ -762,20 +770,21 @@ class DependencyContainer:
         )
 
     def _detach_token_instances(self, token: Token) -> tuple[Any, ...]:
-        candidates = self._token_instances(token)
-        provider = self._providers.pop(token, None)
-        self._scope_cache.pop(token, MISSING)
-        with self._scope_lock:
-            self._scope_initializers.pop(token, None)
-        if provider is not None:
-            provider.instance = MISSING
-            provider.singleton = MISSING
-        unreferenced = tuple(
-            instance for instance in candidates if not self._is_referenced(instance)
-        )
-        ordered = self._tracker.ordered(unreferenced)
-        self._tracker.forget(ordered)
-        return ordered
+        with self._registration_lock:
+            candidates = self._token_instances(token)
+            provider = self._providers.pop(token, None)
+            self._scope_cache.pop(token, MISSING)
+            with self._scope_lock:
+                self._scope_initializers.pop(token, None)
+            if provider is not None:
+                provider.instance = MISSING
+                provider.singleton = MISSING
+            unreferenced = tuple(
+                instance for instance in candidates if not self._is_referenced(instance)
+            )
+            ordered = self._tracker.ordered(unreferenced)
+            self._tracker.forget(ordered)
+            return ordered
 
     def _shutdown_instances(self) -> tuple[Any, ...]:
         candidates = list(self._scope_cache.values())

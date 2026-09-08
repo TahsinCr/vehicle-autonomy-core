@@ -205,6 +205,27 @@ class EventBusTests(unittest.TestCase):
 
         self.assertEqual(received, [1, 2])
 
+    def test_replay_overflow_is_reported_instead_of_dropping_events(self) -> None:
+        bus = EventBus[int](history=4, replay_buffer_limit=1)
+        bus.publish(1)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def handler(value: int) -> None:
+            if value == 1:
+                entered.set()
+                release.wait(1.0)
+
+        subscriber = threading.Thread(target=lambda: bus.subscribe(handler, replay=1))
+        subscriber.start()
+        self.assertTrue(entered.wait(1.0))
+        bus.publish(2)
+        with self.assertRaises(BufferError):
+            bus.publish(3)
+        release.set()
+        subscriber.join(1.0)
+        self.assertFalse(subscriber.is_alive())
+
     def test_history_capacity_shorthand_and_bus_query_tools(self) -> None:
         bus = EventBus[int](history=2)
         for value in (1, 2, 3):

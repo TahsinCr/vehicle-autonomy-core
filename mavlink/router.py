@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from collections import deque
@@ -46,6 +47,9 @@ class _Route:
     callback: Callable[[Any], None]
 
 
+MavlinkIngressFilter = Callable[[MavlinkMessageEnvelope], bool]
+
+
 class MavlinkMessageRouter(Service):
     """Single connection reader and filtered MAVLink message backbone.
 
@@ -88,6 +92,10 @@ class MavlinkMessageRouter(Service):
         self._condition = threading.Condition(threading.RLock())
         self._lifecycle_lock = threading.RLock()
         self._route_lock = threading.RLock()
+        self._filter_lock = threading.RLock()
+        self._filters: dict[int, MavlinkIngressFilter] = {}
+        self._filter_snapshot: tuple[MavlinkIngressFilter, ...] = ()
+        self._next_filter_id = 0
         self._routes_by_type: dict[str, dict[int, _Route]] = {}
         self._wildcard_routes: dict[int, _Route] = {}
         self._next_route_id = 0
@@ -97,6 +105,7 @@ class MavlinkMessageRouter(Service):
         self._dispatch_errors = 0
         self._estimated_dropped_messages = 0
         self._source_sequences: dict[tuple[int, int], int] = {}
+        self._source_message_state: dict[tuple[int | None, int | None], dict[str, Any]] = {}
         self._delivery_window: deque[tuple[int, int]] = deque(maxlen=256)
         self._started_monotonic: float | None = None
         self._last_message_monotonic: float | None = None
@@ -140,6 +149,7 @@ class MavlinkMessageRouter(Service):
             self._stop_event.clear()
             with self._condition:
                 self._source_sequences.clear()
+                self._source_message_state.clear()
                 self._delivery_window.clear()
                 self._estimated_dropped_messages = 0
                 self._running = True
@@ -176,6 +186,28 @@ class MavlinkMessageRouter(Service):
                 self._condition.notify_all()
 
     close = stop
+
+    def add_filter(self, predicate: MavlinkIngressFilter) -> Subscription:
+        """Accept messages that pass every registered ingress predicate.
+
+        The returned subscription can be cancelled. The same method can be
+        used directly or as ``@router.add_filter``.
+        """
+
+        if not callable(predicate) or inspect.iscoroutinefunction(predicate):
+            raise TypeError("MAVLink ingress filter must be a synchronous callable")
+        with self._filter_lock:
+            filter_id = self._next_filter_id
+            self._next_filter_id += 1
+            self._filters[filter_id] = predicate
+            self._filter_snapshot = tuple(self._filters.values())
+
+        def cancel() -> None:
+            with self._filter_lock:
+                self._filters.pop(filter_id, None)
+                self._filter_snapshot = tuple(self._filters.values())
+
+        return Subscription(filter_id, cancel)
 
     def subscribe(
         self,
@@ -300,9 +332,15 @@ class MavlinkMessageRouter(Service):
                 with self._condition:
                     self._sequence += 1
                     envelope = MavlinkMessageEnvelope.wrap(self._sequence, message)
+                if not self._accept(envelope):
+                    continue
+                with self._condition:
                     self._history.append(envelope)
                     self._latest[(envelope.source_system, envelope.source_component,
                                   envelope.message_type)] = envelope
+                    self._source_message_state.setdefault(
+                        (envelope.source_system, envelope.source_component), {}
+                    )[envelope.message_type] = envelope.message
                     self._received_messages += 1
                     self._record_delivery(envelope)
                     self._last_message_monotonic = envelope.received_monotonic
@@ -313,6 +351,23 @@ class MavlinkMessageRouter(Service):
             with self._condition:
                 self._running = False
                 self._condition.notify_all()
+
+    def _accept(self, envelope: MavlinkMessageEnvelope) -> bool:
+        # Writes replace the immutable tuple under the filter lock. Reading
+        # the current tuple keeps the receive hot path lock-free.
+        for predicate in self._filter_snapshot:
+            try:
+                accepted = predicate(envelope)
+                if inspect.isawaitable(accepted):
+                    if inspect.iscoroutine(accepted):
+                        accepted.close()
+                    raise TypeError("MAVLink ingress filter returned an awaitable")
+                if not accepted:
+                    return False
+            except Exception as exc:
+                self._record_dispatch_error(exc, envelope, phase="filter")
+                return False
+        return True
 
     def _record_delivery(self, envelope: MavlinkMessageEnvelope) -> None:
         source_system = envelope.source_system
@@ -374,7 +429,18 @@ class MavlinkMessageRouter(Service):
 
         def evaluate(condition: str) -> bool:
             if condition not in condition_results:
-                condition_results[condition] = self.connection.evaluate_condition(condition)
+                with self._condition:
+                    state = dict(
+                        self._source_message_state.get(
+                            (envelope.source_system, envelope.source_component), {}
+                        )
+                    )
+                evaluator = getattr(self.connection, "evaluate_condition_for_state", None)
+                condition_results[condition] = (
+                    evaluator(condition, state)
+                    if callable(evaluator)
+                    else self.connection.evaluate_condition(condition)
+                )
             return condition_results[condition]
 
         for route in candidates.values():
@@ -394,23 +460,39 @@ class MavlinkMessageRouter(Service):
         envelope: MavlinkMessageEnvelope,
     ) -> bool:
         try:
+            with self._condition:
+                state = dict(
+                    self._source_message_state.get(
+                        (envelope.source_system, envelope.source_component), {}
+                    )
+                )
             return message_filter.matches(
                 envelope.message,
-                condition_evaluator=self.connection.evaluate_condition,
+                condition_evaluator=lambda condition: self._evaluate_condition(
+                    condition, state
+                ),
                 metadata=envelope,
             )
         except Exception as exc:
             self._record_dispatch_error(exc, envelope)
             return False
 
+    def _evaluate_condition(self, condition: str, state: dict[str, Any]) -> bool:
+        evaluator = getattr(self.connection, "evaluate_condition_for_state", None)
+        if callable(evaluator):
+            return bool(evaluator(condition, state))
+        return bool(self.connection.evaluate_condition(condition))
+
     def _record_dispatch_error(
         self,
         error: Exception,
         envelope: MavlinkMessageEnvelope,
+        *,
+        phase: str = "dispatch",
     ) -> None:
         with self._condition:
             self._dispatch_errors += 1
-        self._publish_error(MavlinkRouterError("dispatch", error, envelope))
+        self._publish_error(MavlinkRouterError(phase, error, envelope))
 
     def _publish_error(self, error: MavlinkRouterError) -> None:
         self.errors.publish(error)

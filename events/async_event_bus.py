@@ -48,6 +48,8 @@ class _AsyncSubscriber(Generic[T]):
     def buffer_if_replaying(self, event: T) -> bool:
         if not self.replaying:
             return False
+        if self.pending.maxlen is not None and len(self.pending) >= self.pending.maxlen:
+            raise BufferError("Event replay buffer is full")
         self.pending.append(event)
         return True
 
@@ -172,11 +174,15 @@ class AsyncEventBus(BaseEventBus[T]):
                 delivery_limit,
                 replaying=bool(replay and self._history is not None),
             )
-            replay_events = (
-                self._history.query(normalized_filter, limit=replay)
+            replay_snapshot = (
+                self._history.query()
                 if subscriber.replaying
                 else ()
             )
+
+        replay_events = tuple(
+            event for event in replay_snapshot if normalized_filter.matches(event)
+        )[-replay:]
 
         if subscriber.replaying:
             try:

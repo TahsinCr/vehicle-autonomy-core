@@ -4,6 +4,51 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v1.6] - 2026-09-08
+
+### Added
+
+- Added source-local MAVLink condition state, wall-clock packet receive times,
+  configurable SQLite history batching and an explicit `CallbackTimeoutError`.
+- Added cancellable router ingress filters through `add_filter()`. Filters
+  compose in registration order and support direct and decorator registration.
+
+### Changed
+
+- Parallel-stage `MissionExecutionResult.mission_id` is now `None`; a parallel
+  result belongs to its named group rather than whichever child happened to
+  finish last.
+- Cancelling an async MAVLink transport call now keeps ownership of its worker
+  until the blocking operation returns instead of leaving detached executor work.
+
+### Fixed
+
+- Unwind mission callbacks immediately after callback-driven `complete()` or
+  `fail()`, and defer terminal publication and resource release until user code
+  has stopped. Completion now claims `STOPPING` atomically, preventing concurrent
+  pause/stop transitions from corrupting the final phase.
+- Require a controlling mission to be running. Registered, paused and terminal
+  missions can no longer use retained controllers to affect other missions.
+- Revalidate prerequisites, capacity and conflict policy immediately before a
+  mission enters `STARTING`, removing nondeterministic launch/queue races.
+- Guard background activation with its owner's current state and ignore failure
+  propagation when a `KEEP_RUNNING` background's mission owner was removed.
+- Detect dependency initialization cycles spanning multiple threads. Replacement
+  disposal no longer executes user `close()` code while holding the registration
+  lock, and token detachment is atomic with registry updates.
+- Evaluate native MAVLink conditions against the current system/component state
+  instead of the connection-wide last-message dictionary.
+- Move SQLite JSON serialization onto its writer thread, insert records in
+  batches and trim retention once per transaction rather than once per message.
+- Make replay overflow explicit instead of silently discarding live events, and
+  evaluate replay predicates outside event-bus locks in sync and async buses.
+- Give sync and async callback timeouts the same admission-to-callback budget;
+  user-raised `TimeoutError` is no longer mistaken for a framework timeout.
+- Persist the receive wall-clock timestamp captured with each MAVLink envelope
+  instead of taking a delayed timestamp inside history subscribers.
+- Normalize MAVLink `NaN` and positive/negative infinity to JSON `null` in
+  memory and SQLite history snapshots without changing live message objects.
+
 ## [v1.5] - 2026-09-08
 
 ### Added
