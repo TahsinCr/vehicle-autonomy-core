@@ -230,6 +230,9 @@ def get_injection_plan(
     dependency_items_: tuple[tuple[str, Token], ...],
 ) -> InjectionPlan:
     signature = inspect.signature(func)
+    # Local classes used only in postponed annotations are not recoverable via
+    # get_type_hints(). Keep the raw annotation as a token so strict mode can
+    # report its exact unresolved name instead of hiding the parameter.
     hints = safe_type_hints(func)
     dependencies = dict(dependency_items_)
     candidates: list[InjectCandidate] = []

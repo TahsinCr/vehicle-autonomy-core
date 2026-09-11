@@ -647,6 +647,18 @@ class MavlinkRuntimeTests(unittest.TestCase):
         self.assertEqual(len(removed), 1)
         runtime.close()
 
+    def test_disconnected_vehicle_state_can_be_pruned_automatically(self):
+        client = FakeClient([])
+        runtime = MavlinkRuntime(client=client, vehicle_state_retention=0)
+        runtime.start()
+        try:
+            emit(client, 12, 1)
+            self.assertIsNotNone(runtime.vehicles.get(12))
+            runtime._registry.expire(float("inf"))
+            self.assertIsNone(runtime.vehicles.get(12))
+        finally:
+            runtime.close()
+
     def test_runtime_owns_lifecycle_in_dependency_order(self) -> None:
         calls: list[str] = []
         client = FakeClient(calls)
@@ -796,6 +808,68 @@ def emit(client, system, component, message_type="HEARTBEAT", autopilot=3):
 
 
 class AsyncMavlinkRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_callback_failure_enters_one_fatal_delivery_state(self):
+        client = FakeClient([])
+        runtime = AsyncMavlinkRuntime(client=client)
+
+        async def broken(_event):
+            raise RuntimeError("callback failed")
+
+        await runtime.start()
+        try:
+            runtime._delivery.submit(broken, object())
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while runtime.delivery_error is None:
+                if asyncio.get_running_loop().time() >= deadline:
+                    self.fail("Async delivery failure was not published")
+                await asyncio.sleep(0)
+            self.assertIsInstance(runtime.delivery_error, RuntimeError)
+            with self.assertRaises(RuntimeError):
+                await runtime.vehicles.wait_for(timeout=0)
+        finally:
+            await runtime.close()
+
+    async def test_scoped_io_cancellation_waits_for_owned_worker(self):
+        client = FakeClient([])
+        entered = threading.Event()
+        release = threading.Event()
+
+        def send_named(*_args, **_kwargs):
+            entered.set()
+            release.wait(1.0)
+
+        client.connection.send_named = send_named
+        runtime = AsyncMavlinkRuntime(client=client)
+        await runtime.start()
+        try:
+            emit(client, 12, 1)
+            vehicle = runtime.vehicles.get(12)
+            operation = asyncio.create_task(vehicle.send_named("COMMAND_LONG"))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1.0))
+            operation.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(operation.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await operation
+        finally:
+            release.set()
+            await runtime.close()
+
+    async def test_optional_callback_concurrency_preserves_default_ordering(self):
+        sequential = AsyncMavlinkRuntime(
+            client=FakeClient([]),
+            callback_concurrency=1,
+        )
+        concurrent = AsyncMavlinkRuntime(
+            client=FakeClient([]),
+            callback_concurrency=2,
+        )
+        self.assertEqual(sequential._delivery.concurrency, 1)
+        self.assertEqual(concurrent._delivery.concurrency, 2)
+        await sequential.close()
+        await concurrent.close()
+
     async def test_async_subscription_decorator_has_local_hooks_and_settings(self):
         client = FakeClient([])
         async with AsyncMavlinkRuntime(client=client) as runtime:

@@ -5,11 +5,21 @@ from __future__ import annotations
 import threading
 import time
 import math
+from dataclasses import dataclass
 from collections import deque
 from collections.abc import Callable
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryWriterStats:
+    submitted: int
+    completed: int
+    queued: int
+    batches: int
+    failed: bool
 
 
 class HistoryWriter(Generic[T]):
@@ -40,6 +50,7 @@ class HistoryWriter(Generic[T]):
         self._busy = False
         self._submitted = 0
         self._completed = 0
+        self._batches = 0
         self._closed = False
         self.failure: Exception | None = None
         self._thread = threading.Thread(target=self._run, name="mavlink-history", daemon=True)
@@ -84,7 +95,19 @@ class HistoryWriter(Generic[T]):
                 with self._condition:
                     self._busy = False
                     self._completed += len(records)
+                    self._batches += 1
                     self._condition.notify_all()
+
+    @property
+    def stats(self) -> HistoryWriterStats:
+        with self._condition:
+            return HistoryWriterStats(
+                submitted=self._submitted,
+                completed=self._completed,
+                queued=len(self._queue),
+                batches=self._batches,
+                failed=self.failure is not None,
+            )
 
     def flush(self, timeout: float = 5.0) -> None:
         with self._condition:

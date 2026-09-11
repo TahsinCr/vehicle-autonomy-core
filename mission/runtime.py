@@ -31,9 +31,12 @@ class MissionRuntime:
     active_started_monotonic: float | None = None
     attempt_started_monotonic: float | None = None
     queued_monotonic: float | None = None
+    next_retry_monotonic: float | None = None
     chain_context: MissionExecutionContext | None = None
     execution_node: str | None = None
     activation_guard: Callable[[], bool] | None = None
+    cleanup_error: Exception | None = None
+    pending_exit: Any | None = None
 
 
 class BoundMissionController(MissionController):

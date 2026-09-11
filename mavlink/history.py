@@ -15,7 +15,7 @@ from types import TracebackType
 from typing import TypeAlias, TypeVar
 
 from .message import MavlinkMessageEnvelope
-from .recording import HistoryWriter
+from .recording import HistoryWriter, HistoryWriterStats
 
 JsonValue: TypeAlias = "None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]"
 _Row: TypeAlias = tuple[int, int | None, int | None, str, float, str]
@@ -60,13 +60,31 @@ class MessageHistory:
     replace append/query/clear/close without changing runtime registration.
     """
 
-    def __init__(self, *, limit: int | None = 1000) -> None:
+    def __init__(
+        self,
+        *,
+        limit: int | None = 1000,
+        background: bool = False,
+        queue_capacity: int = 1024,
+        batch_size: int = 64,
+        flush_interval: float = 0.02,
+    ) -> None:
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             raise ValueError("History limit must be a positive integer or None")
         self.limit = limit
         self._lock = threading.RLock()
         self._closed = False
         self._records: deque[_Row] = deque(maxlen=limit)
+        self._writer = (
+            HistoryWriter(
+                self._append_batch,
+                queue_capacity,
+                batch_size=batch_size,
+                flush_interval=flush_interval,
+            )
+            if background
+            else None
+        )
 
     def _check_open(self) -> None:
         if self._closed:
@@ -80,12 +98,43 @@ class MessageHistory:
         return json.dumps(_normalize_json_value(serializer()), allow_nan=False)
 
     def append(self, envelope: MavlinkMessageEnvelope) -> None:
-        payload = self._encode(envelope)
+        if self._writer is not None:
+            self._writer.submit(envelope)
+            return
+        self._append_batch((envelope,))
+
+    def _append_batch(
+        self,
+        envelopes: tuple[MavlinkMessageEnvelope, ...],
+    ) -> None:
+        rows = tuple(
+            (
+                envelope.sequence,
+                envelope.source_system,
+                envelope.source_component,
+                envelope.message_type,
+                envelope.received_at,
+                self._encode(envelope),
+            )
+            for envelope in envelopes
+        )
         with self._lock:
             self._check_open()
-            self._records.append((envelope.sequence, envelope.source_system,
-                                  envelope.source_component, envelope.message_type,
-                                  envelope.received_at, payload))
+            self._records.extend(rows)
+
+    @property
+    def recording_error(self) -> Exception | None:
+        return None if self._writer is None else self._writer.failure
+
+    @property
+    def writer_stats(self) -> HistoryWriterStats | None:
+        """Return a stable writer snapshot, or None for synchronous history."""
+
+        return None if self._writer is None else self._writer.stats
+
+    def flush(self, timeout: float = 5.0) -> None:
+        if self._writer is not None:
+            self._writer.flush(timeout)
 
     def query(self, *, system_id: int | None = None, component_id: int | None = None,
               message_type: str | None = None, since: float | None = None,
@@ -105,6 +154,7 @@ class MessageHistory:
         message_type = message_type.strip().upper() if message_type is not None else None
         if message_type == "":
             raise ValueError("Message type must not be empty")
+        self.flush()
         with self._lock:
             self._check_open()
             rows = self._select(system_id, component_id, message_type, since, until, limit)
@@ -131,11 +181,14 @@ class MessageHistory:
         return rows[0] if rows else None
 
     def clear(self) -> None:
+        self.flush()
         with self._lock:
             self._check_open()
             self._records.clear()
 
     def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
         with self._lock:
             self._closed = True
 
@@ -157,10 +210,22 @@ class SqliteMessageHistory(MessageHistory):
 
     def __init__(self, path: str | PathLike[str], *, limit: int | None = 1000,
                  queue_capacity: int = 1024, batch_size: int = 64,
-                 flush_interval: float = 0.02) -> None:
+                 flush_interval: float = 0.02, wal: bool = False,
+                 busy_timeout: float = 5.0) -> None:
+        if not isinstance(wal, bool):
+            raise TypeError("wal must be a boolean")
+        if (isinstance(busy_timeout, bool) or not isinstance(busy_timeout, (int, float))
+                or not math.isfinite(busy_timeout) or busy_timeout < 0):
+            raise ValueError("busy_timeout must be finite and non-negative")
         super().__init__(limit=limit)
-        self._database = sqlite3.connect(path, check_same_thread=False)
+        self._database = sqlite3.connect(
+            path,
+            check_same_thread=False,
+            timeout=float(busy_timeout),
+        )
         try:
+            if wal:
+                self._database.execute("PRAGMA journal_mode=WAL")
             with self._database:
                 self._database.execute("""CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY, sequence INTEGER, system_id INTEGER,
@@ -183,13 +248,6 @@ class SqliteMessageHistory(MessageHistory):
 
     def append(self, envelope: MavlinkMessageEnvelope) -> None:
         self._writer.submit(envelope)
-
-    @property
-    def recording_error(self) -> Exception | None:
-        return self._writer.failure
-
-    def flush(self, timeout: float = 5.0) -> None:
-        self._writer.flush(timeout)
 
     def query(self, *, system_id: int | None = None, component_id: int | None = None,
               message_type: str | None = None, since: float | None = None,

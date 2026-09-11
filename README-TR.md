@@ -336,7 +336,11 @@ birden fazla hata varsa bunları birlikte yükseltir. Eşzamanlı çözümlemele
 scope içinde yine tek bir instance alır. Birden fazla token altında kayıtlı bir
 nesne son sahibi kaldırılana kadar açık kalır. Senkron shutdown async-only bir
 cleanup ile karşılaşırsa sahipliği korur; işlem `shutdown_async()` ile yeniden
-denenebilir.
+denenebilir. Kapanırken hata veren bir kaynak da container sahipliğinde kalır;
+sonraki `shutdown()`/`shutdown_async()` yalnızca başarıyla kapanmayan kaynakları
+yeniden dener. Dependency döngüleri hem thread'ler hem de bağımsız asyncio
+task'ları arasında yakalanır. Eşzamanlı cleanup yolları kullanıcı kodunu
+çağırmadan önce kaynağı sahiplenir; aynı instance iki kez kapatılmaz.
 
 Uygulamaya ait composition root için `BaseDependencyContainer` sınıfından
 miras alıp kayıtları `configure()` içinde tutabilirsiniz.
@@ -402,8 +406,12 @@ kayıtları kopyalar.
 varsayılan olarak aynı anda en fazla 64 periyodik schedule kabul eder;
 uygulamanın bilinçli olarak farklı bir sınıra ihtiyacı varsa `max_schedules=`
 kullanılabilir. `replay_buffer_limit=`, yavaş bir replay arkasında biriken
-canlı event'leri sınırlar. Taşma, eksik bir zinciri sessizce üretmek yerine
-`BufferError` verir.
+canlı event'leri sınırlar. Taşma yalnızca ilgili subscriber'ı iptal eder ve
+`PublishResult.errors` içinde bildirilir; diğer subscriber'lar eventi almaya
+devam eder. `ErrorPolicy.RAISE` seçiliyse normal toplu hata yükseltilir.
+`close()` dönmeden önce senkron periyodik schedule thread'lerini durdurup bekler.
+`shutdown_timeout=` bu beklemeyi sınırlar; kullanıcı callback'i dönmezse
+`EventShutdownTimeoutError` yükseltilir ve Python thread'i zorla sonlandırılmaz.
 
 ### Hook'lar ve hata politikası
 
@@ -762,6 +770,11 @@ Transition aboneleri engine state lock'u dışında çalışır ve başka bir li
 komutu verebilir.
 `start()`/`tick()` içinden `complete()` veya `fail()` çağrılırsa callback hemen
 sonlanır; terminal durum ve kaynak bırakma stack açıldıktan sonra yapılır.
+`stop()` hata verirse mission `STOPPING` durumunda ve resource sahibi olarak
+kalır; `MissionCleanupError` cleanup'ın tamamlanmadığını bildirir. Alttaki sorun
+çözüldükten sonra lifecycle işlemi yeniden çağrılabilir. Cleanup başarılı
+olmadan resource başka bir mission'a verilmez. Terminal mission'lar yeni
+checkpoint kabul etmez ve checkpoint event adını aynı isimli value ezemez.
 Paralel aşama sonucu grubu `node` ile tanımlar ve bitiş sırasına bağlı bir
 child ID yerine `mission_id=None` taşır.
 
@@ -840,7 +853,13 @@ olan sistemler araç kaydı oluşturmaz. Tanınan aracın component'leri gelen
 mesajlardan keşfedilir. Aynı bağlantıdaki araçların system ID'leri farklı olmalıdır.
 
 ```python
-link = MavlinkRuntime(endpoint, heartbeat_timeout=5.0, vehicle_history=128)
+link = MavlinkRuntime(
+    endpoint,
+    heartbeat_timeout=5.0,
+    vehicle_history=128,
+    vehicle_state_retention=60.0,
+    router_options={"state_capacity": 2048, "source_capacity": 256},
+)
 
 @link.vehicles.on_added
 def discovered(event):
@@ -861,6 +880,10 @@ with link:
 ```
 
 İlk keşfi yakalamak için callback'leri context'e girmeden kaydedin.
+State temizliği opsiyoneldir: bağlantısı kesilmiş component ve araçlar verilen
+süre sonunda kaldırılır. `link.prune_vehicles(older_than=...)` ile temizlik
+elle de yapılabilir. Router sınırları LRU kullanır; filtreleme, eviction ve cache
+sayaçları `link.state.router` ile `link.router.cache.stats` üzerinden okunur.
 İsteğe bağlı kayıt için `MessageHistory` veya ondan türeyen
 `SqliteMessageHistory` kullanılabilir. `latest()` artık geçmişten bağımsızdır;
 her mesaj türünün son değerini tutar (router'da kaynak/tür başına). Bu değer
@@ -869,7 +892,12 @@ eski olabilir; bağlantı durumunu ve zaman damgasını ayrıca kontrol edin.
 ```python
 from src.core.mavlink import MessageHistory, SqliteMessageHistory
 
-with SqliteMessageHistory("telemetry.sqlite3", limit=None) as history:
+with SqliteMessageHistory(
+    "telemetry.sqlite3",
+    limit=None,
+    wal=True,
+    busy_timeout=5.0,
+) as history:
     with MavlinkRuntime(endpoint) as link:
         recording = link.add_history(history)
         # Uygulamanın mesaj alma/bekleme akışı burada çalışır.
@@ -879,7 +907,11 @@ with SqliteMessageHistory("telemetry.sqlite3", limit=None) as history:
         recording.cancel()
 ```
 
-Bellekte kayıt için `MessageHistory(limit=1000)` kullanılır. İki sınıfta da
+Bellekte kayıt için `MessageHistory(limit=1000)` kullanılır. Yüksek hızlı
+akışlarda `MessageHistory(limit=1000, background=True)` JSON dönüşümünü sınırlı
+bir writer thread'ine taşır; bu opsiyonel yol `queue_capacity`, `batch_size` ve
+`flush_interval` ile ayarlanır. Küçük geçmişlerde varsayılan senkron kullanım
+ek thread açmaz. İki sınıfta da
 varsayılan sınır toplam 1000 kayıttır; `None` sınırsızdır. SQLite sınırı önceki
 oturumlardaki kayıtları da kapsar. `query()` eskiden yeniye, bağımsız JSON
 payload taşıyan `MessageRecord` nesneleri döndürür. Kaynak/tür filtrelerine
@@ -888,6 +920,9 @@ yeni eşleşen N kaydı seçer. `clear()` bütün kayıtları siler. Mesajlar JS
 uyumlu `to_dict()` sağlamalıdır. MAVLink'in sonlu olmayan float sentinel
 değerleri (`NaN`, pozitif ve negatif sonsuzluk) JSON `null` olarak saklanır;
 canlı mesaj nesnesi değiştirilmez.
+`history.writer_stats` gönderilen, tamamlanan, kuyruktaki kayıt ve batch
+sayılarını verir. WAL opsiyoneldir; çıkarılabilir depolama ve salt-okunur
+senaryolar SQLite'ın varsayılan journal modunu koruyabilir.
 Bellekte son N sorgusu yeterli eşleşmeyi bulunca durur; eşleşme yoksa tüm
 geçmiş taranabilir. SQLite filtre ve limiti SQL içinde uygular. Kaynak ID'leri
 0..255 arası tamsayı, zaman sınırları sonlu ve sıralı olmalıdır; mesaj türü
@@ -996,7 +1031,10 @@ for component in link.vehicles.get_component(1):
 abonelik kaydı ve iptali senkron kalır; wait, gönderim, application request ve
 yaşam döngüsü işlemleri await edilir. Bloklayan taşıma işlemleri loop'un ortak
 executor'ünü kullanır. Async callback'ler tek tüketiciyle çalışır; thread'den
-loop'a bildirimler birleştirilir. İptal edilen bir taşıma coroutine'i, altta
+loop'a bildirimler birleştirilir. Varsayılan `callback_concurrency=1` callback
+sırasını korur. Birbirinden bağımsız telemetri callback'leri için
+`AsyncMavlinkRuntime(..., callback_concurrency=N)` ile sınırlı eşzamanlılık
+açılabilir; bu modda da yaşam döngüsü aksiyonları sıralı kalır. İptal edilen bir taşıma coroutine'i, altta
 başlamış iş bitene kadar onu sahipli tutar; gönderilmiş mesajı geri alamaz.
 Telemetri ve yaşam döngüsü aksiyonlarının
 sınırlı kuyrukları ayrıdır. Telemetri kuyruğu dolduğunda en eski callback
@@ -1090,7 +1128,9 @@ doğrudan verildiğinde iptal edilebilir abonelik döner; aynı kaydı değişti
 için `replace=True` gerekir. Araç başına worker havuzu açılmaz, sınırlı
 application dispatcher paylaşılır. Senkron runtime'da normal fonksiyon,
 async runtime'da `async def` kullanılır. Async application handler'ları runtime
-loop'unda çalışır; kapanışta iptal edilir ve tamamlanmaları beklenir.
+loop'unda çalışır; kapanışta iptal edilir ve tamamlanmaları beklenir. Varsayılan
+`workers=1` handler sırasını korur; yalnızca handler'lar birbirinden bağımsızsa
+ve daha yüksek throughput gerekiyorsa sınırlı worker sayısı artırılmalıdır.
 
 Async runtime'daki `send`, `send_named`, `notify`, `request` ve ham mesaj
 `wait_for` çağrıları await edilir. `messages`, `packets` ve `errors` birer
@@ -1139,7 +1179,11 @@ mavlink.send_named(
 ```
 
 Filtreler mesaj tipi, mesaj ID, source system, source component, native
-`pymavlink` condition ve Python predicate'i birlikte kullanabilir. `once()` ilk
+`pymavlink` condition ve Python predicate'i birlikte kullanabilir. Native
+condition yalnızca canlı `subscribe()` tesliminde nedensel olarak doğrudur.
+`latest()`, `history()` ve `wait_for()`, geçmiş state'i doğru biçimde yeniden
+kuramayacağı için `condition=` içeren filtreleri reddeder; bu sorgularda
+`predicate=` kullanılmalıdır. `once()` ilk
 eşleşmeden sonra kendini iptal eder. Router `history()` metodu
 `MavlinkMessageEnvelope` nesneleri, `latest()` ise ham mesajı döndürür.
 `MavlinkClient` ayrıca `request_message_rate()`, `send()`, `call_mav()` ve

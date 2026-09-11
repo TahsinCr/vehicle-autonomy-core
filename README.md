@@ -339,7 +339,12 @@ cleanup failures together when more than one resource fails. Concurrent
 resolutions still receive one scoped instance, and an object registered under
 several tokens remains open until its final owning token is removed. A
 synchronous shutdown that encounters async-only cleanup leaves ownership intact
-so the application can retry with `shutdown_async()`.
+so the application can retry with `shutdown_async()`. A resource that raises
+while closing also remains owned: a later `shutdown()`/`shutdown_async()` retries
+only the resources that did not close successfully. Dependency cycles are
+detected across both threads and independent asyncio tasks. Concurrent cleanup
+paths claim each resource before calling user code, so the same instance cannot
+be closed twice.
 
 For a project-owned composition root, subclass `BaseDependencyContainer` and
 put registrations in `configure()`.
@@ -403,8 +408,13 @@ with `limit=`; unfiltered limited reads copy only the requested tail.
 daemon schedule and returns a cancellable `Subscription`. A bus accepts at
 most 64 live periodic schedules by default; set `max_schedules=` when the
 application has a different, deliberate limit. `replay_buffer_limit=` bounds
-live events arriving behind a slow replay. Overflow raises `BufferError`
-instead of silently producing an incomplete event sequence.
+live events arriving behind a slow replay. Overflow cancels only the affected
+subscriber and is returned in `PublishResult.errors`; other subscribers still
+receive the event. With `ErrorPolicy.RAISE`, the publish call raises the normal
+aggregate error. `close()` cancels and joins synchronous periodic schedules
+before returning. `shutdown_timeout=` bounds that wait and raises
+`EventShutdownTimeoutError` if user callback code does not return; Python
+threads are never terminated unsafely.
 
 ### Hooks and error policy
 
@@ -758,6 +768,12 @@ or `stop()` concurrently on the same mission instance. Transition subscribers
 run outside the engine state lock and may issue another lifecycle command.
 Calling `complete()` or `fail()` inside `start()`/`tick()` ends that callback
 immediately; terminal state and resource release occur only after it unwinds.
+If `stop()` raises, the mission remains `STOPPING`, its resources remain owned,
+and `MissionCleanupError` reports the incomplete cleanup. Call the lifecycle
+operation again after resolving the underlying problem; the engine never makes
+the resource available to another mission before cleanup succeeds. Terminal
+missions reject new checkpoints, and checkpoint event names cannot be replaced
+by a value with the same key.
 Parallel stage results identify their group through `node` and carry
 `mission_id=None` instead of a completion-order-dependent child ID.
 
@@ -837,7 +853,13 @@ not create vehicle entries. Components of an identified vehicle are discovered
 from their messages. Systems sharing a link must have distinct system IDs.
 
 ```python
-link = MavlinkRuntime(endpoint, heartbeat_timeout=5.0, vehicle_history=128)
+link = MavlinkRuntime(
+    endpoint,
+    heartbeat_timeout=5.0,
+    vehicle_history=128,
+    vehicle_state_retention=60.0,
+    router_options={"state_capacity": 2048, "source_capacity": 256},
+)
 
 @link.vehicles.on_added
 def discovered(event):
@@ -933,6 +955,11 @@ async def receive_positions(endpoint):
 ```
 
 There is no `.aio` view: discovered objects follow their runtime's mode.
+State retention is opt-in: disconnected components and vehicles are removed
+after the configured interval. `link.prune_vehicles(older_than=...)` also
+provides explicit cleanup. Router limits use LRU eviction, while
+`link.state.router` and `link.router.cache.stats` expose filtering, eviction and
+cache counters without adding callbacks to the receive hot path.
 
 Optional recording is separate from `latest()`, which now keeps the last
 message per type even after history eviction (per source/type on the router).
@@ -941,7 +968,12 @@ Last-known data may be stale: check timestamps and connection state.
 ```python
 from src.core.mavlink import MessageHistory, SqliteMessageHistory
 
-with SqliteMessageHistory("telemetry.sqlite3", limit=None) as history:
+with SqliteMessageHistory(
+    "telemetry.sqlite3",
+    limit=None,
+    wal=True,
+    busy_timeout=5.0,
+) as history:
     with MavlinkRuntime(endpoint) as link:
         recording = link.add_history(history)  # also works after startup
         # Run your application's receive/wait workflow here.
@@ -951,7 +983,11 @@ with SqliteMessageHistory("telemetry.sqlite3", limit=None) as history:
         recording.cancel()
 ```
 
-Use `MessageHistory(limit=1000)` for memory storage. Both backends default to
+Use `MessageHistory(limit=1000)` for memory storage. For a high-rate stream,
+`MessageHistory(limit=1000, background=True)` moves JSON conversion to a bounded
+writer thread; `queue_capacity`, `batch_size` and `flush_interval` tune that
+optional path. The synchronous default avoids a thread for small histories.
+Both backends default to
 1000 total records; `limit=None` is unlimited. SQLite retention includes earlier
 runs. `query()` returns detached JSON `MessageRecord` snapshots oldest-first,
 with source/type filters and inclusive Unix time bounds `since`/`until`.
@@ -963,6 +999,9 @@ and ordered, and message types cannot be empty.
 Messages must implement JSON-compatible `to_dict()`. MAVLink non-finite float
 sentinels (`NaN`, positive infinity and negative infinity) are stored as JSON
 `null`; the live message object is not modified.
+`history.writer_stats` reports submitted, completed, queued and batch counts.
+WAL remains opt-in because removable storage and read-only workflows may prefer
+SQLite's default journal mode.
 
 `add_history` is synchronous in both runtime modes, records future traffic and
 returns a cancellable subscription. Runtime close detaches it; the application
@@ -999,6 +1038,10 @@ awaitable. Blocking transport operations use the loop's shared executor.
 Cancellation waits for an already-started transport operation to finish, so
 executor work is not left detached; it cannot retract a message already sent.
 Async callback delivery uses one consumer with coalesced cross-thread wakeups.
+The default `callback_concurrency=1` preserves callback ordering. Applications
+with independent telemetry callbacks can opt into bounded concurrency through
+`AsyncMavlinkRuntime(..., callback_concurrency=N)`; lifecycle actions remain
+ordered even in that mode.
 Telemetry and lifecycle actions have separate bounded queues. When telemetry
 is full, its oldest callback is dropped; `link.dropped_callbacks` exposes the
 count. Actions run first, in order, so an `on_added` callback can register
@@ -1086,7 +1129,9 @@ directly; duplicate registrations require `replace=True`. They share the
 bounded application dispatcher, not a worker pool per vehicle. Use ordinary
 functions with `MavlinkRuntime` and `async def` with `AsyncMavlinkRuntime`;
 async application handlers run on the runtime's loop and are cancelled and
-awaited at shutdown.
+awaited at shutdown. The default `workers=1` keeps handler execution ordered;
+set a larger bounded worker count only when handlers are independent and higher
+throughput is required.
 
 Async runtime also provides awaitable `send`, `send_named`, `notify`, `request`
 and raw-message `wait_for`. Its `messages`, `packets` and `errors` are
@@ -1135,7 +1180,11 @@ mavlink.send_named(
 ```
 
 Filters may combine message type, message ID, source system, source component,
-a native `pymavlink` condition and a Python predicate. `once()` removes itself
+a native `pymavlink` condition and a Python predicate. Native conditions are
+causal only during live `subscribe()` dispatch. `latest()`, `history()` and
+`wait_for()` reject filters containing `condition=` because current state cannot
+truthfully reconstruct a historical condition; use `predicate=` for those
+queries. `once()` removes itself
 after the first match. Router `history()` returns `MavlinkMessageEnvelope`
 objects; `latest()` returns the underlying message. `MavlinkClient` also
 exposes `request_message_rate()`, `send()`, `call_mav()` and `call_raw()`.

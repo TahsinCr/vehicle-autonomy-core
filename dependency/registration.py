@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, field
@@ -23,7 +24,38 @@ DEFAULT_PRIORITY = 100
 NONE_TYPE = type(None)
 
 _WAIT_GRAPH_LOCK = threading.Lock()
-_THREAD_WAITS_FOR: dict[int, int] = {}
+_RESOLUTION_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "dependency_resolution_owner", default=None
+)
+_OWNER_WAITS_FOR: dict[object, object] = {}
+
+
+def begin_resolution_owner() -> contextvars.Token[object | None] | None:
+    """Create one logical owner shared by nested sync/async resolution work."""
+
+    current = _RESOLUTION_OWNER.get()
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    if task is not None:
+        return None if current is task else _RESOLUTION_OWNER.set(task)
+    # asyncio.to_thread() copies the task owner into its worker context.
+    if current is not None:
+        return None
+    return _RESOLUTION_OWNER.set(object())
+
+
+def end_resolution_owner(
+    token: contextvars.Token[object | None] | None,
+) -> None:
+    if token is not None:
+        _RESOLUTION_OWNER.reset(token)
+
+
+def current_resolution_owner() -> object:
+    owner = _RESOLUTION_OWNER.get()
+    return owner if owner is not None else ("thread", threading.get_ident())
 
 
 class _Missing:
@@ -50,7 +82,7 @@ class InitializationGate:
         "_condition",
         "_initializing",
         "_owner_async",
-        "_owner_thread",
+        "_owner",
         "_retired",
     )
 
@@ -58,7 +90,7 @@ class InitializationGate:
         self._condition = threading.Condition()
         self._initializing = False
         self._owner_async = False
-        self._owner_thread: int | None = None
+        self._owner: object | None = None
         self._retired = False
 
     def claim(self, *, asynchronous: bool = False) -> bool:
@@ -69,39 +101,39 @@ class InitializationGate:
                 return False
             self._initializing = True
             self._owner_async = asynchronous
-            self._owner_thread = threading.get_ident()
+            self._owner = current_resolution_owner()
             return True
 
     def wait(self) -> None:
-        waiter = threading.get_ident()
+        waiter = current_resolution_owner()
         with self._condition:
             if (
                 self._initializing
                 and self._owner_async
-                and self._owner_thread == threading.get_ident()
+                and self._owner == waiter
             ):
                 raise InitializationRetiredError(
                     "Synchronous resolution cannot wait for an async provider "
                     "on its owning event-loop thread"
                 )
-            owner = self._owner_thread
+            owner = self._owner
             if owner is not None:
                 with _WAIT_GRAPH_LOCK:
-                    current: int | None = owner
+                    current: object | None = owner
                     while current is not None:
                         if current == waiter:
                             raise InitializationRetiredError(
-                                "Cross-thread dependency initialization cycle detected"
+                                "Cross-context dependency initialization cycle detected"
                             )
-                        current = _THREAD_WAITS_FOR.get(current)
-                    _THREAD_WAITS_FOR[waiter] = owner
+                        current = _OWNER_WAITS_FOR.get(current)
+                    _OWNER_WAITS_FOR[waiter] = owner
             try:
                 self._condition.wait_for(lambda: not self._initializing)
                 if self._retired:
                     raise InitializationRetiredError("Dependency registration is retired")
             finally:
                 with _WAIT_GRAPH_LOCK:
-                    _THREAD_WAITS_FOR.pop(waiter, None)
+                    _OWNER_WAITS_FOR.pop(waiter, None)
 
     async def wait_async(self) -> None:
         await asyncio.to_thread(self.wait)
@@ -110,7 +142,7 @@ class InitializationGate:
         with self._condition:
             self._initializing = False
             self._owner_async = False
-            self._owner_thread = None
+            self._owner = None
             self._condition.notify_all()
 
     def retire(self) -> None:

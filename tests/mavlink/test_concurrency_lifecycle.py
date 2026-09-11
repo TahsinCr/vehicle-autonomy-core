@@ -387,6 +387,33 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertFalse(requester.is_alive())
         self.assertEqual(responses[0].response.source_system, 7)
 
+    def test_probe_rtt_accepts_only_the_expected_source(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel, target_system=7, target_component=9)
+        peer.start()
+        probe = peer.probe()
+        payload = {"request_id": probe.packet_id}
+        channel.packets.publish(
+            MavlinkApplicationPacket(
+                "system.pong",
+                payload,
+                source_system=8,
+                source_component=9,
+            )
+        )
+        self.assertIn(probe.packet_id, peer._probes)
+        channel.packets.publish(
+            MavlinkApplicationPacket(
+                "system.pong",
+                payload,
+                source_system=7,
+                source_component=9,
+            )
+        )
+        self.assertNotIn(probe.packet_id, peer._probes)
+        self.assertIsNotNone(peer.state.round_trip_ms)
+        peer.stop()
+
     def test_request_timeout_and_liveness_expiry(self) -> None:
         channel = _ChannelStub()
         peer = self._peer(channel)

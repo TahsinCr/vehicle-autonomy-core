@@ -133,9 +133,9 @@ class MavlinkApplicationDispatcher(Service):
         thread_name: str = "MavlinkApplicationDispatch",
         handlers: MavlinkApplicationHandlerRegistry | None = None,
     ) -> None:
-        if int(workers) <= 0:
+        if isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0:
             raise ValueError("Application dispatcher worker count must be positive")
-        if int(max_pending) <= 0:
+        if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending <= 0:
             raise ValueError("Application dispatcher queue limit must be positive")
         self._peer = peer
         self._workers = int(workers)

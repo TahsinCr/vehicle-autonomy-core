@@ -21,6 +21,22 @@ def envelope(sequence, system=12, component=1, kind="ATTITUDE"):
 
 
 class MessageHistoryTests(unittest.TestCase):
+    def test_writer_stats_and_optional_wal_are_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = SqliteMessageHistory(
+                Path(directory) / "wal.db",
+                wal=True,
+                batch_size=2,
+            )
+            with history:
+                history.append(envelope(1))
+                history.flush()
+                stats = history.writer_stats
+                self.assertIsNotNone(stats)
+                self.assertEqual(stats.submitted, 1)
+                self.assertEqual(stats.completed, 1)
+                self.assertGreaterEqual(stats.batches, 1)
+
     def test_nonfinite_mavlink_values_are_recorded_as_json_null(self):
         class NonFiniteMessage(RecordedMessage):
             def to_dict(self):
@@ -168,6 +184,25 @@ class MessageHistoryTests(unittest.TestCase):
                     self.assertEqual(history.query(), ())
                 with self.assertRaises(RuntimeError):
                     history.query()
+
+    def test_optional_memory_writer_serializes_off_the_caller_thread(self):
+        history = MessageHistory(background=True)
+        caller = threading.get_ident()
+        serializer_threads = []
+        original = history._encode
+
+        def record_thread(item):
+            serializer_threads.append(threading.get_ident())
+            return original(item)
+
+        history._encode = record_thread  # type: ignore[method-assign]
+        try:
+            history.append(envelope(1))
+            history.flush()
+            self.assertNotEqual(serializer_threads, [caller])
+            self.assertEqual(history.latest().sequence, 1)
+        finally:
+            history.close()
 
     def test_sqlite_reopen_and_unlimited_retention(self):
         with tempfile.TemporaryDirectory() as directory:

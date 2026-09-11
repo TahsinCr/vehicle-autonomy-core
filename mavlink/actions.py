@@ -30,13 +30,21 @@ class AsyncDelivery:
     Running callbacks are cancelled and awaited during shutdown.
     """
 
-    def __init__(self, capacity: int = 1024, action_capacity: int = 1024) -> None:
+    def __init__(
+        self,
+        capacity: int = 1024,
+        action_capacity: int = 1024,
+        concurrency: int = 1,
+    ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("Async delivery capacity must be a positive integer")
         self.capacity = capacity
         if isinstance(action_capacity, bool) or not isinstance(action_capacity, int) or action_capacity <= 0:
             raise ValueError("Action delivery capacity must be a positive integer")
         self.action_capacity = action_capacity
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency <= 0:
+            raise ValueError("Async delivery concurrency must be a positive integer")
+        self.concurrency = concurrency
         self.failure: Exception | None = None
         self.on_failure = None
         self._fault_pending = False
@@ -77,11 +85,13 @@ class AsyncDelivery:
         with self._lock:
             if self._loop is None:
                 return
+            if self.failure is not None:
+                return
             if action:
                 if len(self._actions) == self.action_capacity:
-                    if self.failure is None:
-                        self.failure = BufferError("MAVLink lifecycle delivery capacity exceeded")
-                        self._fault_pending = True
+                    self._fail_locked(
+                        BufferError("MAVLink lifecycle delivery capacity exceeded")
+                    )
                 else:
                     self._actions.append((callback, event))
             else:
@@ -96,14 +106,28 @@ class AsyncDelivery:
                 except RuntimeError:
                     self._queue.clear()
                     self._actions.clear()
-                    self.failure = RuntimeError("MAVLink delivery loop is closed")
+                    self._fail_locked(RuntimeError("MAVLink delivery loop is closed"))
                     self._scheduled = False
+
+    def _fail_locked(self, error: Exception) -> None:
+        if self.failure is None:
+            self.failure = error
+            self._fault_pending = True
+
+    def _fail(self, error: Exception) -> None:
+        with self._lock:
+            self._fail_locked(error)
+            ready = self._ready
+            if ready is not None and not self._scheduled:
+                self._scheduled = True
+                ready.set()
 
     async def _consume(self) -> None:
         while True:
             await self._ready.wait()
             with self._lock:
-                batch = (*self._actions, *self._queue)
+                actions = tuple(self._actions)
+                callbacks = tuple(self._queue)
                 fault = self.failure if self._fault_pending else None
                 self._fault_pending = False
                 self._actions.clear()
@@ -112,7 +136,7 @@ class AsyncDelivery:
                 self._ready.clear()
             if fault is not None and self.on_failure is not None:
                 await self.on_failure(fault)
-            for callback, event in batch:
+            for callback, event in actions:
                 if self._loop is None:
                     return
                 try:
@@ -121,7 +145,29 @@ class AsyncDelivery:
                     if self._loop is None:
                         raise
                 except Exception as exc:
-                    self.failure = exc
+                    self._fail(exc)
+                    break
+            if self.failure is not None:
+                continue
+            if self.concurrency == 1:
+                groups = tuple((item,) for item in callbacks)
+            else:
+                groups = tuple(
+                    callbacks[index:index + self.concurrency]
+                    for index in range(0, len(callbacks), self.concurrency)
+                )
+            for group in groups:
+                results = await asyncio.gather(
+                    *(callback(event) for callback, event in group),
+                    return_exceptions=True,
+                )
+                error = next(
+                    (result for result in results if isinstance(result, Exception)),
+                    None,
+                )
+                if error is not None:
+                    self._fail(error)
+                    break
             if self._loop is None:
                 return
 

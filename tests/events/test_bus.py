@@ -220,11 +220,28 @@ class EventBusTests(unittest.TestCase):
         subscriber.start()
         self.assertTrue(entered.wait(1.0))
         bus.publish(2)
-        with self.assertRaises(BufferError):
-            bus.publish(3)
+        healthy: list[int] = []
+        bus.subscribe(healthy.append)
+        result = bus.publish(3)
+        self.assertEqual(result.failed, 1)
+        self.assertIsInstance(result.errors[0], BufferError)
+        self.assertEqual(healthy, [3])
         release.set()
         subscriber.join(1.0)
         self.assertFalse(subscriber.is_alive())
+
+    def test_close_reports_a_stuck_periodic_schedule(self) -> None:
+        from src.core.events import EventShutdownTimeoutError
+
+        entered = threading.Event()
+        release = threading.Event()
+        bus = EventBus[int](shutdown_timeout=0.02)
+        bus.subscribe(lambda _event: (entered.set(), release.wait(1.0)))
+        bus.publish_every(1, 0.001)
+        self.assertTrue(entered.wait(1.0))
+        with self.assertRaises(EventShutdownTimeoutError):
+            bus.close()
+        release.set()
 
     def test_history_capacity_shorthand_and_bus_query_tools(self) -> None:
         bus = EventBus[int](history=2)
@@ -316,6 +333,26 @@ class EventBusTests(unittest.TestCase):
         finally:
             schedule.cancel()
             bus.close()
+
+    def test_close_waits_for_periodic_thread_exit(self) -> None:
+        bus = EventBus[int]()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def block(_value: int) -> None:
+            entered.set()
+            release.wait(1.0)
+
+        bus.subscribe(block)
+        bus.publish_every(1, 1.0)
+        self.assertTrue(entered.wait(1.0))
+        closed = threading.Event()
+        closer = threading.Thread(target=lambda: (bus.close(), closed.set()))
+        closer.start()
+        self.assertFalse(closed.wait(0.02))
+        release.set()
+        closer.join(1.0)
+        self.assertFalse(closer.is_alive())
 
     def test_wait_for_receives_matching_event_and_close_wakes_waiter(self) -> None:
         bus = EventBus[int]()
@@ -518,6 +555,33 @@ class AsyncEventBusTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(subscription, 1.0)
 
         self.assertEqual(received, [1, 2])
+
+    async def test_async_replay_overflow_isolated_from_healthy_subscribers(self) -> None:
+        bus = AsyncEventBus[int](history=1, replay_buffer_limit=1)
+        await bus.publish(1)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow(value: int) -> None:
+            if value == 1:
+                entered.set()
+                await release.wait()
+
+        replay = asyncio.create_task(bus.subscribe(slow, replay=1))
+        await entered.wait()
+        healthy: list[int] = []
+
+        async def receive(value: int) -> None:
+            healthy.append(value)
+
+        await bus.subscribe(receive)
+        await bus.publish(2)
+        result = await bus.publish(3)
+        self.assertEqual(result.failed, 1)
+        self.assertIsInstance(result.errors[0], BufferError)
+        self.assertEqual(healthy, [2, 3])
+        release.set()
+        await replay
 
     async def test_cancelled_replay_removes_unreachable_subscription(self) -> None:
         bus = AsyncEventBus[int](history=2, replay_buffer_limit=4)

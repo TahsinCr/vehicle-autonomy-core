@@ -67,6 +67,16 @@ class DependencyInjectionTests(unittest.TestCase):
         with self.assertRaises(DependencyNotFoundError):
             call()
 
+    def test_strict_injection_reports_unresolved_annotation(self) -> None:
+        container = DependencyContainer(auto_wire=False)
+
+        def call(service: "MisspelledService") -> object:
+            return service
+
+        decorated = container.inject(call, strict=True)
+        with self.assertRaisesRegex(DependencyNotFoundError, "MisspelledService"):
+            decorated()
+
     def test_provider_decorator_infers_return_token_and_warmup_priority(self) -> None:
         order: list[str] = []
         container = DependencyContainer()

@@ -315,7 +315,11 @@ class DependencyContainer:
                 f"{format_token(type(async_only))} async kapanıyor; "
                 "unregister_async kullan."
             )
-        dispose_many(self._detach_token_instances(token))
+        dispose_many(
+            self._detach_token_instances(token),
+            on_success=self._forget_disposed,
+            on_failure=self._tracker.release,
+        )
 
     async def unregister_async(self, token: Token) -> None:
         task = self._async_operations.get(token)
@@ -399,7 +403,11 @@ class DependencyContainer:
                 "shutdown_async kullan."
             )
         self._retire_all()
-        dispose_many(self._detach_shutdown_instances())
+        dispose_many(
+            self._detach_shutdown_instances(),
+            on_success=self._forget_disposed,
+            on_failure=self._tracker.release,
+        )
 
     async def shutdown_async(self) -> None:
         task = self._async_shutdown
@@ -427,7 +435,11 @@ class DependencyContainer:
             cancelled = True
             await self._retire_token_async(token)
         try:
-            await dispose_many_async(self._detach_token_instances(token))
+            await dispose_many_async(
+                self._detach_token_instances(token),
+                on_success=self._forget_disposed,
+                on_failure=self._tracker.release,
+            )
         except asyncio.CancelledError:
             cancelled = True
         if cancelled:
@@ -441,7 +453,11 @@ class DependencyContainer:
             cancelled = True
             await self._retire_all_async()
         try:
-            await dispose_many_async(self._detach_shutdown_instances())
+            await dispose_many_async(
+                self._detach_shutdown_instances(),
+                on_success=self._forget_disposed,
+                on_failure=self._tracker.release,
+            )
         except asyncio.CancelledError:
             cancelled = True
         if cancelled:
@@ -783,13 +799,16 @@ class DependencyContainer:
                 instance for instance in candidates if not self._is_referenced(instance)
             )
             ordered = self._tracker.ordered(unreferenced)
-            self._tracker.forget(ordered)
-            return ordered
+            return self._tracker.claim(ordered)
+
+    def _forget_disposed(self, instance: Any) -> None:
+        self._tracker.forget((instance,))
 
     def _shutdown_instances(self) -> tuple[Any, ...]:
         candidates = list(self._scope_cache.values())
         for provider in self._providers.values():
             candidates.extend(cached_instances(provider))
+        candidates.extend(self._tracker.resources())
         return self._tracker.ordered(candidates)
 
     def _detach_shutdown_instances(self) -> tuple[Any, ...]:
@@ -801,8 +820,7 @@ class DependencyContainer:
             provider.instance = MISSING
             provider.singleton = MISSING
         ordered = self._tracker.ordered(candidates)
-        self._tracker.forget(ordered)
-        return ordered
+        return self._tracker.claim(ordered)
 
 
 class BaseDependencyContainer:

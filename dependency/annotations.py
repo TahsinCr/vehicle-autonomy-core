@@ -102,7 +102,7 @@ def dependency_items(dependencies: Mapping[str, Token]) -> tuple[tuple[str, Toke
 
 
 def normalize_priority(priority: int) -> int:
-    if not isinstance(priority, int):
+    if isinstance(priority, bool) or not isinstance(priority, int):
         raise DependencyResolutionError("priority int olmalı.")
     return priority
 

@@ -44,7 +44,7 @@ from .models import (
 from .lifecycle import MissionLifecycle
 from .orchestration import MissionOrchestrator
 from .runtime import BoundMissionController, MissionRuntime
-from .scheduler import MissionScheduler
+from .scheduler import MissionScheduler, SchedulerWake
 
 
 MissionReference = Mission | int
@@ -113,7 +113,7 @@ class MissionEngine(Service):
         self._stopping = False
         self._closed = False
         self._scheduler_stop = threading.Event()
-        self._scheduler_wake = threading.Event()
+        self._scheduler_wake = SchedulerWake()
         self._scheduler_thread: threading.Thread | None = None
         self._condition = threading.Condition(threading.RLock())
 
@@ -158,7 +158,6 @@ class MissionEngine(Service):
                 return
             self._running = True
             self._scheduler_stop.clear()
-            self._scheduler_wake.clear()
             thread = threading.Thread(
                 target=self.scheduler._scheduler_loop,
                 name="MissionScheduler",

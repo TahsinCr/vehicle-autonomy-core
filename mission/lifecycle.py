@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any
 
 from .base import Mission
 from .enums import MissionEventType, MissionPhase, ensure_mission_transition
-from .errors import MissionConflictError, MissionTimeoutError, MissionTransitionError
+from .errors import (
+    MissionCleanupError,
+    MissionConflictError,
+    MissionTimeoutError,
+    MissionTransitionError,
+)
 from .models import MissionSnapshot, MissionTransition
 from .runtime import MissionRuntime
 
@@ -185,12 +190,19 @@ class MissionLifecycle:
                 return runtime.snapshot
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
-            if runtime.snapshot.phase is not MissionPhase.RUNNING:
+            if (
+                runtime.snapshot.phase is MissionPhase.STOPPING
+                and runtime.cleanup_error is not None
+            ):
+                retry_cleanup = True
+            elif runtime.snapshot.phase is not MissionPhase.RUNNING:
                 raise MissionTransitionError(
                     "Only a running mission can complete"
                 )
+            else:
+                retry_cleanup = False
             runtime.stop_event.set()
-            if runtime.snapshot.phase is MissionPhase.RUNNING:
+            if not retry_cleanup:
                 _, stopping_transition = self._transition_locked(
                     runtime,
                     MissionPhase.STOPPING,
@@ -200,11 +212,13 @@ class MissionLifecycle:
                 runtime.worker is threading.current_thread()
                 and stopping_transition is not None
             ):
-                raise _MissionExit(
+                exit_request = _MissionExit(
                     MissionPhase.SUCCEEDED,
                     result=result,
                     transition=stopping_transition,
                 )
+                runtime.pending_exit = exit_request
+                raise exit_request
         self._publish_transition(stopping_transition)
         return self._complete_stopping(runtime, result)
 
@@ -213,11 +227,8 @@ class MissionLifecycle:
         runtime: MissionRuntime,
         result: Mapping[str, Any] | None,
     ) -> MissionSnapshot:
-        try:
-            self._join_worker(runtime)
-            self._cleanup_runtime(runtime)
-        except Exception as exc:
-            return self.fail(runtime.mission.id, f"Mission cleanup failed: {exc}")
+        self._join_worker(runtime)
+        self._cleanup_or_raise(runtime)
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
@@ -256,21 +267,20 @@ class MissionLifecycle:
                     reason=failure_reason,
                 )
             if runtime.worker is threading.current_thread():
-                raise _MissionExit(
+                exit_request = _MissionExit(
                     MissionPhase.FAILED,
                     reason=failure_reason,
                     retryable=retryable,
                     transition=stopping_transition,
                 )
+                runtime.pending_exit = exit_request
+                raise exit_request
         self._publish_transition(stopping_transition)
         try:
             self._join_worker(runtime)
         except MissionTimeoutError:
             raise
-        try:
-            self._cleanup_runtime(runtime)
-        except Exception as exc:
-            failure_reason = f"{failure_reason}; cleanup failed: {exc}"
+        self._cleanup_or_raise(runtime)
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
@@ -289,10 +299,12 @@ class MissionLifecycle:
             should_retry = retry_available and queue_has_capacity
             retry_rejected = retry_available and not queue_has_capacity
             if should_retry:
+                retry_delay = runtime.mission.retry.delay
                 snapshot, queued_transition = self._queue_locked(
                     runtime,
                     "Mission queued for retry",
-                    next_retry_at=time.time() + runtime.mission.retry.delay,
+                    next_retry_at=time.time() + retry_delay,
+                    next_retry_monotonic=time.monotonic() + retry_delay,
                 )
             else:
                 queued_transition = None
@@ -353,6 +365,10 @@ class MissionLifecycle:
             raise ValueError("Mission checkpoint name cannot be empty")
         with self.engine._condition:
             runtime = self.engine._runtime_locked(self.engine._mission_id(mission))
+            if runtime.snapshot.phase.terminal:
+                raise MissionTransitionError(
+                    "Terminal mission checkpoint cannot change"
+                )
             checkpoints = dict(runtime.snapshot.checkpoints)
             checkpoints[name] = dict(values or {})
             runtime.snapshot = runtime.snapshot.evolve(checkpoints=checkpoints)
@@ -363,7 +379,7 @@ class MissionLifecycle:
             f"Mission checkpoint: {name}",
             mission_id=snapshot.mission_id,
             generation=snapshot.generation,
-            fields={"name": name, **dict(values or {})},
+            fields={**dict(values or {}), "name": name},
         )
         return snapshot
 
@@ -464,25 +480,39 @@ class MissionLifecycle:
                         elapsed = self._active_elapsed_locked(runtime)
                     runtime.mission.tick(elapsed)
         except _MissionExit as exit_request:
-            # The callback stack has now fully unwound. Clear the worker
-            # reference so the regular terminal path can dispose resources
-            # without attempting to join the current thread.
-            runtime.worker = None
-            self._publish_transition(exit_request.transition)
-            if exit_request.phase is MissionPhase.SUCCEEDED:
-                self._complete_stopping(runtime, exit_request.result)
-            elif exit_request.phase is MissionPhase.FAILED:
-                self.fail(
-                    mission_id,
-                    exit_request.reason,
-                    retryable=exit_request.retryable,
-                )
-            else:
-                self._cleanup_runtime(runtime)
-                self.engine.scheduler._after_terminal(mission_id, succeeded=False)
+            if runtime.pending_exit is None:
+                runtime.pending_exit = exit_request
         except Exception as exc:
             runtime.worker = None
-            self.fail(mission_id, str(exc), retryable=True)
+            try:
+                self.fail(mission_id, str(exc), retryable=True)
+            except MissionCleanupError:
+                pass
+        finally:
+            # A mission may accidentally catch BaseException and swallow the
+            # private unwind sentinel. Finalize the recorded request after all
+            # user callback frames have left regardless.
+            exit_request = runtime.pending_exit
+            if exit_request is not None:
+                runtime.worker = None
+                runtime.pending_exit = None
+                self._publish_transition(exit_request.transition)
+                try:
+                    if exit_request.phase is MissionPhase.SUCCEEDED:
+                        self._complete_stopping(runtime, exit_request.result)
+                    elif exit_request.phase is MissionPhase.FAILED:
+                        self.fail(
+                            mission_id,
+                            exit_request.reason,
+                            retryable=exit_request.retryable,
+                        )
+                    else:
+                        self._cleanup_or_raise(runtime)
+                        self.engine.scheduler._after_terminal(
+                            mission_id, succeeded=False
+                        )
+                except MissionCleanupError:
+                    pass
 
     def _finish_by_command(
         self,
@@ -523,10 +553,7 @@ class MissionLifecycle:
 
         if current not in {MissionPhase.REGISTERED, MissionPhase.QUEUED}:
             self._join_worker(runtime)
-            try:
-                self._cleanup_runtime(runtime)
-            except Exception as exc:
-                return self.fail(runtime.mission.id, str(exc))
+            self._cleanup_or_raise(runtime)
             with self.engine._condition:
                 if runtime.snapshot.phase is MissionPhase.STOPPING:
                     snapshot, transition = self._transition_locked(
@@ -561,6 +588,21 @@ class MissionLifecycle:
             with runtime.callback_lock:
                 runtime.mission.stop()
                 runtime.cleaned = True
+
+    def _cleanup_or_raise(self, runtime: MissionRuntime) -> None:
+        try:
+            self._cleanup_runtime(runtime)
+        except Exception as exc:
+            runtime.cleanup_error = exc
+            self.engine._emit(
+                MissionEventType.ERROR,
+                f"Mission cleanup failed: {exc}",
+                mission_id=runtime.mission.id,
+            )
+            raise MissionCleanupError(
+                f"Mission {runtime.mission.id} cleanup failed: {exc}"
+            ) from exc
+        runtime.cleanup_error = None
 
     def _transition_locked(
         self,
@@ -598,6 +640,7 @@ class MissionLifecycle:
             runtime.active_started_monotonic = None
             runtime.attempt_started_monotonic = time.monotonic()
             runtime.queued_monotonic = None
+            runtime.next_retry_monotonic = None
         if current is MissionPhase.RUNNING:
             runtime.active_started_monotonic = time.monotonic()
         elif previous is MissionPhase.RUNNING:
@@ -660,10 +703,12 @@ class MissionLifecycle:
         reason: str,
         *,
         next_retry_at: float | None = None,
+        next_retry_monotonic: float | None = None,
     ) -> tuple[MissionSnapshot, MissionTransition | None]:
         if runtime.snapshot.phase is MissionPhase.QUEUED:
             if next_retry_at is not None:
                 runtime.snapshot = runtime.snapshot.evolve(next_retry_at=next_retry_at)
+                runtime.next_retry_monotonic = next_retry_monotonic
             return runtime.snapshot, None
         queue_limit = self.engine._max_queued_missions
         if queue_limit is not None and len(self.engine._queued_ids) >= queue_limit:
@@ -675,6 +720,7 @@ class MissionLifecycle:
         )
         if next_retry_at is not None:
             runtime.snapshot = snapshot.evolve(next_retry_at=next_retry_at)
+            runtime.next_retry_monotonic = next_retry_monotonic
             snapshot = runtime.snapshot
         self.engine._scheduler_wake.set()
         return snapshot, transition

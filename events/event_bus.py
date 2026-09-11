@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
@@ -15,7 +16,7 @@ from ..compatibility import ExceptionGroup
 from .actions import EventBusActions, EventErrorContext, EventTimeoutContext
 from .base import BaseEventBus
 from .contracts import ErrorPolicy, EventBusStats, PublishResult
-from .errors import EventBusError, InvalidEventHandlerError
+from .errors import EventBusError, EventShutdownTimeoutError, InvalidEventHandlerError
 from .filtering import EventFilter, EventType, coerce_event_filter
 from .history import EventHistory
 from .subscription import Subscription
@@ -77,6 +78,7 @@ class EventBus(BaseEventBus[T]):
         executor: Executor | None = None,
         replay_buffer_limit: int = 1_000,
         max_schedules: int = 64,
+        shutdown_timeout: float = 5.0,
         actions: EventBusActions[T] | None = None,
         on_before: Callable[[T], None] | None = None,
         on_after: Callable[[T, PublishResult], None] | None = None,
@@ -92,6 +94,13 @@ class EventBus(BaseEventBus[T]):
             or max_schedules <= 0
         ):
             raise ValueError("Maximum periodic schedules must be a positive integer")
+        if (
+            isinstance(shutdown_timeout, bool)
+            or not isinstance(shutdown_timeout, (int, float))
+            or not math.isfinite(shutdown_timeout)
+            or shutdown_timeout <= 0
+        ):
+            raise ValueError("Shutdown timeout must be positive and finite")
         direct_actions = (on_before, on_after, on_error, on_timeout)
         if actions is not None and any(action is not None for action in direct_actions):
             raise ValueError("Use actions or direct on_* callbacks, not both")
@@ -115,12 +124,13 @@ class EventBus(BaseEventBus[T]):
         self._executor_context = threading.local()
         self._replay_buffer_limit = int(replay_buffer_limit)
         self._max_schedules = max_schedules
+        self._shutdown_timeout = float(shutdown_timeout)
         self._subscribers: dict[int, _Subscriber[T]] = {}
         self._next_id = 0
         self._closed = False
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
-        self._schedules: dict[int, Subscription] = {}
+        self._schedules: dict[int, tuple[Subscription, threading.Thread]] = {}
 
     @property
     def closed(self) -> bool:
@@ -263,7 +273,12 @@ class EventBus(BaseEventBus[T]):
                 errors.append(exc)
                 continue
             if matches:
-                if subscriber.buffer_if_replaying(event):
+                try:
+                    if subscriber.buffer_if_replaying(event):
+                        continue
+                except BufferError as exc:
+                    subscriber.subscription.cancel()
+                    errors.append(exc)
                     continue
                 matched.append(subscriber)
 
@@ -394,13 +409,14 @@ class EventBus(BaseEventBus[T]):
             schedule_id = self._next_id
             self._next_id += 1
 
+            thread: threading.Thread | None = None
+
             def cancel() -> None:
                 stopped.set()
                 with self._lock:
                     self._schedules.pop(schedule_id, None)
 
             subscription = Subscription(schedule_id, cancel)
-            self._schedules[schedule_id] = subscription
 
         def run() -> None:
             completed = 0
@@ -425,11 +441,14 @@ class EventBus(BaseEventBus[T]):
                 with self._lock:
                     self._schedules.pop(schedule_id, None)
 
-        threading.Thread(
+        thread = threading.Thread(
             target=run,
             name=f"EventBusPeriodic-{schedule_id}",
             daemon=True,
-        ).start()
+        )
+        with self._lock:
+            self._schedules[schedule_id] = (subscription, thread)
+            thread.start()
         return subscription
 
     def wait_for(
@@ -497,8 +516,19 @@ class EventBus(BaseEventBus[T]):
             self._condition.notify_all()
         for subscription in subscriptions:
             subscription._deactivate()
-        for schedule in schedules:
+        for schedule, _thread in schedules:
             schedule.cancel()
+        deadline = time.monotonic() + self._shutdown_timeout
+        pending: list[str] = []
+        for _schedule, thread in schedules:
+            if thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
+                if thread.is_alive():
+                    pending.append(thread.name)
+        if pending:
+            raise EventShutdownTimeoutError(
+                "Periodic event schedules did not stop in time: " + ", ".join(pending)
+            )
 
     def __len__(self) -> int:
         return self.subscriber_count

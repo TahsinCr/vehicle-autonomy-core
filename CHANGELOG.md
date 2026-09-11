@@ -2,7 +2,54 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v1.7] - 2026-09-11
+
+### Added
+
+- Added `MissionCleanupError` for incomplete mission resource cleanup.
+- Added optional background serialization for in-memory `MessageHistory` and
+  optional bounded callback concurrency for `AsyncMavlinkRuntime`.
+- Added an optional `max_keys` limit to the generic `MessageCache`.
+- Added bounded router state, disconnected vehicle-state retention and explicit
+  pruning controls for long-running, multi-vehicle runtimes.
+- Added lightweight cache/router/history writer statistics, optional SQLite WAL
+  mode and a configurable SQLite busy timeout.
+- Added a bounded synchronous event shutdown timeout with an explicit
+  `EventShutdownTimeoutError`.
+
+### Changed
+
+- Native MAVLink `condition=` filters are now limited to live subscriptions.
+  Historical `latest()`, `history()` and `wait_for()` calls require a Python
+  predicate instead of evaluating old messages against current source state.
+- Model serialization represents frozen sets as tuple/list values so nested
+  frozen models remain serializable and JSON conversion stays predictable.
+- Invalid boolean values are rejected consistently for integer MAVLink IDs,
+  endpoint fields, application channel settings and DI priorities.
+
+### Fixed
+
+- Keep missions in `STOPPING` with resource ownership intact when cleanup
+  fails. Cleanup can be retried, and a swallowed callback-exit sentinel can no
+  longer strand a mission before terminal finalization.
+- Detect cached dependency cycles across independent asyncio tasks, not only
+  execution threads. Failed and dynamically awaitable disposal stays tracked
+  until a later synchronous or asynchronous retry succeeds.
+- Claim dependency resources before disposal so concurrent unregister and
+  shutdown paths cannot close the same instance twice.
+- Route vehicle and component async transport calls through the runtime-owned
+  cancellation-safe I/O path instead of leaving executor work detached.
+- Give async MAVLink delivery one fatal-state transition that wakes registry
+  waiters, rejects later work and reports the original failure.
+- Isolate replay-buffer overflow to the affected sync or async event subscriber
+  and join synchronous periodic publisher threads during bus shutdown.
+- Reject checkpoint updates after mission termination and protect the reserved
+  checkpoint event name from user field replacement.
+- Schedule mission retries and scheduler wake notifications without wall-clock
+  jumps or lost wake-up windows.
+- Correlate peer liveness probes with the expected source system and component.
+- Avoid sorting every router `latest()` query and remove per-message route-map
+  merging from the dispatch hot path.
 
 ## [v1.6] - 2026-09-08
 

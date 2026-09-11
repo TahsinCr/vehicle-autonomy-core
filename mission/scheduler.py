@@ -30,6 +30,32 @@ if TYPE_CHECKING:
 MissionReference = Mission | int
 
 
+class SchedulerWake:
+    """Generation-based wake signal that cannot lose concurrent notifications."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        with self._condition:
+            return self._generation
+
+    def set(self) -> None:
+        with self._condition:
+            self._generation += 1
+            self._condition.notify_all()
+
+    def wait(self, generation: int, timeout: float) -> int:
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._generation != generation,
+                timeout,
+            )
+            return self._generation
+
+
 class MissionScheduler:
     """Schedule missions for one engine using queues and declared policies.
 
@@ -279,9 +305,12 @@ class MissionScheduler:
         return self.launch_many(*missions)
 
     def _scheduler_loop(self) -> None:
+        generation = self.engine._scheduler_wake.generation
         while not self.engine._scheduler_stop.is_set():
-            self.engine._scheduler_wake.wait(self.engine._scheduler_interval)
-            self.engine._scheduler_wake.clear()
+            generation = self.engine._scheduler_wake.wait(
+                generation,
+                self.engine._scheduler_interval,
+            )
             if self.engine._scheduler_stop.is_set():
                 break
             self._expire_timeouts()
@@ -328,8 +357,7 @@ class MissionScheduler:
         return elapsed >= timeout
 
     def _promote_queued(self) -> None:
-        now = time.time()
-        monotonic_now = time.monotonic()
+        now = time.monotonic()
         with self.engine._condition:
             queued = sorted(
                 (
@@ -363,7 +391,7 @@ class MissionScheduler:
                 if (
                     queue_timeout is not None
                     and queued_at is not None
-                    and monotonic_now - queued_at >= queue_timeout
+                    and now - queued_at >= queue_timeout
                 ):
                     snapshot, transition = self.engine.lifecycle._transition_locked(
                         runtime,
@@ -374,7 +402,10 @@ class MissionScheduler:
                 self.engine.lifecycle._publish_transition(transition)
                 self._after_terminal(mission_id, succeeded=False)
                 continue
-            if snapshot.next_retry_at is not None and now < snapshot.next_retry_at:
+            if (
+                runtime.next_retry_monotonic is not None
+                and now < runtime.next_retry_monotonic
+            ):
                 continue
             try:
                 self.launch(mission_id, reason="Queued mission released")

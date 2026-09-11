@@ -91,6 +91,16 @@ class _SlottedAutomaticModel(Model):
         self._private = "hidden"
 
 
+@dataclass(frozen=True)
+class _FrozenItem(Model):
+    value: int
+
+
+@dataclass
+class _FrozenCollectionModel(Model):
+    values: frozenset[_FrozenItem]
+
+
 class _Connection:
     def __init__(self) -> None:
         self.inbox: queue.Queue[_Message] = queue.Queue()
@@ -124,6 +134,15 @@ class CoreTests(unittest.TestCase):
         serialized = regular.to_dict()
         self.assertEqual(serialized, {"name": "automatic", "values": [1, 2]})
         self.assertEqual(_SlottedAutomaticModel().to_dict(), {"value": 42})
+
+    def test_model_serializes_frozen_model_sets_without_hash_errors(self) -> None:
+        serialized = _FrozenCollectionModel(
+            frozenset({_FrozenItem(1), _FrozenItem(2)})
+        ).to_dict()
+        self.assertEqual(
+            {item["value"] for item in serialized["values"]},
+            {1, 2},
+        )
         self.assertEqual(Point(1, 2, 3).to_dict(), {
             "latitude": 1,
             "longitude": 2,

@@ -18,9 +18,22 @@ from .router import MavlinkIngressFilter
 class AsyncMavlinkRuntime:
     """Own a receive thread and a bounded callback consumer on the caller's loop."""
 
-    def __init__(self, endpoint=None, *, delivery_capacity=1024, action_capacity=1024, **options):
-        self._delivery = AsyncDelivery(delivery_capacity, action_capacity)
+    def __init__(
+        self,
+        endpoint=None,
+        *,
+        delivery_capacity=1024,
+        action_capacity=1024,
+        callback_concurrency=1,
+        **options,
+    ):
+        self._delivery = AsyncDelivery(
+            delivery_capacity,
+            action_capacity,
+            callback_concurrency,
+        )
         self._runtime = MavlinkRuntime(endpoint, _delivery=self._delivery, **options)
+        self._runtime._registry.async_io = self._finish_io
         self._delivery.on_failure = self._report_delivery_failure
         self.vehicles = self._runtime.vehicles
         self._lifecycle_lock = asyncio.Lock()
@@ -62,6 +75,9 @@ class AsyncMavlinkRuntime:
     @property
     def dropped_callbacks(self):
         return self._delivery.dropped
+
+    def prune_vehicles(self, *, older_than=None):
+        return self._runtime.prune_vehicles(older_than=older_than)
 
     def on(self, name, callback=None, *, once=False, **options):
         return self._runtime.on(name, callback, once=once, **options)

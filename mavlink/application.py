@@ -41,6 +41,8 @@ class MavlinkApplicationProtocolError(ValueError):
 def _normalize_source_id(value: int | None, name: str) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} tamsayı olmalı")
     normalized = int(value)
     if not 0 <= normalized <= 255:
         raise ValueError(f"{name} 0..255 aralığında olmalı")
@@ -71,7 +73,7 @@ class MavlinkApplicationPacket:
             raise ValueError(
                 f"Uygulama paket tipi en fazla {_MAX_PACKET_TYPE_LENGTH} karakter olabilir"
             )
-        if not 0 < int(self.packet_id) <= 0xFFFFFFFF:
+        if isinstance(self.packet_id, bool) or not isinstance(self.packet_id, int) or not 0 < self.packet_id <= 0xFFFFFFFF:
             raise ValueError("Uygulama paket kimliği 1..2^32-1 aralığında olmalı")
         sent_at = float(self.sent_at)
         if not math.isfinite(sent_at) or sent_at <= 0:
@@ -392,10 +394,18 @@ class MavlinkApplicationChannel(Service):
             ("target_system", target_system, 255),
             ("target_component", target_component, 255),
         ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} tamsayı olmalı")
             if not 0 <= int(value) <= maximum:
                 raise ValueError(f"{name} 0..{maximum} aralığında olmalı")
-        if not 0 <= int(message_type) <= 65535:
+        if isinstance(message_type, bool) or not isinstance(message_type, int) or not 0 <= message_type <= 65535:
             raise ValueError("V2_EXTENSION message_type 0..65535 aralığında olmalı")
+        for name, value in (
+            ("local_system", local_system),
+            ("local_component", local_component),
+        ):
+            if value is not None:
+                _normalize_source_id(value, name)
         self._client = client
         self.network_id = int(network_id)
         self.message_type = int(message_type)

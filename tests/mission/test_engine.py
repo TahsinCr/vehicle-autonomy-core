@@ -7,6 +7,7 @@ import unittest
 from src.core.mission import (
     Mission,
     MissionChain,
+    MissionCleanupError,
     MissionConflictError,
     MissionConflictPolicy,
     MissionEngine,
@@ -555,6 +556,70 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         finally:
             stuck.release.set()
             engine.close()
+
+    def test_cleanup_failure_keeps_resource_owned_until_retry_succeeds(self) -> None:
+        class BrokenCleanupMission(BlockingMission):
+            resources = frozenset({"guidance"})
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_fails = True
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("guidance still running")
+                super().stop()
+
+        engine = MissionEngine(scheduler_interval=0.001)
+        mission = BrokenCleanupMission()
+        replacement = RejectingExclusiveMission()
+        replacement.resources = frozenset({"guidance"})
+        try:
+            engine.launch(mission)
+            self.assertTrue(mission.started.wait(1.0))
+            with self.assertRaises(MissionCleanupError):
+                engine.stop_mission(mission)
+            self.assertEqual(engine.snapshot(mission).phase, MissionPhase.STOPPING)
+            with self.assertRaises(MissionConflictError):
+                engine.launch(replacement)
+
+            mission.cleanup_fails = False
+            self.assertEqual(
+                engine.stop_mission(mission).phase,
+                MissionPhase.STOPPED,
+            )
+            self.assertEqual(engine.launch(replacement).phase, MissionPhase.STARTING)
+        finally:
+            mission.cleanup_fails = False
+            engine.close()
+
+    def test_swallowed_internal_exit_still_finalizes_mission(self) -> None:
+        class DefensiveMission(Mission):
+            def start(self) -> None:
+                try:
+                    self.complete({"done": True})
+                except BaseException:
+                    pass
+
+            def stop(self) -> None:
+                pass
+
+        mission = DefensiveMission()
+        self.engine.launch(mission)
+        snapshot = self.engine.wait(mission, timeout=1.0)
+        self.assertEqual(snapshot.phase, MissionPhase.SUCCEEDED)
+
+    def test_terminal_checkpoint_is_rejected_and_name_is_reserved(self) -> None:
+        mission = BlockingMission()
+        events = []
+        self.engine.events.subscribe(events.append)
+        self.engine.launch(mission)
+        self.assertTrue(mission.started.wait(1.0))
+        self.engine.checkpoint(mission, "real", {"name": "fake"})
+        self.assertEqual(events[-1].fields["name"], "real")
+        self.engine.stop_mission(mission)
+        with self.assertRaises(MissionTransitionError):
+            self.engine.checkpoint(mission, "late")
 
     def test_engine_stop_rejects_reentrant_launch(self) -> None:
         active = BlockingMission()

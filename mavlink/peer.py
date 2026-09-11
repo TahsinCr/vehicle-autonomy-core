@@ -55,6 +55,13 @@ class _PendingRequest:
     error: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingProbe:
+    started_monotonic: float
+    source_system: int
+    source_component: int
+
+
 class MavlinkApplicationPeer(Service):
     """Manage liveness and correlated messages over one application channel.
 
@@ -102,7 +109,7 @@ class MavlinkApplicationPeer(Service):
         self._stop_timeout = float(stop_timeout)
         self._state = MavlinkApplicationPeerState()
         self._pending: dict[int, _PendingRequest] = {}
-        self._probes: dict[int, float] = {}
+        self._probes: dict[int, _PendingProbe] = {}
         self._last_liveness_monotonic = 0.0
         self._subscriptions: list[Subscription] = []
         self._lock = threading.RLock()
@@ -343,13 +350,21 @@ class MavlinkApplicationPeer(Service):
         probe_payload.setdefault("role", self._role)
         probe_payload.setdefault("health", "ok")
         probe_id = self._reserve_packet_id()
+        target_system = self._resolve_target(self._target_system)
+        target_component = self._resolve_target(self._target_component)
         with self._lock:
-            self._probes[probe_id] = time.monotonic()
+            self._probes[probe_id] = _PendingProbe(
+                time.monotonic(),
+                target_system,
+                target_component,
+            )
         try:
             return self.send(
                 "system.ping",
                 probe_payload,
                 packet_id=probe_id,
+                target_system=target_system,
+                target_component=target_component,
             )
         except Exception:
             with self._lock:
@@ -367,13 +382,20 @@ class MavlinkApplicationPeer(Service):
             if liveness:
                 self._last_liveness_monotonic = now_monotonic
             round_trip_ms = self._state.round_trip_ms
-            probe_started = (
-                self._probes.pop(response_to, None)
+            probe = (
+                self._probes.get(response_to)
                 if packet.packet_type == "system.pong" and response_to is not None
                 else None
             )
-            if probe_started is not None:
-                round_trip_ms = max(0.0, (now_monotonic - probe_started) * 1000.0)
+            if probe is not None and (
+                packet.source_system == probe.source_system
+                and packet.source_component == probe.source_component
+            ):
+                self._probes.pop(response_to, None)
+                round_trip_ms = max(
+                    0.0,
+                    (now_monotonic - probe.started_monotonic) * 1000.0,
+                )
             pending = self._pending.get(response_to) if response_to is not None else None
             if (
                 pending is not None
@@ -499,9 +521,9 @@ class MavlinkApplicationPeer(Service):
         deadline = now - self._heartbeat_timeout
         with self._lock:
             self._probes = {
-                packet_id: started
-                for packet_id, started in self._probes.items()
-                if started >= deadline
+                packet_id: probe
+                for packet_id, probe in self._probes.items()
+                if probe.started_monotonic >= deadline
             }
 
     def _on_error(self, error: Exception) -> None:

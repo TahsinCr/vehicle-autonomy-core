@@ -285,7 +285,12 @@ class AsyncEventBus(BaseEventBus[T]):
                 errors.append(exc)
                 continue
             if matches:
-                if subscriber.buffer_if_replaying(event):
+                try:
+                    if subscriber.buffer_if_replaying(event):
+                        continue
+                except BufferError as exc:
+                    await subscriber.subscription.cancel()
+                    errors.append(exc)
                     continue
                 matched.append(subscriber)
 

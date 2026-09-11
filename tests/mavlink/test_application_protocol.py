@@ -48,7 +48,7 @@ class ApplicationPacketTests(unittest.TestCase):
             with self.subTest(sent_at=sent_at), self.assertRaises(ValueError):
                 MavlinkApplicationPacket("status", sent_at=sent_at)
 
-        for source in (-1, 256):
+        for source in (-1, 256, True):
             with self.subTest(source_system=source), self.assertRaises(ValueError):
                 MavlinkApplicationPacket("status", source_system=source)
             with self.subTest(source_component=source), self.assertRaises(ValueError):
@@ -56,6 +56,8 @@ class ApplicationPacketTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             MavlinkApplicationPacket("x" * 97)
+        with self.assertRaises(ValueError):
+            MavlinkApplicationPacket("status", packet_id=True)
         with self.assertRaises(ValueError):
             MavlinkApplicationPacket("status", payload={"value": math.nan})
         with self.assertRaises(ValueError):

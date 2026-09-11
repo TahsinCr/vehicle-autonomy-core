@@ -29,3 +29,7 @@ class MissionNotFoundError(MissionError, LookupError):
 
 class MissionTimeoutError(MissionError, TimeoutError):
     """Raised when mission-owned work does not stop in time."""
+
+
+class MissionCleanupError(MissionError):
+    """Raised when mission-owned resources could not be released safely."""

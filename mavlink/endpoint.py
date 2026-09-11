@@ -24,11 +24,11 @@ class MavlinkEndpoint:
             raise ValueError("MAVLink bağlantı adresi boş olamaz")
         if not normalized_dialect:
             raise ValueError("MAVLink dialect boş olamaz")
-        if self.baud <= 0:
+        if isinstance(self.baud, bool) or not isinstance(self.baud, int) or self.baud <= 0:
             raise ValueError("MAVLink baud değeri pozitif olmalı")
-        if not 0 <= self.source_system <= 255:
+        if isinstance(self.source_system, bool) or not isinstance(self.source_system, int) or not 0 <= self.source_system <= 255:
             raise ValueError("source_system 0..255 aralığında olmalı")
-        if not 0 <= self.source_component <= 255:
+        if isinstance(self.source_component, bool) or not isinstance(self.source_component, int) or not 0 <= self.source_component <= 255:
             raise ValueError("source_component 0..255 aralığında olmalı")
         heartbeat_timeout = float(self.heartbeat_timeout)
         if not math.isfinite(heartbeat_timeout) or heartbeat_timeout <= 0:
@@ -82,6 +82,8 @@ class MavlinkEndpoint:
     @staticmethod
     def _network_uri(scheme: str, host: str, port: int) -> str:
         normalized_host = host.strip()
+        if isinstance(port, bool):
+            raise ValueError("MAVLink port tamsayı olmalı")
         normalized_port = int(port)
         if not normalized_host:
             raise ValueError("MAVLink host boş olamaz")

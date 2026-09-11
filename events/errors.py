@@ -15,3 +15,7 @@ class InvalidEventHandlerError(EventBusError, TypeError):
 
 class CallbackTimeoutError(EventBusError, TimeoutError):
     """Raised when a callback exceeds its configured execution budget."""
+
+
+class EventShutdownTimeoutError(EventBusError, TimeoutError):
+    """Raised when a synchronous schedule cannot stop within its budget."""

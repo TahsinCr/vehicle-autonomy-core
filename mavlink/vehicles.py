@@ -294,7 +294,9 @@ class MavlinkVehicle(_MavlinkNode):
 
 class _AsyncMavlinkNode(_MavlinkNode):
     async def send(self, message):
-        return await asyncio.to_thread(_MavlinkNode.send, self, message)
+        return await self._registry.run_io(
+            lambda: _MavlinkNode.send(self, message)
+        )
 
     async def wait_for(self, message_type: str, *, timeout: float | None = None):
         self._registry.delivery.raise_if_failed()
@@ -325,19 +327,26 @@ class _AsyncMavlinkNode(_MavlinkNode):
                 self._registry.message_waiters.pop(future, None)
 
     async def send_named(self, message_name, **parameters):
-        return await asyncio.to_thread(_MavlinkNode.send_named, self,
-                                       message_name, **parameters)
+        return await self._registry.run_io(
+            lambda: _MavlinkNode.send_named(self, message_name, **parameters)
+        )
 
     async def request_message_rate(self, message_id, frequency_hz):
-        return await asyncio.to_thread(_MavlinkNode.request_message_rate,
-                                       self, message_id, frequency_hz)
+        return await self._registry.run_io(
+            lambda: _MavlinkNode.request_message_rate(
+                self, message_id, frequency_hz
+            )
+        )
 
     async def notify(self, packet_type, payload=None):
-        return await asyncio.to_thread(_MavlinkNode.notify, self, packet_type, payload)
+        return await self._registry.run_io(
+            lambda: _MavlinkNode.notify(self, packet_type, payload)
+        )
 
     async def request(self, packet_type, payload=None, **options):
-        return await asyncio.to_thread(_MavlinkNode.request, self,
-                                       packet_type, payload, **options)
+        return await self._registry.run_io(
+            lambda: _MavlinkNode.request(self, packet_type, payload, **options)
+        )
 
 
 class AsyncMavlinkComponent(_AsyncMavlinkNode):
@@ -355,15 +364,23 @@ class VehicleRegistry:
     """Source-indexed routing; a single monitor serves every discovered endpoint."""
 
     def __init__(self, runtime, *, delivery=None, heartbeat_timeout=5.0,
-                 history_capacity=128):
+                 history_capacity=128, state_retention: float | None = None):
         if not math.isfinite(heartbeat_timeout) or heartbeat_timeout <= 0:
             raise ValueError("Heartbeat timeout must be positive and finite")
         if isinstance(history_capacity, bool) or not isinstance(history_capacity, int) or history_capacity <= 0:
             raise ValueError("History capacity must be a positive integer")
+        if state_retention is not None and (
+            isinstance(state_retention, bool)
+            or not isinstance(state_retention, (int, float))
+            or not math.isfinite(state_retention)
+            or state_retention < 0
+        ):
+            raise ValueError("State retention must be finite, non-negative, or None")
         self.runtime = runtime
         self.delivery = delivery
         self.timeout = heartbeat_timeout
         self.history_capacity = history_capacity
+        self.state_retention = None if state_retention is None else float(state_retention)
         self.condition = threading.Condition(threading.RLock())
         self.collection_type = AsyncMavlinkCollection if delivery else MavlinkCollection
         self.vehicle_type = AsyncMavlinkVehicle if delivery else MavlinkVehicle
@@ -372,9 +389,18 @@ class VehicleRegistry:
         self.running = False
         self.waiters = {}
         self.message_waiters = {}
+        self.async_io = None
         self._stop = threading.Event()
         self._monitor = None
         self._subscription = None
+
+    async def run_io(self, operation):
+        """Run scoped blocking I/O under the async runtime's ownership."""
+
+        runner = self.async_io
+        if runner is None:
+            return await asyncio.to_thread(operation)
+        return await runner(operation)
 
     def start(self):
         with self.condition:
@@ -498,6 +524,47 @@ class VehicleRegistry:
                 self._select_autopilot_locked(vehicle)
         for scope, vehicle, component in actions:
             scope._emit("action:disconnected", MavlinkAction(scope, vehicle, component))
+        if self.state_retention is not None:
+            self.prune(now=now)
+
+    def prune(self, *, now=None, older_than: float | None = None) -> int:
+        """Remove disconnected state and return the number of removed endpoints."""
+
+        now = time.monotonic() if now is None else now
+        retention = self.state_retention if older_than is None else older_than
+        if retention is None:
+            return 0
+        if (
+            isinstance(retention, bool)
+            or not isinstance(retention, (int, float))
+            or not math.isfinite(retention)
+            or retention < 0
+        ):
+            raise ValueError("older_than must be finite and non-negative")
+        removed = 0
+        with self.condition:
+            component_targets = tuple(
+                (vehicle._components, component.component_id)
+                for vehicle in self.vehicles._items.values()
+                for component in vehicle._components._items.values()
+                if not component._connected
+                and component._last_seen is not None
+                and now - component._last_seen >= retention
+            )
+        for collection, component_id in component_targets:
+            removed += int(self.remove(collection, component_id))
+        with self.condition:
+            vehicle_targets = tuple(
+                vehicle.system_id
+                for vehicle in self.vehicles._items.values()
+                if not vehicle._connected
+                and not vehicle._components._items
+                and vehicle._last_seen is not None
+                and now - vehicle._last_seen >= retention
+            )
+        for system_id in vehicle_targets:
+            removed += int(self.remove(self.vehicles, system_id))
+        return removed
 
     def _monitor_loop(self):
         while not self._stop.wait(min(self.timeout / 2, 1.0)):

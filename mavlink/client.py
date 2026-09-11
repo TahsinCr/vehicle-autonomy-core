@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from ..abstracts import Service
@@ -20,7 +20,10 @@ class MavlinkClient(Service):
         *,
         connection: MavlinkConnection | None = None,
         router: MavlinkMessageRouter | None = None,
+        router_options: Mapping[str, Any] | None = None,
     ) -> None:
+        if router is not None and router_options:
+            raise ValueError("router_options cannot be used with a custom router")
         if connection is None and router is not None:
             connection = router.connection
         if connection is None:
@@ -30,7 +33,10 @@ class MavlinkClient(Service):
         if router is not None and router.connection is not connection:
             raise ValueError("MavlinkClient router farklı bir connection kullanıyor")
         self.connection = connection
-        self.router = router or MavlinkMessageRouter(connection)
+        self.router = router or MavlinkMessageRouter(
+            connection,
+            **dict(router_options or {}),
+        )
 
     @property
     def endpoint(self) -> MavlinkEndpoint:

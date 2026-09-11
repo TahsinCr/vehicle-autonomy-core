@@ -53,6 +53,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         endpoint: MavlinkEndpoint | None = None,
         *,
         client: MavlinkClient | None = None,
+        router_options: Mapping[str, Any] | None = None,
         application_role: str | None = None,
         channel: MavlinkApplicationChannel | None = None,
         peer: MavlinkApplicationPeer | None = None,
@@ -63,6 +64,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         peer_options: Mapping[str, Any] | None = None,
         heartbeat_timeout: float = 5.0,
         vehicle_history: int = 128,
+        vehicle_state_retention: float | None = None,
         _delivery=None,
         callback_capacity: int = 1024,
         callback_action_capacity: int = 1024,
@@ -71,7 +73,12 @@ class MavlinkRuntime(MavlinkActions, Service):
         self._worker = CallbackWorker(callback_capacity, callback_action_capacity) if _delivery is None else None
         if client is not None and endpoint is not None and client.endpoint != endpoint:
             raise ValueError("MAVLink runtime endpoint and client endpoint do not match")
-        self.client = client or MavlinkClient(endpoint or MavlinkEndpoint())
+        if client is not None and router_options:
+            raise ValueError("router_options cannot be used with a custom client")
+        self.client = client or MavlinkClient(
+            endpoint or MavlinkEndpoint(),
+            router_options=router_options,
+        )
         self.connection = self.client.connection
         self.router = self.client.router
 
@@ -123,6 +130,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         self._registry = VehicleRegistry(
             self, delivery=_delivery, heartbeat_timeout=heartbeat_timeout,
             history_capacity=vehicle_history,
+            state_retention=vehicle_state_retention,
         )
         self.vehicles = self._registry.vehicles
         self._application_handlers = ApplicationHandlers(self)
@@ -155,6 +163,11 @@ class MavlinkRuntime(MavlinkActions, Service):
     @property
     def dropped_callbacks(self) -> int:
         return self._worker.dropped if self._worker is not None else self._delivery.dropped
+
+    def prune_vehicles(self, *, older_than: float | None = None) -> int:
+        """Remove disconnected vehicle/component state eligible for retention cleanup."""
+
+        return self._registry.prune(older_than=older_than)
 
     def add_history(self, history: MessageHistory) -> Subscription:
         """Record future envelopes until cancelled; storage remains caller-owned."""

@@ -8,7 +8,8 @@
 if __package__ == "mavlink":
     __all__: list[str] = []
 else:
-    from .cache import MessageCache
+    from .cache import MessageCache, MessageCacheStats
+    from .recording import HistoryWriterStats
     from .history import MessageHistory, MessageRecord, SqliteMessageHistory
     from .channel import MavlinkAsyncChannel
     from .application import (
@@ -107,6 +108,8 @@ else:
         "MavlinkRuntimeError",
         "MavlinkRuntimeState",
         "MessageCache",
+        "MessageCacheStats",
+        "HistoryWriterStats",
         "MessageHistory",
         "MessageRecord",
         "SqliteMessageHistory",

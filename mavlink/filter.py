@@ -67,6 +67,8 @@ def normalize_message_ids(value: MessageIdInput | None) -> frozenset[int] | None
     if value is None:
         return None
     values = (value,) if isinstance(value, int) else tuple(value)
+    if any(isinstance(item, bool) for item in values):
+        raise ValueError("MAVLink mesaj kimliği boolean olamaz")
     normalized = frozenset(int(item) for item in values)
     if not normalized:
         raise ValueError("En az bir MAVLink mesaj kimliği gerekli")

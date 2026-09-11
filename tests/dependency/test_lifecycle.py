@@ -57,6 +57,31 @@ class _AsyncResource:
 
 
 class DependencyLifecycleTests(unittest.TestCase):
+    def test_concurrent_shutdown_disposes_a_resource_once(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Resource:
+            calls = 0
+
+            def close(self) -> None:
+                self.calls += 1
+                entered.set()
+                release.wait(1.0)
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance("resource", resource)
+        first = threading.Thread(target=container.shutdown)
+        second = threading.Thread(target=container.shutdown)
+        first.start()
+        self.assertTrue(entered.wait(1.0))
+        second.start()
+        second.join(1.0)
+        release.set()
+        first.join(1.0)
+        self.assertEqual(resource.calls, 1)
+
     def setUp(self) -> None:
         self.default = DependencyContainer()
         set_default_container(self.default)
@@ -187,8 +212,23 @@ class DependencyLifecycleTests(unittest.TestCase):
 
         self.assertEqual(closed, ["third", "second", "first"])
         self.assertEqual(len(raised.exception.exceptions), 2)
+        first.fail = False
+        second.fail = False
         container.shutdown()
-        self.assertEqual([first.close_count, second.close_count, third.close_count], [1, 1, 1])
+        self.assertEqual([first.close_count, second.close_count, third.close_count], [2, 2, 1])
+
+    def test_failed_unregister_disposal_remains_owned_for_retry(self) -> None:
+        resource = _SyncResource("retry", [], fail=True)
+        container = DependencyContainer()
+        container.instance("resource", resource)
+
+        with self.assertRaisesRegex(RuntimeError, "cannot close retry"):
+            container.unregister("resource")
+        self.assertFalse(container.has("resource"))
+
+        resource.fail = False
+        container.shutdown()
+        self.assertEqual(resource.close_count, 2)
 
     def test_scoped_resolution_is_singleton_per_scope_across_threads(self) -> None:
         created = 0
@@ -303,8 +343,10 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(closed, ["third", "second", "first"])
         self.assertEqual(len(raised.exception.exceptions), 2)
+        first.fail = False
+        second.fail = False
         await container.shutdown_async()
-        self.assertEqual([first.close_count, second.close_count, third.close_count], [1, 1, 1])
+        self.assertEqual([first.close_count, second.close_count, third.close_count], [2, 2, 1])
 
     async def test_async_provider_and_scoped_cleanup(self) -> None:
         closed: list[str] = []
@@ -347,6 +389,76 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(created, 1)
         self.assertTrue(all(item is instances[0] for item in instances))
+
+    async def test_cross_task_cached_provider_cycle_is_detected(self) -> None:
+        container = DependencyContainer()
+        a_started = asyncio.Event()
+        b_started = asyncio.Event()
+
+        async def build_a() -> object:
+            a_started.set()
+            await b_started.wait()
+            return await container.resolve_async("b")
+
+        async def build_b() -> object:
+            b_started.set()
+            await a_started.wait()
+            return await container.resolve_async("a")
+
+        container.singleton("a", factory=build_a)
+        container.singleton("b", factory=build_b)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                container.resolve_async("a"),
+                container.resolve_async("b"),
+                return_exceptions=True,
+            ),
+            1.0,
+        )
+        self.assertTrue(all(isinstance(result, Exception) for result in results))
+        self.assertTrue(any("cycle" in str(result).lower() for result in results))
+
+    async def test_child_tasks_share_one_cached_dependency_without_false_cycle(self) -> None:
+        container = DependencyContainer()
+
+        async def build_shared() -> object:
+            await asyncio.sleep(0)
+            return object()
+
+        async def build_parent() -> tuple[object, object]:
+            first, second = await asyncio.gather(
+                container.resolve_async("shared"),
+                container.resolve_async("shared"),
+            )
+            return first, second
+
+        container.singleton("shared", factory=build_shared)
+        container.singleton("parent", factory=build_parent)
+        first, second = await container.resolve_async("parent")
+        self.assertIs(first, second)
+
+    async def test_dynamic_awaitable_close_can_be_retried_asynchronously(self) -> None:
+        class DynamicResource:
+            def __init__(self) -> None:
+                self.close_calls = 0
+                self.cleaned = 0
+
+            def close(self):
+                self.close_calls += 1
+
+                async def cleanup() -> None:
+                    self.cleaned += 1
+
+                return cleanup()
+
+        resource = DynamicResource()
+        container = DependencyContainer()
+        container.instance("resource", resource)
+
+        with self.assertRaises(AsyncDependencyError):
+            container.unregister("resource")
+        await container.shutdown_async()
+        self.assertEqual((resource.close_calls, resource.cleaned), (2, 1))
 
     async def test_sync_and_async_resolution_share_one_cached_initialization(self) -> None:
         for lifetime in ("singleton", "scoped"):

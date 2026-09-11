@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.core.mavlink.connection import MavlinkConnection
+from src.core.mavlink.cache import MessageCache
 from src.core.mavlink.endpoint import MavlinkEndpoint
 from src.core.mavlink.filter import MavlinkMessageFilter
 from src.core.mavlink.message import MavlinkMessageEnvelope
@@ -33,6 +34,15 @@ class EndpointTests(unittest.TestCase):
         for uri in ("udp:127.0.0.1:0", "tcp:localhost:65536", "udp:host:not-a-port"):
             with self.subTest(uri=uri), self.assertRaises(ValueError):
                 MavlinkEndpoint(uri)
+        for options in (
+            {"baud": True},
+            {"source_system": True},
+            {"source_component": False},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                MavlinkEndpoint(**options)
+        with self.assertRaises(ValueError):
+            MavlinkEndpoint.tcp("localhost", True)
         with self.assertRaises(ValueError):
             MavlinkEndpoint(source_system=256)
         with self.assertRaises(ValueError):
@@ -79,6 +89,17 @@ class _RichMessage:
 
     def get_seq(self) -> int:
         return self._header.seq
+
+
+class MessageCacheTests(unittest.TestCase):
+    def test_optional_key_limit_evicts_the_least_recent_key(self) -> None:
+        cache = MessageCache(lambda item: item[0], max_keys=2)
+        cache.add(("a", 1))
+        cache.add(("b", 2))
+        cache.add(("a", 3))
+        cache.add(("c", 4))
+        self.assertEqual(cache.keys, ("a", "c"))
+        self.assertIsNone(cache.latest("b"))
 
 
 class MessageFilterTests(unittest.TestCase):
@@ -350,6 +371,16 @@ class RouterContractTests(unittest.TestCase):
         finally:
             router.stop()
 
+    def test_native_conditions_are_rejected_for_historical_queries(self) -> None:
+        router = MavlinkMessageRouter(_RouterConnection())  # type: ignore[arg-type]
+        condition = MavlinkMessageFilter("HEARTBEAT", condition="ready")
+        with self.assertRaisesRegex(ValueError, "live subscriptions"):
+            router.latest(condition)
+        with self.assertRaisesRegex(ValueError, "live subscriptions"):
+            router.history(condition)
+        with self.assertRaisesRegex(ValueError, "live subscriptions"):
+            router.wait_for(condition)
+
     def test_router_filters_history_latest_and_wait_timeout(self) -> None:
         connection = _RouterConnection()
         router = MavlinkMessageRouter(
@@ -385,6 +416,30 @@ class RouterContractTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             router.wait_for("ATTITUDE", timeout=0.02)
         router.stop()
+
+    def test_router_state_limits_and_stats_are_explicit(self) -> None:
+        connection = _RouterConnection()
+        router = MavlinkMessageRouter(
+            connection,  # type: ignore[arg-type]
+            poll_timeout=0.01,
+            state_capacity=2,
+            source_capacity=2,
+        )
+        router.add_filter(lambda envelope: envelope.source_system != 9)
+        router.start()
+        for system, kind in ((1, "A"), (2, "B"), (3, "C"), (9, "D")):
+            connection.inbox.put(
+                _RichMessage(kind, message_id=1, system=system, component=1)
+            )
+        deadline = time.monotonic() + 1.0
+        while router.sequence < 4 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stats = router.stats
+        router.stop()
+
+        self.assertLessEqual(stats.cached_state_keys, 2)
+        self.assertGreaterEqual(stats.state_evictions, 1)
+        self.assertEqual(stats.filtered_messages, 1)
 
     def test_router_wait_scans_each_observed_message_once(self) -> None:
         connection = _RouterConnection()

@@ -105,7 +105,8 @@ def _copy_model_value(value: Any, *, lists: bool = False) -> Any:
     if isinstance(value, list):
         return [_copy_model_value(item, lists=lists) for item in value]
     if isinstance(value, frozenset):
-        return {_copy_model_value(item, lists=lists) for item in value}
+        copied = tuple(_copy_model_value(item, lists=lists) for item in value)
+        return list(copied) if lists else copied
     return deepcopy(value)
 
 
