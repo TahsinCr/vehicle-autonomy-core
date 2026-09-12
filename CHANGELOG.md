@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.7.3] - 2026-09-12
+
+### Changed
+
+- `can_resolve()` now reflects container lifecycle and token cleanup state;
+  `has()` continues to report registrations visible through the parent chain.
+- Self-issued mission stop and cancel commands now unwind `start()`/`tick()`
+  before cleanup, matching callback-driven complete and fail semantics.
+
+### Fixed
+
+- Serialize terminal-intent finalization so an external lifecycle caller and
+  the mission worker cannot race to commit the same retry or terminal result.
+- Route stopped and cancelled missions through the durable terminal-intent
+  pipeline, preserving the first command across cleanup failure and retries.
+- Prevent auto-wiring from recreating a class token while its previous resource
+  is disposing, including resolution through child scopes.
+- Make unregister admission atomic with shutdown and reject synchronous waits
+  that would deadlock an async cleanup on the same event-loop thread.
+- Clear the mission-engine stopping latch after successful recovery, retain
+  retryable event-channel close ownership and deeply detach pending results.
+
+### Tests
+
+- Added deterministic regression coverage for mixed sync/async dependency
+  disposal, shutdown-time instance registration, tick failure cleanup, atomic
+  mission terminalization and terminal-intent isolation across retry generations.
+- Added self-stop/self-cancel, auto-wire tombstone, late unregister admission,
+  engine shutdown recovery and composite-close retry coverage to the stress set.
+
 ## [v1.7.2] - 2026-09-12
 
 ### Added
@@ -651,7 +681,8 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.2...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.3...HEAD
+[v1.7.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.2...v1.7.3
 [v1.7.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.1...v1.7.2
 [v1.7.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7...v1.7.1
 [v1.7]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.6...v1.7

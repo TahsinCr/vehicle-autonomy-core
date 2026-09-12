@@ -104,8 +104,10 @@ akışı hatalarını denetler; bu kademeli başlangıç dinamik provider/callba
 yapılarını geniş cast'lerle gizlemez. Stress runner seçilen concurrency
 regresyonlarını her turda yeni suite ile tekrarlar.
 
-CI matrisi desteklenen Python sürümlerini çalıştırır ve wheel üretir. Testler
-hem bağımsız checkout'u hem amaçlanan `src/core` submodule yerleşimini kapsar.
+CI matrisi desteklenen Python sürümlerini çalıştırır ve wheel üretir. Native
+ARM64 işi de opsiyonel `pymavlink` paketini kurduğu için gerçek UDP loopback
+kontratı iki mimaride çalışır. Testler hem bağımsız checkout'u hem amaçlanan
+`src/core` submodule yerleşimini kapsar.
 
 ## Benchmark
 

@@ -325,6 +325,51 @@ class DependencyLifecycleTests(unittest.TestCase):
         self.assertTrue(second_done.is_set())
         self.assertEqual(resource.calls, 1)
 
+    def test_autowire_cannot_bypass_class_token_disposal(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Resource:
+            def close(self) -> None:
+                entered.set()
+                release.wait(1.0)
+
+        container = DependencyContainer()
+        child = container.create_scope()
+        container.instance(Resource, Resource())
+        unregister = threading.Thread(target=lambda: container.unregister(Resource))
+        unregister.start()
+        self.assertTrue(entered.wait(1.0))
+
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.resolve(Resource)
+        with self.assertRaises(DependencyCleanupPendingError):
+            child.resolve(Resource)
+
+        release.set()
+        unregister.join(1.0)
+        self.assertFalse(unregister.is_alive())
+        child.shutdown()
+
+    def test_autowire_cannot_bypass_failed_class_token_cleanup(self) -> None:
+        class Resource:
+            fail = True
+
+            def close(self) -> None:
+                if self.fail:
+                    raise RuntimeError("cleanup blocked")
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance(Resource, resource)
+        with self.assertRaisesRegex(RuntimeError, "cleanup blocked"):
+            container.unregister(Resource)
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.resolve(Resource)
+
+        resource.fail = False
+        container.unregister(Resource)
+
     def test_registration_cannot_commit_after_shutdown_claim(self) -> None:
         entered = threading.Event()
         release = threading.Event()
@@ -362,6 +407,93 @@ class DependencyLifecycleTests(unittest.TestCase):
         self.assertTrue(container.closed)
         self.assertEqual(len(registration_errors), 1)
         self.assertIsInstance(registration_errors[0], DependencyContainerClosedError)
+
+    def test_new_instance_cannot_commit_after_shutdown_claim(self) -> None:
+        normalizing = threading.Event()
+        continue_registration = threading.Event()
+
+        class PausedRegistrationContainer(DependencyContainer):
+            def _normalize_registration(self, **options: object):  # type: ignore[no-untyped-def]
+                registration = super()._normalize_registration(**options)
+                normalizing.set()
+                continue_registration.wait(1.0)
+                return registration
+
+        container = PausedRegistrationContainer()
+        candidate = _SyncResource("candidate", [])
+        errors: list[BaseException] = []
+
+        def register_candidate() -> None:
+            try:
+                container.instance("candidate", candidate)
+            except BaseException as error:
+                errors.append(error)
+
+        registration = threading.Thread(target=register_candidate)
+        registration.start()
+        self.assertTrue(normalizing.wait(1.0))
+        container.shutdown()
+        continue_registration.set()
+        registration.join(1.0)
+
+        self.assertFalse(registration.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], DependencyContainerClosedError)
+        self.assertNotIn("candidate", container.registered_tokens())
+        self.assertEqual(candidate.close_count, 0)
+
+    def test_late_unregister_cannot_escape_shutdown_admission(self) -> None:
+        before_claim = threading.Event()
+        continue_claim = threading.Event()
+
+        class PausedUnregisterContainer(DependencyContainer):
+            def _claim_token_disposal(self, token, **options):  # type: ignore[no-untyped-def]
+                before_claim.set()
+                continue_claim.wait(1.0)
+                return super()._claim_token_disposal(token, **options)
+
+        resource = _SyncResource("resource", [])
+        container = PausedUnregisterContainer()
+        container.instance("resource", resource)
+        errors: list[BaseException] = []
+
+        def unregister() -> None:
+            try:
+                container.unregister("resource")
+            except BaseException as error:
+                errors.append(error)
+
+        caller = threading.Thread(target=unregister)
+        caller.start()
+        self.assertTrue(before_claim.wait(1.0))
+        container.shutdown()
+        continue_claim.set()
+        caller.join(1.0)
+
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], DependencyContainerClosedError)
+        self.assertEqual(resource.close_count, 1)
+
+    def test_can_resolve_reflects_container_lifecycle(self) -> None:
+        class Resource:
+            def close(self) -> None:
+                raise RuntimeError("cleanup blocked")
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance(Resource, resource)
+        self.assertTrue(container.can_resolve(Resource))
+        with self.assertRaisesRegex(RuntimeError, "cleanup blocked"):
+            container.unregister(Resource)
+        self.assertFalse(container.can_resolve(Resource))
+        resource.close = lambda: None  # type: ignore[method-assign]
+        container.unregister(Resource)
+
+        closed = DependencyContainer()
+        closed.transient(Resource)
+        closed.shutdown()
+        self.assertFalse(closed.can_resolve(Resource))
 
     def test_partial_shutdown_failure_blocks_normal_use_until_retry(self) -> None:
         resource = _SyncResource("resource", [], fail=True)
@@ -490,6 +622,67 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(closed, ["resource"])
         self.assertEqual(resource.close_count, 1)
+
+    async def test_sync_and_async_unregister_share_one_disposal_attempt(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Resource:
+            def __init__(self) -> None:
+                self.close_count = 0
+
+            def close(self) -> None:
+                self.close_count += 1
+                entered.set()
+                release.wait(1.0)
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance("resource", resource)
+        sync_errors: list[BaseException] = []
+
+        def unregister_sync() -> None:
+            try:
+                container.unregister("resource")
+            except BaseException as error:
+                sync_errors.append(error)
+
+        sync_caller = threading.Thread(target=unregister_sync)
+        sync_caller.start()
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1.0))
+        async_caller = asyncio.create_task(container.unregister_async("resource"))
+        await asyncio.sleep(0.02)
+        self.assertFalse(async_caller.done())
+
+        release.set()
+        await asyncio.wait_for(async_caller, 1.0)
+        sync_caller.join(1.0)
+        self.assertFalse(sync_caller.is_alive())
+        self.assertEqual(sync_errors, [])
+        self.assertEqual(resource.close_count, 1)
+
+    async def test_sync_wait_on_same_loop_async_disposal_is_rejected(self) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class Resource:
+            async def aclose(self) -> None:
+                entered.set()
+                await release.wait()
+
+        container = DependencyContainer()
+        container.instance("resource", Resource())
+        cleanup = asyncio.create_task(container.unregister_async("resource"))
+        await asyncio.wait_for(entered.wait(), 1.0)
+
+        with self.assertRaises(AsyncDependencyError):
+            container.unregister("resource")
+        with self.assertRaises(AsyncDependencyError):
+            container.shutdown()
+
+        release.set()
+        await asyncio.wait_for(cleanup, 1.0)
+        await container.shutdown_async()
 
     async def test_failed_async_unregister_reserves_token_until_retry(self) -> None:
         resource = _AsyncResource("async", [], fail=True)

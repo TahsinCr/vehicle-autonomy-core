@@ -19,9 +19,17 @@ STRESS_TESTS = (
     "tests.dependency.test_lifecycle.DependencyLifecycleTests."
     "test_inflight_unregister_reserves_token_and_is_one_barrier",
     "tests.dependency.test_lifecycle.DependencyLifecycleTests."
+    "test_autowire_cannot_bypass_class_token_disposal",
+    "tests.dependency.test_lifecycle.DependencyLifecycleTests."
+    "test_late_unregister_cannot_escape_shutdown_admission",
+    "tests.dependency.test_lifecycle.DependencyLifecycleTests."
     "test_registration_cannot_commit_after_shutdown_claim",
+    "tests.dependency.test_lifecycle.DependencyLifecycleTests."
+    "test_new_instance_cannot_commit_after_shutdown_claim",
     "tests.dependency.test_lifecycle.AsyncDependencyLifecycleTests."
     "test_cross_task_cached_provider_cycle_is_detected",
+    "tests.dependency.test_lifecycle.AsyncDependencyLifecycleTests."
+    "test_sync_and_async_unregister_share_one_disposal_attempt",
     "tests.events.test_bus.EventBusTests."
     "test_close_reports_a_stuck_periodic_schedule",
     "tests.events.test_bus.EventBusTests."
@@ -40,6 +48,18 @@ STRESS_TESTS = (
     "test_uncaught_exception_intent_survives_cleanup_failure",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_external_failure_retry_intent_survives_cleanup_failure",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_tick_exception_intent_survives_cleanup_failure",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_terminal_commit_rejects_competing_commands_during_cleanup",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_retry_generation_starts_without_stale_terminal_intent",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_self_stop_unwinds_callback_before_cleanup_and_release",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_self_cancel_unwinds_tick_before_cleanup",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_cancel_intent_survives_cleanup_failure_and_rejects_stop",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_stop_waits_for_tick_before_cleanup",
 )

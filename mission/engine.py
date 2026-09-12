@@ -180,6 +180,9 @@ class MissionEngine(Service):
                 and not queued_ids
                 and (thread is None or not thread.is_alive())
             ):
+                self._scheduler_thread = None
+                self._stopping = False
+                self._condition.notify_all()
                 return
             self._stopping = True
             self._running = False
@@ -228,6 +231,17 @@ class MissionEngine(Service):
             if self._closed:
                 return
         self.stop()
+        close_errors: list[Exception] = []
+        for channel in (self.events, self.transitions):
+            try:
+                channel.close()
+            except Exception as exc:
+                close_errors.append(exc)
+        if close_errors:
+            with self._condition:
+                self._stopping = True
+                self._condition.notify_all()
+            raise ExceptionGroup("Mission engine event shutdown failed", close_errors)
         with self._condition:
             self._closed = True
             runtimes = tuple(self._runtimes.values())
@@ -239,8 +253,6 @@ class MissionEngine(Service):
             self._orchestrator.clear()
         for runtime in runtimes:
             runtime.mission.unbind_control(runtime.control)
-        self.events.close()
-        self.transitions.close()
 
     def launch(
         self,

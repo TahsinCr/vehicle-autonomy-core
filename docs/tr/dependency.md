@@ -25,6 +25,10 @@ cleanup `cleanup_pending` değerini ayarlar; kalan cleanup tamamlanana kadar
 kayıt, resolution ve yeni scope oluşturma engellenir. Başarılı shutdown
 terminaldir. Parent shutdown başladığında child scope da parent provider'larına
 dönemez.
+Auto-wire aynı token reservation kuralına uyar; önceki instance dispose edilirken
+concrete class yeniden üretilemez. Event-loop thread'inde yapılan senkron çağrı
+async disposal'ı bekleyip kilitlenmez; `AsyncDependencyError` verir ve eşdeğer
+async API'nin kullanılmasını ister.
 
 ## `DependencyContainer`
 
@@ -72,7 +76,9 @@ Resolution ve yaşam döngüsü:
 
 - `resolve(token)`, `resolve_async(token)`
 - `build(factory, dependencies=None)`, `build_async(...)`
-- `can_resolve(token)`, `has(token)`, `registered_tokens()`
+- `can_resolve(token)` mevcut lifecycle durumunda gerçekten çözüm mümkünse true döner
+- `has(token)` local veya parent zincirinde görünür bir kayıt varsa true döner
+- `registered_tokens()` yalnız local token'ları listeler
 - `create_scope()`
 - `warmup(tokens=None, lifetimes=(SINGLETON,))`, `warmup_async(...)`
 - `shutdown()`, `shutdown_async()`

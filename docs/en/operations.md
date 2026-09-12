@@ -103,8 +103,10 @@ modules; this gradual baseline avoids hiding dynamic provider/callback behavior
 behind broad casts. The stress runner repeats selected concurrency regressions
 with a fresh suite on every pass.
 
-The CI matrix runs supported Python versions and builds the wheel. Tests cover
-standalone checkout loading and the intended `src/core` submodule layout.
+The CI matrix runs supported Python versions and builds the wheel. Native ARM64
+also installs optional `pymavlink`, so the real UDP loopback contract runs on
+both architectures. Tests cover standalone checkout loading and the intended
+`src/core` submodule layout.
 
 ## Benchmarks
 

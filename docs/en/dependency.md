@@ -29,6 +29,10 @@ attempt. A failed container-wide cleanup sets `cleanup_pending`; registration,
 resolution and new scopes remain blocked until shutdown completes the remaining
 cleanup. Successful shutdown is terminal. A child scope also stops resolving
 fallback providers as soon as its parent starts shutting down.
+Auto-wiring observes the same token reservation, so a concrete class cannot be
+recreated while its previous instance is still disposing. A synchronous call
+made on the event-loop thread never waits for async disposal; it raises
+`AsyncDependencyError` and requires the matching async API instead.
 
 ## `DependencyContainer`
 
@@ -88,8 +92,8 @@ async registration lifecycle when the old object has asynchronous cleanup.
 | `resolve_async(token)` | token | awaited resolved value |
 | `build(factory, *, dependencies=None)` | callable/class | transient constructed value |
 | `build_async(...)` | callable/class | awaited constructed value |
-| `can_resolve(token)` | token | whether resolution is possible |
-| `has(token)` | token | whether directly registered |
+| `can_resolve(token)` | token | whether resolution is currently possible |
+| `has(token)` | token | whether a registration is visible locally or through a parent |
 | `registered_tokens()` | none | local tokens as a tuple |
 | `create_scope()` | none | child scope container |
 | `warmup(tokens=None, *, lifetimes=(SINGLETON,))` | optional selection | eagerly resolve registrations |

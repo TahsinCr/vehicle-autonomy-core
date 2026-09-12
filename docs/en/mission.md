@@ -66,8 +66,9 @@ from the class name and may be overridden per instance.
 - Reporting: `checkpoint(name, **values)`, `update_progress(value, reason="")`.
 - Coordination: `wait_for_stop(timeout=None)`, `stop_missions(tags=(), resources=())`.
 
-Calling `complete()` or `fail()` inside `start()`/`tick()` unwinds that callback.
-Terminal publication and resource release occur after user code stops. If
+Calling `complete()`, `fail()`, self-targeted `stop()` or self-targeted
+`cancel()` inside `start()`/`tick()` unwinds that callback. Terminal publication
+and resource release occur after user code stops. If
 `stop()` fails, the mission remains `STOPPING`, retains resources and raises
 `MissionCleanupError`; retry the lifecycle operation after fixing the cause.
 
@@ -116,11 +117,17 @@ optional `requester_id` and `reason`. `complete`, `fail`, `progress` and
 tags=(), resources=())` allows a running mission to affect lower-authority work
 without knowing concrete mission IDs.
 
-If completion, failure or an uncaught worker error cannot clean up, the original
-terminal phase, result, reason and retryability remain pending. This applies to
-callback-driven and external lifecycle calls. Competing stop/cancel calls are
-rejected while that outcome is pending. After fixing the cause,
+If any terminal command or an uncaught worker error cannot clean up, the original
+terminal phase, detached result, reason and retryability remain pending. This
+applies to callback-driven and external lifecycle calls. The first terminal
+intent wins; a conflicting command is rejected while it is pending. After fixing the cause,
 `retry_cleanup(reference)` retries cleanup and commits the original intent.
+
+`stop()` may be called again after an incomplete engine shutdown. Once mission
+and scheduler cleanup succeeds, the stopping latch is cleared and the engine can
+be started again. `close()` likewise retries event-channel shutdown before it
+marks the engine closed or releases registered mission state; the engine remains
+in stopping state between failed close attempts and rejects new work.
 
 Only an active running requester may control another mission. Lower numeric
 priority carries greater authority.

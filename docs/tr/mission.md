@@ -58,8 +58,9 @@ Gerekli metotlar `start()` ve `stop()`; opsiyonel hook'lar `pause()`, `resume()`
 `stop_missions(tags=(), resources=())` kullanılabilir.
 
 `bind_control`/`unbind_control` engine wiring içindir. `id`, `name`, `control`,
-`runtime`, `stop_requested` okunabilir. Callback içindeki complete/fail callback'i
-sonlandırır. `stop()` hata verirse mission `STOPPING` kalır, resource'u korur ve
+`runtime`, `stop_requested` okunabilir. Callback içindeki complete/fail ile
+mission'ın kendisine verdiği stop/cancel komutları callback'i sonlandırır.
+`stop()` hata verirse mission `STOPPING` kalır, resource'u korur ve
 `MissionCleanupError` verir.
 
 ## `MissionEngine`
@@ -87,12 +88,18 @@ Lifecycle: `pause`, `resume`, `stop_mission`, `cancel` requester/reason alır;
 `stop_matching(requester_id, tags=(), resources=())`, aktif requester'ın somut
 ID bilmeden düşük yetkili işi durdurmasını sağlar.
 
-Completion, failure veya yakalanmamış worker hatası sırasında cleanup
-tamamlanamazsa orijinal terminal phase, result, reason ve retry bilgisi korunur.
+Herhangi bir terminal komut veya yakalanmamış worker hatası sırasında cleanup
+tamamlanamazsa ilk terminal phase, ayrılmış result, reason ve retry bilgisi korunur.
 Bu davranış callback içinden ve dışarıdan verilen lifecycle çağrıları için
-geçerlidir. Sonuç beklerken rakip stop/cancel çağrıları reddedilir. Neden
+geçerlidir. İlk terminal intent kazanır; beklerken çelişen komut reddedilir. Neden
 giderildikten sonra `retry_cleanup(reference)` cleanup'ı ve aynı terminal
 niyeti yeniden yürütür.
+
+Eksik engine shutdown sonrasında `stop()` yeniden çağrılabilir. Mission ve
+scheduler cleanup tamamlandığında stopping durumu temizlenir ve engine yeniden
+başlatılabilir. `close()` da engine'i closed işaretleyip mission state'ini
+bırakmadan önce event kanallarının kapanmasını yeniden deneyebilir; başarısız
+close girişimleri arasında stopping kalır ve yeni işi reddeder.
 
 State API'si: `snapshot`, `snapshots`, `manager_snapshot`, `query_events`,
 `events`, `transitions`, `stopping`. `MissionSnapshot` alanları: `mission_id`,

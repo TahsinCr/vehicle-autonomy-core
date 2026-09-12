@@ -358,13 +358,18 @@ paths claim each resource before calling user code, so the same instance cannot
 be closed twice.
 
 If unregister cleanup fails, the token stays reserved and cannot be registered
-again until cleanup succeeds. Concurrent unregister and shutdown callers wait
+again, resolved through auto-wiring or bypassed through a child scope until
+cleanup succeeds. Concurrent unregister and shutdown callers wait
 for their shared cleanup result. Failed container-wide cleanup sets
 `container.cleanup_pending`; normal use remains blocked until shutdown is
 retried successfully. Child scopes cannot fall back to a parent once that
 parent starts shutting down. Successful shutdown is terminal;
 `container.closed` becomes true and later registration or resolution raises
 `DependencyContainerClosedError`.
+`can_resolve()` returns false when lifecycle or token cleanup state currently
+prevents resolution. `has()` reports registrations visible either locally or
+through the parent chain. A synchronous call on the event-loop thread raises
+`AsyncDependencyError` instead of deadlocking while async disposal is active.
 
 For a project-owned composition root, subclass `BaseDependencyContainer` and
 put registrations in `configure()`.
@@ -786,16 +791,22 @@ raises `MissionTimeoutError` and keeps the stopping state visible so shutdown
 can be retried. The engine never calls `start()`, `tick()`, `pause()`, `resume()`
 or `stop()` concurrently on the same mission instance. Transition subscribers
 run outside the engine state lock and may issue another lifecycle command.
-Calling `complete()` or `fail()` inside `start()`/`tick()` ends that callback
-immediately; terminal state and resource release occur only after it unwinds.
+Calling `complete()`, `fail()`, self-targeted `stop()` or self-targeted
+`cancel()` inside `start()`/`tick()` ends that callback immediately; terminal
+state and resource release occur only after it unwinds.
 If `stop()` raises, the mission remains `STOPPING`, its resources remain owned,
 and `MissionCleanupError` reports the incomplete cleanup. Terminal intent—
-including external completion/failure, uncaught worker errors, result and
-retryability—is retained; competing stop/cancel calls are rejected. Call
+including stop/cancel, external completion/failure, uncaught worker errors,
+deeply detached result and retryability—is retained. The first intent wins and
+conflicting terminal commands are rejected. Call
 `engine.retry_cleanup(mission)` after resolving the cause. The engine never
 makes the resource available to another mission before cleanup succeeds. Terminal
 missions reject new checkpoints, and checkpoint event names cannot be replaced
 by a value with the same key.
+After an incomplete engine shutdown is recovered, calling `stop()` again clears
+the stopping state so the engine can restart. `close()` does not mark the engine
+closed or discard mission registrations until both event channels close, and it
+rejects new work while that close remains incomplete.
 Parallel stage results identify their group through `node` and carry
 `mission_id=None` instead of a completion-order-dependent child ID.
 
@@ -1441,7 +1452,8 @@ python -m unittest tests.mavlink.test_pymavlink_integration -v
 ```
 
 GitHub Actions runs the hardware-free suite on Python 3.10 through 3.14, checks
-the built wheel and runs this loopback test in a separate `pymavlink` job.
+the built wheel and runs this loopback test in both the dedicated `pymavlink`
+job and the native ARM64 job.
 
 ### Performance regression probe
 

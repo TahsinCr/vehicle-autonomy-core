@@ -70,9 +70,10 @@ class _ShutdownAttempt:
 
 
 class _TokenDisposalAttempt:
-    __slots__ = ("done", "error")
+    __slots__ = ("async_owner_thread_id", "done", "error")
 
-    def __init__(self) -> None:
+    def __init__(self, *, async_owner: bool = False) -> None:
+        self.async_owner_thread_id = threading.get_ident() if async_owner else None
         self.done = threading.Event()
         self.error: BaseException | None = None
 
@@ -197,14 +198,28 @@ class DependencyContainer:
     def _claim_token_disposal(
         self,
         token: Token,
+        *,
+        async_owner: bool = False,
     ) -> tuple[_TokenDisposalAttempt, bool]:
         with self._registration_lock:
+            self._ensure_open()
             attempt = self._disposal_attempts.get(token)
             if attempt is not None:
                 return attempt, False
-            attempt = _TokenDisposalAttempt()
+            attempt = _TokenDisposalAttempt(async_owner=async_owner)
             self._disposal_attempts[token] = attempt
             return attempt, True
+
+    @staticmethod
+    def _wait_for_token_disposal(attempt: _TokenDisposalAttempt) -> None:
+        if attempt.async_owner_thread_id == threading.get_ident():
+            raise AsyncDependencyError(
+                "Async dependency cleanup cannot be awaited through the synchronous API; "
+                "use unregister_async() or shutdown_async()"
+            )
+        attempt.done.wait()
+        if attempt.error is not None:
+            raise attempt.error
 
     def _finish_token_disposal(
         self,
@@ -458,9 +473,7 @@ class DependencyContainer:
         self._ensure_open()
         attempt, owner = self._claim_token_disposal(token)
         if not owner:
-            attempt.done.wait()
-            if attempt.error is not None:
-                raise attempt.error
+            self._wait_for_token_disposal(attempt)
             return
         error: BaseException | None = None
         try:
@@ -517,7 +530,7 @@ class DependencyContainer:
 
     async def unregister_async(self, token: Token) -> None:
         self._ensure_open()
-        attempt, owner = self._claim_token_disposal(token)
+        attempt, owner = self._claim_token_disposal(token, async_owner=True)
         if not owner:
             await asyncio.to_thread(attempt.done.wait)
             if attempt.error is not None:
@@ -538,7 +551,12 @@ class DependencyContainer:
         return self._find_provider(token) is not None
 
     def can_resolve(self, token: Token) -> bool:
-        return self.has(token) or (self.auto_wire and can_autowire(token))
+        try:
+            self._ensure_open()
+            provider = self._find_resolvable_provider(token)
+        except (DependencyCleanupPendingError, DependencyContainerClosedError):
+            return False
+        return provider is not None or (self.auto_wire and can_autowire(token))
 
     def registered_tokens(self) -> tuple[Token, ...]:
         with self._registration_lock:
@@ -601,7 +619,7 @@ class DependencyContainer:
         cleanup_started = False
         try:
             for disposal in self._token_disposals():
-                disposal.done.wait()
+                self._wait_for_token_disposal(disposal)
             candidates = self._shutdown_instances()
             async_only = next(
                 (item for item in candidates if requires_async_disposal(item)),
@@ -796,8 +814,21 @@ class DependencyContainer:
             return provider
         return self.parent._find_provider(token) if self.parent is not None else None
 
+    def _find_resolvable_provider(self, token: Token) -> Provider | None:
+        with self._registration_lock:
+            if token in self._disposal_attempts or token in self._pending_disposals:
+                raise DependencyCleanupPendingError(
+                    f"{format_token(token)} still has pending cleanup"
+                )
+            provider = self._providers.get(token)
+        if provider is not None:
+            return provider
+        if self.parent is not None:
+            return self.parent._find_resolvable_provider(token)
+        return None
+
     def _get_or_autowire_provider(self, token: Token) -> Provider:
-        provider = self._find_provider(token)
+        provider = self._find_resolvable_provider(token)
         if provider is not None:
             return provider
         if self.auto_wire and can_autowire(token):

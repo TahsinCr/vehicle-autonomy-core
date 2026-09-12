@@ -21,10 +21,12 @@ if TYPE_CHECKING:
 class PendingTerminalIntent:
     """Terminal result retained until cleanup and transition commit succeed."""
 
+    generation: int
     phase: MissionPhase
     result: Mapping[str, Any] | None = None
     reason: str = ""
     retryable: bool = False
+    requester_id: int | None = None
     transition: MissionTransition | None = None
 
 
@@ -37,6 +39,7 @@ class MissionRuntime:
     worker: threading.Thread | None = None
     cleaned: bool = False
     cleanup_lock: threading.Lock = field(default_factory=threading.Lock)
+    terminal_lock: threading.Lock = field(default_factory=threading.Lock)
     callback_lock: threading.RLock = field(default_factory=threading.RLock)
     launch_lock: threading.RLock = field(default_factory=threading.RLock)
     active_elapsed: float = 0.0

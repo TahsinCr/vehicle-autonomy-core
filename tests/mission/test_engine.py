@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 
+from src.core.compatibility import ExceptionGroup
 from src.core.mission import (
     Mission,
     MissionChain,
@@ -11,6 +12,7 @@ from src.core.mission import (
     MissionConflictError,
     MissionConflictPolicy,
     MissionEngine,
+    MissionError,
     MissionLifecycle,
     MissionNotFoundError,
     MissionPermissionError,
@@ -39,6 +41,20 @@ def wait_for_phase(
     raise AssertionError(
         f"Mission did not reach {phase}: {engine.snapshot(mission).phase}"
     )
+
+
+def wait_for_cleanup_pending(
+    engine: MissionEngine,
+    mission: Mission,
+    timeout: float = 1.0,
+) -> MissionSnapshot:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = engine.snapshot(mission)
+        if snapshot.cleanup_pending:
+            return snapshot
+        time.sleep(0.001)
+    raise AssertionError(f"Mission cleanup did not become pending: {engine.snapshot(mission)}")
 
 
 class CompletingMission(Mission):
@@ -585,7 +601,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
             mission.cleanup_fails = False
             self.assertEqual(
-                engine.stop_mission(mission).phase,
+                engine.retry_cleanup(mission).phase,
                 MissionPhase.STOPPED,
             )
             self.assertEqual(engine.launch(replacement).phase, MissionPhase.STARTING)
@@ -608,9 +624,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
         mission = CompletingWithBrokenCleanup()
         self.engine.launch(mission)
-        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
-        pending = self.engine.snapshot(mission)
-        self.assertTrue(pending.cleanup_pending)
+        pending = wait_for_cleanup_pending(self.engine, mission)
         self.assertEqual(pending.cleanup_error, "cleanup blocked")
 
         mission.cleanup_fails = False
@@ -640,7 +654,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
         mission = FailingWithBrokenCleanup()
         self.engine.launch(mission)
-        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
+        wait_for_cleanup_pending(self.engine, mission)
         mission.cleanup_fails = False
         queued = self.engine.retry_cleanup(mission)
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
@@ -667,14 +681,46 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
         mission = RaisingWithBrokenCleanup()
         self.engine.launch(mission)
-        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
-        self.assertTrue(self.engine.snapshot(mission).cleanup_pending)
+        wait_for_cleanup_pending(self.engine, mission)
 
         mission.cleanup_fails = False
         queued = self.engine.retry_cleanup(mission)
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
         wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
         self.assertEqual(mission.starts, 2)
+
+    def test_tick_exception_intent_survives_cleanup_failure(self) -> None:
+        class TickFailureWithBrokenCleanup(Mission):
+            tick_interval = 0.001
+            retry = MissionRetryPolicy(attempts=2)
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.ticks = 0
+                self.cleanup_fails = True
+
+            def start(self) -> None:
+                pass
+
+            def tick(self, elapsed_seconds: float) -> None:
+                self.ticks += 1
+                if self.ticks == 1:
+                    raise RuntimeError("tick pipeline failed")
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+
+        mission = TickFailureWithBrokenCleanup()
+        self.engine.launch(mission)
+        pending = wait_for_cleanup_pending(self.engine, mission)
+        self.assertIn("tick pipeline failed", pending.reason)
+
+        mission.cleanup_fails = False
+        queued = self.engine.retry_cleanup(mission)
+        self.assertEqual(queued.phase, MissionPhase.QUEUED)
+        wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
+        self.assertEqual(self.engine.snapshot(mission).attempt, 2)
 
     def test_external_completion_intent_survives_cleanup_failure(self) -> None:
         class BrokenCleanupMission(BlockingMission):
@@ -690,8 +736,10 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         mission = BrokenCleanupMission()
         self.engine.launch(mission)
         self.assertTrue(mission.started.wait(1.0))
+        result = {"target": 7, "path": {"points": [1, 2]}}
         with self.assertRaises(MissionCleanupError):
-            self.engine.complete(mission, {"target": 7})
+            self.engine.complete(mission, result)
+        result["path"]["points"].append(3)
 
         with self.assertRaises(MissionTransitionError):
             self.engine.stop_mission(mission)
@@ -701,7 +749,8 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         mission.cleanup_fails = False
         completed = self.engine.retry_cleanup(mission)
         self.assertEqual(completed.phase, MissionPhase.SUCCEEDED)
-        self.assertEqual(completed.result, {"target": 7})
+        self.assertEqual(completed.result["target"], 7)
+        self.assertEqual(completed.result["path"]["points"], (1, 2))
 
     def test_external_failure_retry_intent_survives_cleanup_failure(self) -> None:
         class BrokenCleanupMission(BlockingMission):
@@ -727,6 +776,227 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
         wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
         self.assertEqual(self.engine.snapshot(mission).attempt, 2)
+
+    def test_terminal_commit_rejects_competing_commands_during_cleanup(self) -> None:
+        class BlockingCleanupMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_entered = threading.Event()
+                self.release_cleanup = threading.Event()
+
+            def stop(self) -> None:
+                self.cleanup_entered.set()
+                self.release_cleanup.wait(1.0)
+
+        mission = BlockingCleanupMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.started.wait(1.0))
+        completed: list[MissionSnapshot] = []
+        errors: list[BaseException] = []
+
+        def complete() -> None:
+            try:
+                completed.append(self.engine.complete(mission, {"safe": True}))
+            except BaseException as error:
+                errors.append(error)
+
+        completion = threading.Thread(target=complete)
+        completion.start()
+        self.assertTrue(mission.cleanup_entered.wait(1.0))
+        with self.assertRaises(MissionTransitionError):
+            self.engine.stop_mission(mission)
+        with self.assertRaises(MissionTransitionError):
+            self.engine.cancel(mission)
+
+        mission.release_cleanup.set()
+        completion.join(1.0)
+        self.assertFalse(completion.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(completed[0].phase, MissionPhase.SUCCEEDED)
+        self.assertEqual(completed[0].result, {"safe": True})
+
+    def test_self_stop_unwinds_callback_before_cleanup_and_release(self) -> None:
+        class SelfStoppingMission(Mission):
+            resources = frozenset({"guidance"})
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.callback_active = False
+                self.after_stop = False
+                self.cleanup_after_unwind = False
+
+            def start(self) -> None:
+                self.callback_active = True
+                try:
+                    self.control.stop(self.id)
+                    self.after_stop = True
+                finally:
+                    self.callback_active = False
+
+            def stop(self) -> None:
+                self.cleanup_after_unwind = not self.callback_active
+
+        class ReplacementMission(BlockingMission):
+            resources = frozenset({"guidance"})
+
+        mission = SelfStoppingMission()
+        replacement = ReplacementMission()
+        self.engine.launch(mission)
+        stopped = self.engine.wait(mission, timeout=1.0)
+
+        self.assertIsNotNone(stopped)
+        assert stopped is not None
+        self.assertEqual(stopped.phase, MissionPhase.STOPPED)
+        self.assertFalse(mission.after_stop)
+        self.assertTrue(mission.cleanup_after_unwind)
+        self.assertEqual(self.engine.launch(replacement).phase, MissionPhase.STARTING)
+
+    def test_self_cancel_unwinds_tick_before_cleanup(self) -> None:
+        class SelfCancellingMission(Mission):
+            tick_interval = 0.001
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.tick_active = False
+                self.after_cancel = False
+                self.cleanup_after_unwind = False
+
+            def start(self) -> None:
+                pass
+
+            def tick(self, elapsed_seconds: float) -> None:
+                self.tick_active = True
+                try:
+                    self.control.cancel(self.id)
+                    self.after_cancel = True
+                finally:
+                    self.tick_active = False
+
+            def stop(self) -> None:
+                self.cleanup_after_unwind = not self.tick_active
+
+        mission = SelfCancellingMission()
+        self.engine.launch(mission)
+        cancelled = self.engine.wait(mission, timeout=1.0)
+
+        self.assertIsNotNone(cancelled)
+        assert cancelled is not None
+        self.assertEqual(cancelled.phase, MissionPhase.CANCELLED)
+        self.assertFalse(mission.after_cancel)
+        self.assertTrue(mission.cleanup_after_unwind)
+
+    def test_cancel_intent_survives_cleanup_failure_and_rejects_stop(self) -> None:
+        class BrokenCleanupMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_fails = True
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+
+        mission = BrokenCleanupMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.started.wait(1.0))
+        with self.assertRaises(MissionCleanupError):
+            self.engine.cancel(mission, reason="operator cancelled")
+        with self.assertRaises(MissionTransitionError):
+            self.engine.stop_mission(mission)
+
+        mission.cleanup_fails = False
+        cancelled = self.engine.retry_cleanup(mission)
+        self.assertEqual(cancelled.phase, MissionPhase.CANCELLED)
+        self.assertEqual(cancelled.reason, "operator cancelled")
+
+    def test_stop_retry_clears_stopping_after_external_cleanup_recovery(self) -> None:
+        class BrokenCleanupMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_fails = True
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+
+        engine = MissionEngine(scheduler_interval=0.001)
+        mission = BrokenCleanupMission()
+        try:
+            engine.launch(mission)
+            self.assertTrue(mission.started.wait(1.0))
+            with self.assertRaises(ExceptionGroup):
+                engine.stop()
+            self.assertTrue(engine.stopping)
+
+            mission.cleanup_fails = False
+            engine.retry_cleanup(mission)
+            engine.stop()
+            self.assertFalse(engine.stopping)
+            engine.start()
+            self.assertTrue(engine.running)
+        finally:
+            mission.cleanup_fails = False
+            engine.close()
+
+    def test_close_retries_event_channel_failure_before_marking_closed(self) -> None:
+        class RetryableChannel:
+            def __init__(self, fail_once: bool) -> None:
+                self.fail_once = fail_once
+                self.close_count = 0
+
+            def close(self) -> None:
+                self.close_count += 1
+                if self.fail_once:
+                    self.fail_once = False
+                    raise RuntimeError("channel still stopping")
+
+        engine = MissionEngine()
+        events = RetryableChannel(fail_once=True)
+        transitions = RetryableChannel(fail_once=False)
+        engine.events = events  # type: ignore[assignment]
+        engine.transitions = transitions  # type: ignore[assignment]
+
+        with self.assertRaises(ExceptionGroup):
+            engine.close()
+        self.assertFalse(engine.closed)
+        self.assertTrue(engine.stopping)
+        with self.assertRaises(MissionError):
+            engine.start()
+        engine.close()
+        self.assertTrue(engine.closed)
+        self.assertEqual(events.close_count, 2)
+        self.assertEqual(transitions.close_count, 2)
+
+    def test_retry_generation_starts_without_stale_terminal_intent(self) -> None:
+        class RetryThenCompleteMission(Mission):
+            tick_interval = 0.001
+            retry = MissionRetryPolicy(attempts=2)
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.starts = 0
+                self.first_started = threading.Event()
+
+            def start(self) -> None:
+                self.starts += 1
+                if self.starts == 1:
+                    self.first_started.set()
+                else:
+                    self.complete({"attempt": self.starts})
+
+            def stop(self) -> None:
+                pass
+
+        mission = RetryThenCompleteMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.first_started.wait(1.0))
+        self.engine.fail(mission, "retry requested", retryable=True)
+
+        completed = self.engine.wait(mission, timeout=1.0)
+        self.assertIsNotNone(completed)
+        assert completed is not None
+        self.assertEqual(completed.phase, MissionPhase.SUCCEEDED)
+        self.assertEqual(completed.generation, 2)
+        self.assertEqual(completed.result, {"attempt": 2})
 
     def test_swallowed_internal_exit_still_finalizes_mission(self) -> None:
         class DefensiveMission(Mission):

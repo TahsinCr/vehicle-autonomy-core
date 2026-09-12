@@ -355,13 +355,18 @@ task'ları arasında yakalanır. Eşzamanlı cleanup yolları kullanıcı kodunu
 çağırmadan önce kaynağı sahiplenir; aynı instance iki kez kapatılmaz.
 
 Unregister cleanup başarısız olursa token ayrılmış durumda kalır ve cleanup
-başarana kadar yeniden kaydedilemez. Eşzamanlı unregister ve shutdown çağrıları
+başarana kadar yeniden kaydedilemez, auto-wire ile çözülemez veya child scope
+üzerinden aşılamaz. Eşzamanlı unregister ve shutdown çağrıları
 ortak cleanup sonucunu bekler. Container genelindeki başarısız cleanup
 `container.cleanup_pending` değerini ayarlar; shutdown başarıyla yeniden
 denenene kadar normal kullanım engellenir. Parent shutdown başladıktan sonra
 child scope parent provider'larına dönemez. Başarılı shutdown terminaldir;
 `container.closed` true olur ve sonraki kayıt veya resolution
 `DependencyContainerClosedError` verir.
+`can_resolve()` lifecycle veya token cleanup durumu resolution'ı engelliyorsa
+false döner. `has()` local ya da parent zincirinde görünür kayıtları bildirir.
+Event-loop thread'indeki senkron çağrı aktif async disposal'ı bekleyip kilitlenmek
+yerine `AsyncDependencyError` verir.
 
 Uygulamaya ait composition root için `BaseDependencyContainer` sınıfından
 miras alıp kayıtları `configure()` içinde tutabilirsiniz.
@@ -789,15 +794,21 @@ stopping durumunu görünür tutar. Motor aynı mission nesnesi üzerinde `start
 `tick()`, `pause()`, `resume()` veya `stop()` callback'lerini eşzamanlı çağırmaz.
 Transition aboneleri engine state lock'u dışında çalışır ve başka bir lifecycle
 komutu verebilir.
-`start()`/`tick()` içinden `complete()` veya `fail()` çağrılırsa callback hemen
-sonlanır; terminal durum ve kaynak bırakma stack açıldıktan sonra yapılır.
+`start()`/`tick()` içinden `complete()`, `fail()` veya mission'ın kendisine
+verdiği `stop()`/`cancel()` çağrılırsa callback hemen sonlanır; terminal durum ve
+kaynak bırakma stack açıldıktan sonra yapılır.
 `stop()` hata verirse mission `STOPPING` durumunda ve resource sahibi olarak
 kalır; `MissionCleanupError` cleanup'ın tamamlanmadığını bildirir. Dışarıdan
-verilen completion/failure ve yakalanmamış worker hataları dahil terminal niyeti,
-result ve retry bilgisi korunur; rakip stop/cancel çağrıları reddedilir. Sorun çözüldükten sonra
+verilen stop/cancel, completion/failure ve yakalanmamış worker hataları dahil
+terminal niyeti, derin ayrılmış result ve retry bilgisi korunur. İlk intent
+kazanır; çelişen terminal komutlar reddedilir. Sorun çözüldükten sonra
 `engine.retry_cleanup(mission)` çağrılır. Cleanup başarılı
 olmadan resource başka bir mission'a verilmez. Terminal mission'lar yeni
 checkpoint kabul etmez ve checkpoint event adını aynı isimli value ezemez.
+Eksik shutdown düzeltildikten sonra `stop()` yeniden çağrıldığında stopping
+durumu temizlenir ve engine tekrar başlatılabilir. `close()`, iki event kanalı da
+kapanmadan engine'i closed işaretlemez veya mission kayıtlarını bırakmaz; eksik
+close düzeltilene kadar yeni işi reddeder.
 Paralel aşama sonucu grubu `node` ile tanımlar ve bitiş sırasına bağlı bir
 child ID yerine `mission_id=None` taşır.
 
@@ -1447,8 +1458,8 @@ python -m unittest tests.mavlink.test_pymavlink_integration -v
 ```
 
 GitHub Actions, donanımsız testleri Python 3.10 ile 3.14 arasında çalıştırır;
-ayrıca wheel kurulumunu ve ayrı bir `pymavlink` işinde bu loopback testini
-doğrular.
+ayrıca wheel kurulumunu, ayrı `pymavlink` işini ve native ARM64 işindeki gerçek
+UDP loopback testini doğrular.
 
 ### Performans regresyon ölçümü
 
