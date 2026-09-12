@@ -19,6 +19,7 @@ from .message import MavlinkMessageEnvelope
 class MavlinkVehicleState:
     connected: bool
     last_seen_monotonic: float | None
+    last_observed_monotonic: float | None
 
 
 class MavlinkCollection(MavlinkActions):
@@ -126,6 +127,7 @@ class _MavlinkNode(MavlinkActions):
         self._is_autopilot = False
         self._connected = False
         self._last_seen = None
+        self._last_observed = None
         self._history = deque(maxlen=registry.history_capacity)
         self._worker = getattr(registry.runtime, "_worker", None)
         self._latest = {}
@@ -145,7 +147,11 @@ class _MavlinkNode(MavlinkActions):
     @property
     def state(self):
         with self._registry.condition:
-            return MavlinkVehicleState(self._connected, self._last_seen)
+            return MavlinkVehicleState(
+                self._connected,
+                self._last_seen,
+                self._last_observed,
+            )
 
     def latest(self, message_type: str):
         normalized = message_type.strip().upper()
@@ -493,6 +499,8 @@ class VehicleRegistry:
                     endpoint._connected = True
                     endpoint._last_seen = envelope.received_monotonic
                 self._select_autopilot_locked(vehicle)
+            vehicle._last_observed = envelope.received_monotonic
+            component._last_observed = envelope.received_monotonic
             vehicle._history.append(envelope)
             component._history.append(envelope)
             vehicle._latest[envelope.message_type] = envelope
@@ -548,8 +556,8 @@ class VehicleRegistry:
                 for vehicle in self.vehicles._items.values()
                 for component in vehicle._components._items.values()
                 if not component._connected
-                and component._last_seen is not None
-                and now - component._last_seen >= retention
+                and component._last_observed is not None
+                and now - component._last_observed >= retention
             )
         for collection, component_id in component_targets:
             removed += int(self.remove(collection, component_id))
@@ -559,8 +567,8 @@ class VehicleRegistry:
                 for vehicle in self.vehicles._items.values()
                 if not vehicle._connected
                 and not vehicle._components._items
-                and vehicle._last_seen is not None
-                and now - vehicle._last_seen >= retention
+                and vehicle._last_observed is not None
+                and now - vehicle._last_observed >= retention
             )
         for system_id in vehicle_targets:
             removed += int(self.remove(self.vehicles, system_id))

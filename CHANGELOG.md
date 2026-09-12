@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.7.1] - 2026-09-12
+
+### Added
+
+- Added visible mission cleanup fault state and `retry_cleanup()` so a pending
+  success result or retryable failure survives cleanup recovery.
+- Added terminal dependency-container state and explicit errors for use after
+  shutdown or token reuse while resource cleanup is pending.
+- Added separate processed, persisted and failed-record history writer metrics,
+  plus last-observed timestamps for vehicle and component state.
+
+### Changed
+
+- Successful dependency-container shutdown is terminal across every lifetime;
+  concurrent synchronous callers now wait for the same cleanup result.
+- A permanently failed MAVLink history is reported once and detached from live
+  traffic, while storage ownership remains with the caller.
+- MAVLink message-rate requests now reject booleans and invalid target IDs
+  instead of coercing them to integers.
+
+### Fixed
+
+- Preserve callback-driven mission phase, result, reason and retryability until
+  cleanup succeeds instead of losing the terminal intent in `STOPPING`.
+- Prevent a failed dependency unregister from freeing its token while the old
+  resource is still alive.
+- Keep background message histories closed after a stopped writer reports its
+  stored failure, and keep blocking async MAVLink I/O owned across repeated
+  task cancellation.
+- Prune non-heartbeat MAVLink components by their last observed traffic time.
+- Retain timed-out synchronous event schedule threads so a later `close()` can
+  finish joining them.
+
+### Documentation
+
+- Added parallel English and Turkish Markdown documentation covering
+  architecture, setup, core abstractions, dependency injection, sync/async
+  events, mission orchestration, MAVLink, the application protocol and
+  operations.
+- Added public API indexes, page-level GitHub language switching and links from
+  the corresponding English and Turkish README files.
+
 ## [v1.7] - 2026-09-11
 
 ### Added
@@ -576,7 +618,10 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.5...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.1...HEAD
+[v1.7.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7...v1.7.1
+[v1.7]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.6...v1.7
+[v1.6]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.5...v1.6
 [v1.5]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.4...v1.5
 [v1.4]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.3.1...v1.4
 [v1.3.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.3...v1.3.1

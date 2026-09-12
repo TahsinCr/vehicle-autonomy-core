@@ -187,10 +187,18 @@ class MessageHistory:
             self._records.clear()
 
     def close(self) -> None:
+        error: Exception | None = None
         if self._writer is not None:
-            self._writer.close()
+            try:
+                self._writer.close()
+            except Exception as failure:
+                if self._writer.running:
+                    raise
+                error = failure
         with self._lock:
             self._closed = True
+        if error is not None:
+            raise error
 
     def __enter__(self: _History) -> _History:
         self._check_open()

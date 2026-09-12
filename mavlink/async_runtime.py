@@ -206,13 +206,17 @@ class AsyncMavlinkRuntime:
 
     async def _finish_io(self, operation):
         task = asyncio.create_task(asyncio.to_thread(operation))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # A cancelled await does not stop blocking transport I/O. Join it
-            # before allowing another lifecycle operation to touch the socket.
-            await task
-            raise
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Repeated cancellation must not detach blocking transport I/O.
+                cancelled = True
+        result = task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
     async def start(self):
         async with self._lifecycle_lock:

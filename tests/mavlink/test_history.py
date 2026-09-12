@@ -34,7 +34,9 @@ class MessageHistoryTests(unittest.TestCase):
                 stats = history.writer_stats
                 self.assertIsNotNone(stats)
                 self.assertEqual(stats.submitted, 1)
-                self.assertEqual(stats.completed, 1)
+                self.assertEqual(stats.processed, 1)
+                self.assertEqual(stats.persisted, 1)
+                self.assertEqual(stats.failed_records, 0)
                 self.assertGreaterEqual(stats.batches, 1)
 
     def test_nonfinite_mavlink_values_are_recorded_as_json_null(self):
@@ -98,8 +100,14 @@ class MessageHistoryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 history.flush()
             self.assertIsInstance(history.recording_error, OSError)
+            stats = history.writer_stats
+            self.assertEqual(stats.processed, 1)
+            self.assertEqual(stats.persisted, 0)
+            self.assertEqual(stats.failed_records, 1)
             with self.assertRaises(RuntimeError):
                 history.close()
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                history.append(envelope(2))
     def test_tail_query_stops_after_enough_matches(self):
         from collections import deque
 
@@ -160,10 +168,15 @@ class MessageHistoryTests(unittest.TestCase):
         with MavlinkRuntime(client=client) as runtime:
             errors = []
             runtime.errors.subscribe(errors.append)
-            runtime.add_history(BrokenHistory())
+            history = BrokenHistory()
+            subscription = runtime.add_history(history)
             client.router.envelopes.publish(envelope(1))
+            client.router.envelopes.publish(envelope(2))
+            self.assertEqual(len(errors), 1)
             self.assertEqual(errors[-1].source, "history")
             self.assertIsInstance(errors[-1].error, OSError)
+            self.assertFalse(subscription.active)
+            self.assertNotIn(history, runtime._histories)
 
     def test_memory_and_sqlite_share_query_and_retention_contract(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -439,6 +439,11 @@ class MissionEngine(Service):
     ) -> MissionSnapshot:
         return self.lifecycle.complete(mission, result)
 
+    def retry_cleanup(self, mission: MissionReference) -> MissionSnapshot:
+        """Retry failed cleanup without losing the requested terminal result."""
+
+        return self.lifecycle.retry_cleanup(mission)
+
     def fail(
         self,
         mission: MissionReference,

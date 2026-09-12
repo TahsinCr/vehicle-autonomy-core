@@ -659,6 +659,24 @@ class MavlinkRuntimeTests(unittest.TestCase):
         finally:
             runtime.close()
 
+    def test_component_without_heartbeat_is_pruned_by_observed_time(self):
+        client = FakeClient([])
+        runtime = MavlinkRuntime(client=client, vehicle_state_retention=1.0)
+        runtime.start()
+        try:
+            emit(client, 12, 1)
+            emit(client, 12, 42, "ATTITUDE")
+            vehicle = runtime.vehicles.get(12)
+            component = vehicle.get_component(42)
+            self.assertIsNotNone(component)
+            self.assertIsNone(component.state.last_seen_monotonic)
+            self.assertIsNotNone(component.state.last_observed_monotonic)
+
+            self.assertEqual(runtime._registry.prune(now=float("inf")), 1)
+            self.assertIsNone(vehicle.get_component(42))
+        finally:
+            runtime.close()
+
     def test_runtime_owns_lifecycle_in_dependency_order(self) -> None:
         calls: list[str] = []
         client = FakeClient(calls)
@@ -808,6 +826,28 @@ def emit(client, system, component, message_type="HEARTBEAT", autopilot=3):
 
 
 class AsyncMavlinkRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_cancellation_keeps_blocking_io_owned(self):
+        runtime = AsyncMavlinkRuntime(client=FakeClient([]))
+        entered = threading.Event()
+        release = threading.Event()
+
+        def operation():
+            entered.set()
+            release.wait(1.0)
+            return "done"
+
+        caller = asyncio.create_task(runtime._finish_io(operation))
+        await asyncio.to_thread(entered.wait, 1.0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(caller.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        await runtime.close()
+
     async def test_callback_failure_enters_one_fatal_delivery_state(self):
         client = FakeClient([])
         runtime = AsyncMavlinkRuntime(client=client)

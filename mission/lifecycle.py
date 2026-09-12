@@ -194,6 +194,13 @@ class MissionLifecycle:
                 runtime.snapshot.phase is MissionPhase.STOPPING
                 and runtime.cleanup_error is not None
             ):
+                if (
+                    runtime.pending_exit is not None
+                    and runtime.pending_exit.phase is not MissionPhase.SUCCEEDED
+                ):
+                    raise MissionTransitionError(
+                        "Mission already has a different terminal intent"
+                    )
                 retry_cleanup = True
             elif runtime.snapshot.phase is not MissionPhase.RUNNING:
                 raise MissionTransitionError(
@@ -220,15 +227,20 @@ class MissionLifecycle:
                 runtime.pending_exit = exit_request
                 raise exit_request
         self._publish_transition(stopping_transition)
+        if retry_cleanup and runtime.pending_exit is not None:
+            return self.retry_cleanup(runtime.mission.id)
         return self._complete_stopping(runtime, result)
 
     def _complete_stopping(
         self,
         runtime: MissionRuntime,
         result: Mapping[str, Any] | None,
+        *,
+        cleanup: bool = True,
     ) -> MissionSnapshot:
         self._join_worker(runtime)
-        self._cleanup_or_raise(runtime)
+        if cleanup:
+            self._cleanup_or_raise(runtime)
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
@@ -256,6 +268,14 @@ class MissionLifecycle:
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
+            if runtime.snapshot.phase is MissionPhase.STOPPING and runtime.pending_exit is not None:
+                if runtime.pending_exit.phase is not MissionPhase.FAILED:
+                    raise MissionTransitionError(
+                        "Mission already has a different terminal intent"
+                    )
+                retry_pending = True
+            else:
+                retry_pending = False
             runtime.stop_event.set()
             if (
                 runtime.snapshot.phase.active
@@ -275,19 +295,32 @@ class MissionLifecycle:
                 )
                 runtime.pending_exit = exit_request
                 raise exit_request
+        if retry_pending:
+            return self.retry_cleanup(runtime.mission.id)
         self._publish_transition(stopping_transition)
         try:
             self._join_worker(runtime)
         except MissionTimeoutError:
             raise
-        self._cleanup_or_raise(runtime)
+        return self._finish_failure(runtime, failure_reason, retryable)
+
+    def _finish_failure(
+        self,
+        runtime: MissionRuntime,
+        reason: str,
+        retryable: bool,
+        *,
+        cleanup: bool = True,
+    ) -> MissionSnapshot:
+        if cleanup:
+            self._cleanup_or_raise(runtime)
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
             snapshot, transition = self._transition_locked(
                 runtime,
                 MissionPhase.FAILED,
-                reason=failure_reason,
+                reason=reason,
             )
             retry_available = (
                 retryable and snapshot.attempt < runtime.mission.retry.attempts
@@ -327,6 +360,22 @@ class MissionLifecycle:
             )
             self.engine._scheduler_wake.set()
         return snapshot
+
+    def retry_cleanup(self, mission: MissionReference) -> MissionSnapshot:
+        """Retry failed cleanup and preserve the mission's terminal intent."""
+
+        runtime = self.engine._runtime(mission)
+        with self.engine._condition:
+            exit_request = runtime.pending_exit
+            if runtime.snapshot.phase is not MissionPhase.STOPPING:
+                raise MissionTransitionError("Mission is not waiting for cleanup")
+            if runtime.cleanup_error is None:
+                raise MissionTransitionError("Mission cleanup has not failed")
+            if exit_request is None:
+                raise MissionTransitionError(
+                    "Mission has no pending terminal intent; retry its stop or cancel command"
+                )
+        return self._finalize_pending_exit(runtime, exit_request)
 
     def progress(
         self,
@@ -495,24 +544,40 @@ class MissionLifecycle:
             exit_request = runtime.pending_exit
             if exit_request is not None:
                 runtime.worker = None
-                runtime.pending_exit = None
                 self._publish_transition(exit_request.transition)
+                exit_request.transition = None
                 try:
-                    if exit_request.phase is MissionPhase.SUCCEEDED:
-                        self._complete_stopping(runtime, exit_request.result)
-                    elif exit_request.phase is MissionPhase.FAILED:
-                        self.fail(
-                            mission_id,
-                            exit_request.reason,
-                            retryable=exit_request.retryable,
-                        )
-                    else:
-                        self._cleanup_or_raise(runtime)
-                        self.engine.scheduler._after_terminal(
-                            mission_id, succeeded=False
-                        )
+                    self._finalize_pending_exit(runtime, exit_request)
                 except MissionCleanupError:
                     pass
+
+    def _finalize_pending_exit(
+        self,
+        runtime: MissionRuntime,
+        exit_request: _MissionExit,
+    ) -> MissionSnapshot:
+        self._join_worker(runtime)
+        self._cleanup_or_raise(runtime)
+        with self.engine._condition:
+            if runtime.pending_exit is exit_request:
+                runtime.pending_exit = None
+        if exit_request.phase is MissionPhase.SUCCEEDED:
+            snapshot = self._complete_stopping(
+                runtime,
+                exit_request.result,
+                cleanup=False,
+            )
+        elif exit_request.phase is MissionPhase.FAILED:
+            snapshot = self._finish_failure(
+                runtime,
+                exit_request.reason,
+                exit_request.retryable,
+                cleanup=False,
+            )
+        else:
+            self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
+            snapshot = runtime.snapshot
+        return snapshot
 
     def _finish_by_command(
         self,
@@ -594,6 +659,12 @@ class MissionLifecycle:
             self._cleanup_runtime(runtime)
         except Exception as exc:
             runtime.cleanup_error = exc
+            with self.engine._condition:
+                runtime.snapshot = runtime.snapshot.evolve(
+                    cleanup_pending=True,
+                    cleanup_error=str(exc),
+                )
+                self.engine._condition.notify_all()
             self.engine._emit(
                 MissionEventType.ERROR,
                 f"Mission cleanup failed: {exc}",
@@ -603,6 +674,12 @@ class MissionLifecycle:
                 f"Mission {runtime.mission.id} cleanup failed: {exc}"
             ) from exc
         runtime.cleanup_error = None
+        with self.engine._condition:
+            runtime.snapshot = runtime.snapshot.evolve(
+                cleanup_pending=False,
+                cleanup_error=None,
+            )
+            self.engine._condition.notify_all()
 
     def _transition_locked(
         self,

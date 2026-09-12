@@ -3,7 +3,9 @@
 from .abstracts import Model, Service
 from .dependency import (
     BaseDependencyContainer,
+    DependencyCleanupPendingError,
     DependencyContainer,
+    DependencyContainerClosedError,
     Inject,
     Lifetime,
     injection,
@@ -69,6 +71,8 @@ __all__ = [
     "CallbackTimeoutError",
     "DeliveryMode",
     "DependencyContainer",
+    "DependencyCleanupPendingError",
+    "DependencyContainerClosedError",
     "ErrorPolicy",
     "EventBus",
     "EventBusActions",

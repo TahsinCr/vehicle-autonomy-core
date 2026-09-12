@@ -16,7 +16,9 @@ T = TypeVar("T")
 @dataclass(frozen=True, slots=True)
 class HistoryWriterStats:
     submitted: int
-    completed: int
+    processed: int
+    persisted: int
+    failed_records: int
     queued: int
     batches: int
     failed: bool
@@ -49,7 +51,9 @@ class HistoryWriter(Generic[T]):
         self._queue: deque[T] = deque()
         self._busy = False
         self._submitted = 0
-        self._completed = 0
+        self._processed = 0
+        self._persisted = 0
+        self._failed_records = 0
         self._batches = 0
         self._closed = False
         self.failure: Exception | None = None
@@ -91,10 +95,14 @@ class HistoryWriter(Generic[T]):
             except BaseException as error:
                 with self._condition:
                     self.failure = error if isinstance(error, Exception) else RuntimeError(str(error))
+                    self._failed_records += len(records)
+            else:
+                with self._condition:
+                    self._persisted += len(records)
             finally:
                 with self._condition:
                     self._busy = False
-                    self._completed += len(records)
+                    self._processed += len(records)
                     self._batches += 1
                     self._condition.notify_all()
 
@@ -103,7 +111,9 @@ class HistoryWriter(Generic[T]):
         with self._condition:
             return HistoryWriterStats(
                 submitted=self._submitted,
-                completed=self._completed,
+                processed=self._processed,
+                persisted=self._persisted,
+                failed_records=self._failed_records,
                 queued=len(self._queue),
                 batches=self._batches,
                 failed=self.failure is not None,
@@ -112,7 +122,7 @@ class HistoryWriter(Generic[T]):
     def flush(self, timeout: float = 5.0) -> None:
         with self._condition:
             boundary = self._submitted
-            if not self._condition.wait_for(lambda: self._completed >= boundary, timeout):
+            if not self._condition.wait_for(lambda: self._processed >= boundary, timeout):
                 raise TimeoutError("History writer did not flush")
             if self.failure is not None:
                 raise RuntimeError("History recording failed") from self.failure
@@ -125,3 +135,7 @@ class HistoryWriter(Generic[T]):
         if self._thread.is_alive():
             raise TimeoutError("History writer did not stop")
         self.flush()
+
+    @property
+    def running(self) -> bool:
+        return self._thread.is_alive()

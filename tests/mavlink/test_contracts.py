@@ -227,6 +227,19 @@ class ConnectionTests(unittest.TestCase):
             },
         )
         self.assertEqual(connection.request_message_rate(33, 10.0), 100_000)
+        for message_id, frequency, system, component in (
+            (True, 10.0, None, None),
+            (33, True, None, None),
+            (33, 10.0, True, None),
+            (33, 10.0, None, False),
+        ):
+            with self.assertRaises(ValueError):
+                connection.request_message_rate(
+                    message_id,
+                    frequency,
+                    target_system=system,
+                    target_component=component,
+                )
         self.assertEqual(connection.call_raw("set_mode", "AUTO"), "AUTO")
         self.assertEqual(connection.sent_messages, 2)
         connection.stop()

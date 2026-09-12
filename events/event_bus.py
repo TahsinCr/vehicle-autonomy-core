@@ -414,7 +414,8 @@ class EventBus(BaseEventBus[T]):
             def cancel() -> None:
                 stopped.set()
                 with self._lock:
-                    self._schedules.pop(schedule_id, None)
+                    if not self._closed:
+                        self._schedules.pop(schedule_id, None)
 
             subscription = Subscription(schedule_id, cancel)
 
@@ -504,7 +505,7 @@ class EventBus(BaseEventBus[T]):
 
     def close(self) -> None:
         with self._condition:
-            if self._closed:
+            if self._closed and not self._schedules:
                 return
             self._closed = True
             subscriptions = tuple(
@@ -512,7 +513,6 @@ class EventBus(BaseEventBus[T]):
             )
             schedules = tuple(self._schedules.values())
             self._subscribers.clear()
-            self._schedules.clear()
             self._condition.notify_all()
         for subscription in subscriptions:
             subscription._deactivate()
@@ -525,6 +525,10 @@ class EventBus(BaseEventBus[T]):
                 thread.join(max(0.0, deadline - time.monotonic()))
                 if thread.is_alive():
                     pending.append(thread.name)
+        with self._lock:
+            for schedule_id, (_schedule, thread) in tuple(self._schedules.items()):
+                if not thread.is_alive():
+                    self._schedules.pop(schedule_id, None)
         if pending:
             raise EventShutdownTimeoutError(
                 "Periodic event schedules did not stop in time: " + ", ".join(pending)

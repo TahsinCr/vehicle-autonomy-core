@@ -21,3 +21,11 @@ class CircularDependencyError(DependencyResolutionError):
 
 class AsyncDependencyError(DependencyResolutionError):
     """Raised when an async resource is used through the synchronous API."""
+
+
+class DependencyCleanupPendingError(DependencyError):
+    """Raised when a token still owns a resource that could not be closed."""
+
+
+class DependencyContainerClosedError(DependencyError):
+    """Raised when an operation requires a container that has not shut down."""

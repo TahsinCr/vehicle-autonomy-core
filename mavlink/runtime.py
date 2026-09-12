@@ -180,11 +180,23 @@ class MavlinkRuntime(MavlinkActions, Service):
             history._check_open()
             if history in self._histories:
                 raise ValueError("History is already attached")
+            failed = False
+            attachment: dict[str, Subscription] = {}
+
             def record(envelope: MavlinkMessageEnvelope) -> None:
+                nonlocal failed
+                if failed:
+                    return
                 try:
                     history.append(envelope)
                 except Exception as error:
-                    self._publish_error("history", error)
+                    failed = True
+                    try:
+                        self._publish_error("history", error)
+                    finally:
+                        attached = attachment.get("subscription")
+                        if attached is not None:
+                            attached.cancel()
 
             source = self.router.envelopes.subscribe(record)
 
@@ -194,7 +206,10 @@ class MavlinkRuntime(MavlinkActions, Service):
                     self._histories.pop(history, None)
 
             subscription = Subscription(source.id, cancel)
+            attachment["subscription"] = subscription
             self._histories[history] = subscription
+            if failed:
+                subscription.cancel()
             return subscription
 
     def add_filter(self, predicate: MavlinkIngressFilter) -> Subscription:

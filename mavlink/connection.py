@@ -221,12 +221,26 @@ class MavlinkConnection(Service):
         command acceptance.
         """
 
-        normalized_message_id = int(message_id)
+        if isinstance(message_id, bool) or not isinstance(message_id, int):
+            raise ValueError("MAVLink message ID must be an integer")
+        if isinstance(frequency_hz, bool) or not isinstance(frequency_hz, (int, float)):
+            raise ValueError("MAVLink message frequency must be numeric")
+        normalized_message_id = message_id
         normalized_frequency = float(frequency_hz)
         if normalized_message_id < 0:
             raise ValueError("MAVLink mesaj kimliği negatif olamaz")
         if not 0.01 <= normalized_frequency <= 1_000.0:
             raise ValueError("MAVLink mesaj frekansı 0.01..1000 Hz aralığında olmalı")
+        for name, identifier in (
+            ("target_system", target_system),
+            ("target_component", target_component),
+        ):
+            if identifier is not None and (
+                isinstance(identifier, bool)
+                or not isinstance(identifier, int)
+                or not 0 <= identifier <= 255
+            ):
+                raise ValueError(f"{name} must be an integer from 0 to 255")
         interval_us = max(1, round(1_000_000.0 / normalized_frequency))
         mavlink = self.mavlink
         command = int(getattr(mavlink, "MAV_CMD_SET_MESSAGE_INTERVAL", 511))

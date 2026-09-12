@@ -49,6 +49,8 @@ class MissionSnapshot(Model):
     started_at: float | None = None
     updated_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    cleanup_pending: bool = False
+    cleanup_error: str | None = None
 
     def __post_init__(self) -> None:
         if self.mission_id <= 0:
@@ -58,6 +60,8 @@ class MissionSnapshot(Model):
             raise ValueError("Mission name cannot be empty")
         if self.generation < 0 or self.attempt < 0:
             raise ValueError("Mission generation and attempt cannot be negative")
+        if not isinstance(self.cleanup_pending, bool):
+            raise ValueError("Mission cleanup_pending must be a boolean")
         if not 0.0 <= float(self.progress) <= 1.0:
             raise ValueError("Mission progress must be between zero and one")
         object.__setattr__(self, "name", name)

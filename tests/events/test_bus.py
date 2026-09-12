@@ -242,6 +242,8 @@ class EventBusTests(unittest.TestCase):
         with self.assertRaises(EventShutdownTimeoutError):
             bus.close()
         release.set()
+        bus.close()
+        self.assertTrue(bus.closed)
 
     def test_history_capacity_shorthand_and_bus_query_tools(self) -> None:
         bus = EventBus[int](history=2)

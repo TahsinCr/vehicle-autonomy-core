@@ -31,7 +31,13 @@ from .registration import (
     T,
     Token,
 )
-from .errors import AsyncDependencyError, DependencyNotFoundError, DependencyResolutionError
+from .errors import (
+    AsyncDependencyError,
+    DependencyCleanupPendingError,
+    DependencyContainerClosedError,
+    DependencyNotFoundError,
+    DependencyResolutionError,
+)
 from .injection import injection, resolve_missing_kwargs, resolve_missing_kwargs_async
 from .lifecycle import (
     ResourceTracker,
@@ -55,6 +61,14 @@ _current_container: contextvars.ContextVar[DependencyContainer | None] = (
 )
 
 
+class _ShutdownAttempt:
+    __slots__ = ("done", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
 class DependencyContainer:
     """Synchronous and asynchronous dependency injection container."""
 
@@ -65,7 +79,11 @@ class DependencyContainer:
         "_async_operations",
         "_async_shutdown",
         "_providers",
+        "_pending_disposals",
         "_registration_lock",
+        "_closed",
+        "_shutdown_attempt",
+        "_shutdown_lock",
         "_scope_cache",
         "_scope_initializers",
         "_scope_lock",
@@ -82,12 +100,16 @@ class DependencyContainer:
         self.auto_wire = auto_wire
         self._providers: dict[Token, Provider] = {}
         self._registration_lock = threading.RLock()
+        self._pending_disposals: dict[Token, tuple[Any, ...]] = {}
         self._scope_cache: dict[Token, Any] = {}
         self._scope_lock = threading.RLock()
         self._scope_initializers: dict[Token, InitializationGate] = {}
         self._tracker = ResourceTracker()
         self._async_operations: dict[Token, asyncio.Task[None]] = {}
         self._async_shutdown: asyncio.Task[None] | None = None
+        self._closed = False
+        self._shutdown_attempt: _ShutdownAttempt | None = None
+        self._shutdown_lock = threading.Lock()
         self._context_tokens: list[
             contextvars.Token[DependencyContainer | None]
         ] = []
@@ -95,7 +117,55 @@ class DependencyContainer:
     def __contains__(self, token: Token) -> bool:
         return self.has(token)
 
+    @property
+    def closed(self) -> bool:
+        """Whether successful shutdown made this container terminal."""
+
+        with self._shutdown_lock:
+            return self._closed
+
+    def _ensure_open(self) -> None:
+        with self._shutdown_lock:
+            if self._closed:
+                raise DependencyContainerClosedError("Dependency container is closed")
+            if self._shutdown_attempt is not None:
+                raise DependencyContainerClosedError(
+                    "Dependency container is shutting down"
+                )
+
+    def _claim_shutdown(self, *, wait: bool = True) -> _ShutdownAttempt | None:
+        with self._registration_lock, self._shutdown_lock:
+            if self._closed:
+                return None
+            attempt = self._shutdown_attempt
+            if attempt is None:
+                attempt = _ShutdownAttempt()
+                self._shutdown_attempt = attempt
+                return attempt
+            if not wait:
+                raise DependencyResolutionError(
+                    "Dependency container shutdown is already in progress"
+                )
+        attempt.done.wait()
+        if attempt.error is not None:
+            raise attempt.error
+        return None
+
+    def _finish_shutdown(
+        self,
+        attempt: _ShutdownAttempt,
+        error: BaseException | None,
+    ) -> None:
+        with self._shutdown_lock:
+            attempt.error = error
+            if error is None:
+                self._closed = True
+            if self._shutdown_attempt is attempt:
+                self._shutdown_attempt = None
+            attempt.done.set()
+
     def __enter__(self) -> DependencyContainer:
+        self._ensure_open()
         self._context_tokens.append(_current_container.set(self))
         return self
 
@@ -106,6 +176,7 @@ class DependencyContainer:
             self._reset_current_container()
 
     async def __aenter__(self) -> DependencyContainer:
+        self._ensure_open()
         self._context_tokens.append(_current_container.set(self))
         return self
 
@@ -130,6 +201,7 @@ class DependencyContainer:
     ) -> DependencyContainer:
         """Register a class, factory, or ready instance for a token."""
 
+        self._ensure_open()
         registration = self._normalize_registration(
             token=token,
             provider=provider,
@@ -142,6 +214,11 @@ class DependencyContainer:
             priority=priority,
         )
         with self._registration_lock:
+            self._ensure_open()
+            if registration.token in self._pending_disposals:
+                raise DependencyCleanupPendingError(
+                    f"{format_token(registration.token)} still has pending cleanup"
+                )
             replacing = (
                 registration.token in self._providers
                 or registration.token in self._scope_cache
@@ -292,7 +369,10 @@ class DependencyContainer:
     def unregister(self, token: Token) -> None:
         """Unregister a token and synchronously dispose its cached resources."""
 
-        candidates = self._token_instances(token)
+        self._ensure_open()
+        with self._registration_lock:
+            pending = self._pending_disposals.get(token)
+        candidates = pending or self._token_instances(token)
         async_only = next(
             (item for item in candidates if requires_async_disposal(item)),
             None,
@@ -302,8 +382,8 @@ class DependencyContainer:
                 f"{format_token(type(async_only))} async kapanıyor; "
                 "unregister_async kullan."
             )
-        gates = self._retire_token(token)
-        candidates = self._token_instances(token)
+        gates = () if pending is not None else self._retire_token(token)
+        candidates = pending or self._token_instances(token)
         async_only = next(
             (item for item in candidates if requires_async_disposal(item)),
             None,
@@ -315,13 +395,26 @@ class DependencyContainer:
                 f"{format_token(type(async_only))} async kapanıyor; "
                 "unregister_async kullan."
             )
-        dispose_many(
-            self._detach_token_instances(token),
-            on_success=self._forget_disposed,
-            on_failure=self._tracker.release,
+        claimed = (
+            self._tracker.claim(self._tracker.ordered(pending))
+            if pending is not None
+            else self._detach_token_instances(token)
         )
+        try:
+            dispose_many(
+                claimed,
+                on_success=self._forget_disposed,
+                on_failure=self._tracker.release,
+            )
+        except BaseException:
+            self._retain_pending_disposal(token, claimed)
+            raise
+        else:
+            with self._registration_lock:
+                self._pending_disposals.pop(token, None)
 
     async def unregister_async(self, token: Token) -> None:
+        self._ensure_open()
         task = self._async_operations.get(token)
         if task is None:
             task = asyncio.create_task(self._unregister_async(token))
@@ -349,12 +442,15 @@ class DependencyContainer:
         return tuple(sorted(self._providers, key=format_token))
 
     def create_scope(self) -> DependencyContainer:
+        self._ensure_open()
         return DependencyContainer(parent=self, auto_wire=self.auto_wire)
 
     def resolve(self, token: Token) -> Any:
+        self._ensure_open()
         return self._resolve_provider(self._get_or_autowire_provider(token))
 
     async def resolve_async(self, token: Token) -> Any:
+        self._ensure_open()
         return await self._resolve_provider_async(self._get_or_autowire_provider(token))
 
     def build(
@@ -363,6 +459,7 @@ class DependencyContainer:
         *,
         dependencies: DependencyMap | None = None,
     ) -> T:
+        self._ensure_open()
         return self._call_factory(factory, normalize_dependencies(dependencies))
 
     async def build_async(
@@ -371,6 +468,7 @@ class DependencyContainer:
         *,
         dependencies: DependencyMap | None = None,
     ) -> T:
+        self._ensure_open()
         return await self._call_factory_async(factory, normalize_dependencies(dependencies))
 
     def warmup(
@@ -392,24 +490,36 @@ class DependencyContainer:
             await self.resolve_async(provider.token)
 
     def shutdown(self) -> None:
-        candidates = self._shutdown_instances()
-        async_only = next(
-            (item for item in candidates if requires_async_disposal(item)),
-            None,
-        )
-        if async_only is not None:
-            raise AsyncDependencyError(
-                f"{format_token(type(async_only))} async kapanıyor; "
-                "shutdown_async kullan."
+        attempt = self._claim_shutdown()
+        if attempt is None:
+            return
+        error: BaseException | None = None
+        try:
+            candidates = self._shutdown_instances()
+            async_only = next(
+                (item for item in candidates if requires_async_disposal(item)),
+                None,
             )
-        self._retire_all()
-        dispose_many(
-            self._detach_shutdown_instances(),
-            on_success=self._forget_disposed,
-            on_failure=self._tracker.release,
-        )
+            if async_only is not None:
+                raise AsyncDependencyError(
+                    f"{format_token(type(async_only))} async kapanıyor; "
+                    "shutdown_async kullan."
+                )
+            self._retire_all()
+            dispose_many(
+                self._detach_shutdown_instances(),
+                on_success=self._forget_disposed,
+                on_failure=self._tracker.release,
+            )
+        except BaseException as failure:
+            error = failure
+            raise
+        finally:
+            self._finish_shutdown(attempt, error)
 
     async def shutdown_async(self) -> None:
+        if self._closed:
+            return
         task = self._async_shutdown
         if task is None:
             task = asyncio.create_task(self._shutdown_async())
@@ -429,39 +539,64 @@ class DependencyContainer:
 
     async def _unregister_async(self, token: Token) -> None:
         cancelled = False
+        with self._registration_lock:
+            pending = self._pending_disposals.get(token)
         try:
-            await self._retire_token_async(token)
+            if pending is None:
+                await self._retire_token_async(token)
         except asyncio.CancelledError:
             cancelled = True
             await self._retire_token_async(token)
         try:
+            claimed = (
+                self._tracker.claim(self._tracker.ordered(pending))
+                if pending is not None
+                else self._detach_token_instances(token)
+            )
             await dispose_many_async(
-                self._detach_token_instances(token),
+                claimed,
                 on_success=self._forget_disposed,
                 on_failure=self._tracker.release,
             )
         except asyncio.CancelledError:
             cancelled = True
+            self._retain_pending_disposal(token, claimed)
+        except BaseException:
+            self._retain_pending_disposal(token, claimed)
+            raise
+        else:
+            with self._registration_lock:
+                self._pending_disposals.pop(token, None)
         if cancelled:
             raise asyncio.CancelledError
 
     async def _shutdown_async(self) -> None:
+        attempt = self._claim_shutdown(wait=False)
+        if attempt is None:
+            return
         cancelled = False
+        failure: BaseException | None = None
         try:
-            await self._retire_all_async()
-        except asyncio.CancelledError:
-            cancelled = True
-            await self._retire_all_async()
-        try:
-            await dispose_many_async(
-                self._detach_shutdown_instances(),
-                on_success=self._forget_disposed,
-                on_failure=self._tracker.release,
-            )
-        except asyncio.CancelledError:
-            cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError
+            try:
+                await self._retire_all_async()
+            except asyncio.CancelledError:
+                cancelled = True
+                await self._retire_all_async()
+            try:
+                await dispose_many_async(
+                    self._detach_shutdown_instances(),
+                    on_success=self._forget_disposed,
+                    on_failure=self._tracker.release,
+                )
+            except asyncio.CancelledError:
+                cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            self._finish_shutdown(attempt, failure)
 
     def _normalize_registration(
         self,
@@ -803,6 +938,23 @@ class DependencyContainer:
 
     def _forget_disposed(self, instance: Any) -> None:
         self._tracker.forget((instance,))
+
+    def _retain_pending_disposal(
+        self,
+        token: Token,
+        candidates: Iterable[Any],
+    ) -> None:
+        owned = {id(instance): instance for instance in self._tracker.resources()}
+        remaining = tuple(
+            owned[id(instance)]
+            for instance in candidates
+            if id(instance) in owned
+        )
+        with self._registration_lock:
+            if remaining:
+                self._pending_disposals[token] = remaining
+            else:
+                self._pending_disposals.pop(token, None)
 
     def _shutdown_instances(self) -> tuple[Any, ...]:
         candidates = list(self._scope_cache.values())

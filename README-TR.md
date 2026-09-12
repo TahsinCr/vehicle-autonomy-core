@@ -39,6 +39,18 @@ Core bilinçli olarak şunları içermez:
 Pratik sınır şudur: aracın somut görevini bilen kod araç uygulamasında; tekrar
 kullanılabilen koordinasyon ve taşıma mekanizmaları core'da yer alır.
 
+## Dokümantasyon
+
+Kütüphanenin kapsamlı Türkçe dokümantasyonu
+[`docs/tr/`](docs/tr/README.md) altında bulunur.
+[Başlangıç](docs/tr/getting-started.md),
+[dependency injection](docs/tr/dependency.md), [event](docs/tr/events.md),
+[mission](docs/tr/mission.md), [MAVLink](docs/tr/mavlink.md) ve
+[uygulama protokolü](docs/tr/application-protocol.md) rehberleri doğrudan
+kullanılabilir örnekler içerir. Desteklenen dışa aktarımların tamamı
+[public API indeksinde](docs/tr/api-reference.md) listelenir. Her sayfadan aynı
+konunun İngilizce karşılığına doğrudan geçilebilir.
+
 ## Mimari
 
 ```text
@@ -341,6 +353,11 @@ sonraki `shutdown()`/`shutdown_async()` yalnızca başarıyla kapanmayan kaynakl
 yeniden dener. Dependency döngüleri hem thread'ler hem de bağımsız asyncio
 task'ları arasında yakalanır. Eşzamanlı cleanup yolları kullanıcı kodunu
 çağırmadan önce kaynağı sahiplenir; aynı instance iki kez kapatılmaz.
+
+Unregister cleanup başarısız olursa token ayrılmış durumda kalır ve cleanup
+başarana kadar yeniden kaydedilemez. Eşzamanlı senkron shutdown çağrıları aynı
+sonucu bekler. Başarılı shutdown terminaldir; `container.closed` true olur ve
+sonraki kayıt veya resolution `DependencyContainerClosedError` verir.
 
 Uygulamaya ait composition root için `BaseDependencyContainer` sınıfından
 miras alıp kayıtları `configure()` içinde tutabilirsiniz.
@@ -771,8 +788,9 @@ komutu verebilir.
 `start()`/`tick()` içinden `complete()` veya `fail()` çağrılırsa callback hemen
 sonlanır; terminal durum ve kaynak bırakma stack açıldıktan sonra yapılır.
 `stop()` hata verirse mission `STOPPING` durumunda ve resource sahibi olarak
-kalır; `MissionCleanupError` cleanup'ın tamamlanmadığını bildirir. Alttaki sorun
-çözüldükten sonra lifecycle işlemi yeniden çağrılabilir. Cleanup başarılı
+kalır; `MissionCleanupError` cleanup'ın tamamlanmadığını bildirir. Callback'in
+terminal niyeti, result ve retry bilgisi korunur; sorun çözüldükten sonra
+`engine.retry_cleanup(mission)` çağrılır. Cleanup başarılı
 olmadan resource başka bir mission'a verilmez. Terminal mission'lar yeni
 checkpoint kabul etmez ve checkpoint event adını aynı isimli value ezemez.
 Paralel aşama sonucu grubu `node` ile tanımlar ve bitiş sırasına bağlı bir
@@ -920,8 +938,8 @@ yeni eşleşen N kaydı seçer. `clear()` bütün kayıtları siler. Mesajlar JS
 uyumlu `to_dict()` sağlamalıdır. MAVLink'in sonlu olmayan float sentinel
 değerleri (`NaN`, pozitif ve negatif sonsuzluk) JSON `null` olarak saklanır;
 canlı mesaj nesnesi değiştirilmez.
-`history.writer_stats` gönderilen, tamamlanan, kuyruktaki kayıt ve batch
-sayılarını verir. WAL opsiyoneldir; çıkarılabilir depolama ve salt-okunur
+`history.writer_stats` gönderilen, işlenen, kalıcı yazılan, başarısız, kuyruktaki
+kayıt ve batch sayılarını ayırır. WAL opsiyoneldir; çıkarılabilir depolama ve salt-okunur
 senaryolar SQLite'ın varsayılan journal modunu koruyabilir.
 Bellekte son N sorgusu yeterli eşleşmeyi bulunca durur; eşleşme yoksa tüm
 geçmiş taranabilir. SQLite filtre ve limiti SQL içinde uygular. Kaynak ID'leri
@@ -931,8 +949,9 @@ boş bırakılamaz.
 `add_history` iki modda da senkrondur; çalışma sırasında eklenebilir ve yalnızca
 sonraki trafiği kaydeder. Dönen abonelik iptal edilebilir. Runtime kapanırken
 kayıt ayrılır; depolamayı kapatmak uygulamanın sorumluluğudur. Başka backend
-için `MessageHistory` sınıfından türetilebilir. Kayıt hataları runtime'a
-`history` kaynağıyla bildirilir. SQLite JSON dönüşümü ve toplu commit'ler
+için `MessageHistory` sınıfından türetilebilir. Kalıcı kayıt hatası runtime'a
+`history` kaynağıyla bir kez bildirilir ve error storm oluşmaması için history
+canlı trafikten ayrılır. SQLite JSON dönüşümü ve toplu commit'ler
 ayrı yazıcı thread'indedir. `queue_capacity=1024` bekleyen mesajları sınırlar;
 `batch_size=64` ve `flush_interval=0.02` transaction gruplamasını ayarlar.
 Taşmada yeni kayıt reddedilir

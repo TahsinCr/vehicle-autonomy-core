@@ -593,6 +593,60 @@ class MissionEngineLifecycleTests(unittest.TestCase):
             mission.cleanup_fails = False
             engine.close()
 
+    def test_callback_completion_intent_survives_cleanup_failure(self) -> None:
+        class CompletingWithBrokenCleanup(Mission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_fails = True
+
+            def start(self) -> None:
+                self.complete({"target": 5})
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+
+        mission = CompletingWithBrokenCleanup()
+        self.engine.launch(mission)
+        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
+        pending = self.engine.snapshot(mission)
+        self.assertTrue(pending.cleanup_pending)
+        self.assertEqual(pending.cleanup_error, "cleanup blocked")
+
+        mission.cleanup_fails = False
+        completed = self.engine.retry_cleanup(mission)
+        self.assertEqual(completed.phase, MissionPhase.SUCCEEDED)
+        self.assertEqual(completed.result, {"target": 5})
+        self.assertFalse(completed.cleanup_pending)
+        self.assertIsNone(completed.cleanup_error)
+
+    def test_callback_failure_retry_intent_survives_cleanup_failure(self) -> None:
+        class FailingWithBrokenCleanup(Mission):
+            retry = MissionRetryPolicy(attempts=2)
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.starts = 0
+                self.cleanup_fails = True
+
+            def start(self) -> None:
+                self.starts += 1
+                if self.starts == 1:
+                    self.fail("tracking lost", retryable=True)
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+
+        mission = FailingWithBrokenCleanup()
+        self.engine.launch(mission)
+        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
+        mission.cleanup_fails = False
+        queued = self.engine.retry_cleanup(mission)
+        self.assertEqual(queued.phase, MissionPhase.QUEUED)
+        wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
+        self.assertEqual(mission.starts, 2)
+
     def test_swallowed_internal_exit_still_finalizes_mission(self) -> None:
         class DefensiveMission(Mission):
             def start(self) -> None:

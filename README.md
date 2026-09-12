@@ -41,6 +41,17 @@ A useful boundary is: code that knows the vehicle's concrete task belongs in
 the vehicle application; reusable coordination and transport mechanisms belong
 here.
 
+## Documentation
+
+The complete English library guide is available in [`docs/en/`](docs/en/README.md).
+Start with [Getting started](docs/en/getting-started.md), then use the module
+guides for [dependency injection](docs/en/dependency.md),
+[events](docs/en/events.md), [missions](docs/en/mission.md),
+[MAVLink](docs/en/mavlink.md) and the
+[application protocol](docs/en/application-protocol.md). The
+[public API index](docs/en/api-reference.md) lists every supported export. Each
+page links directly to its Turkish counterpart.
+
 ## Architecture
 
 ```text
@@ -345,6 +356,12 @@ only the resources that did not close successfully. Dependency cycles are
 detected across both threads and independent asyncio tasks. Concurrent cleanup
 paths claim each resource before calling user code, so the same instance cannot
 be closed twice.
+
+If unregister cleanup fails, the token stays reserved and cannot be registered
+again until cleanup succeeds. Concurrent synchronous shutdown callers wait for
+the same result. Successful shutdown is terminal; `container.closed` becomes
+true and later registration or resolution raises
+`DependencyContainerClosedError`.
 
 For a project-owned composition root, subclass `BaseDependencyContainer` and
 put registrations in `configure()`.
@@ -769,9 +786,10 @@ run outside the engine state lock and may issue another lifecycle command.
 Calling `complete()` or `fail()` inside `start()`/`tick()` ends that callback
 immediately; terminal state and resource release occur only after it unwinds.
 If `stop()` raises, the mission remains `STOPPING`, its resources remain owned,
-and `MissionCleanupError` reports the incomplete cleanup. Call the lifecycle
-operation again after resolving the underlying problem; the engine never makes
-the resource available to another mission before cleanup succeeds. Terminal
+and `MissionCleanupError` reports the incomplete cleanup. Callback-driven
+terminal intent—including result and retryability—is retained; call
+`engine.retry_cleanup(mission)` after resolving the cause. The engine never
+makes the resource available to another mission before cleanup succeeds. Terminal
 missions reject new checkpoints, and checkpoint event names cannot be replaced
 by a value with the same key.
 Parallel stage results identify their group through `node` and carry
@@ -999,7 +1017,8 @@ and ordered, and message types cannot be empty.
 Messages must implement JSON-compatible `to_dict()`. MAVLink non-finite float
 sentinels (`NaN`, positive infinity and negative infinity) are stored as JSON
 `null`; the live message object is not modified.
-`history.writer_stats` reports submitted, completed, queued and batch counts.
+`history.writer_stats` distinguishes submitted, processed, persisted, failed
+record, queued and batch counts.
 WAL remains opt-in because removable storage and read-only workflows may prefer
 SQLite's default journal mode.
 
@@ -1007,7 +1026,8 @@ SQLite's default journal mode.
 returns a cancellable subscription. Runtime close detaches it; the application
 owns storage and closes it after runtime shutdown. Subclass `MessageHistory`
 for another backend. Storage errors are reported with runtime error source
-`history`. SQLite JSON encoding and batched commits run on a dedicated bounded
+`history` once; a permanently failed history is detached from live traffic to
+avoid an error storm. SQLite JSON encoding and batched commits run on a dedicated bounded
 writer, not the receive thread. `queue_capacity=1024` limits pending messages;
 `batch_size=64` and `flush_interval=0.02` tune transaction batching. Queue
 overflow rejects the

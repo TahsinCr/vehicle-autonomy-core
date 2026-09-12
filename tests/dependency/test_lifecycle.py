@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from src.core.dependency import (
     AsyncDependencyError,
+    DependencyCleanupPendingError,
     DependencyContainer,
+    DependencyContainerClosedError,
     get_current_container,
     set_default_container,
 )
@@ -73,14 +75,58 @@ class DependencyLifecycleTests(unittest.TestCase):
         container = DependencyContainer()
         container.instance("resource", resource)
         first = threading.Thread(target=container.shutdown)
-        second = threading.Thread(target=container.shutdown)
+        second_done = threading.Event()
+        second = threading.Thread(
+            target=lambda: (container.shutdown(), second_done.set())
+        )
         first.start()
         self.assertTrue(entered.wait(1.0))
         second.start()
-        second.join(1.0)
+        self.assertFalse(second_done.wait(0.02))
         release.set()
         first.join(1.0)
+        second.join(1.0)
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_done.is_set())
         self.assertEqual(resource.calls, 1)
+
+    def test_concurrent_shutdown_callers_receive_the_same_failure(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Resource:
+            fail = True
+
+            def close(self) -> None:
+                entered.set()
+                release.wait(1.0)
+                if self.fail:
+                    raise RuntimeError("cleanup failed")
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance("resource", resource)
+        errors: list[str] = []
+
+        def shutdown() -> None:
+            try:
+                container.shutdown()
+            except RuntimeError as error:
+                errors.append(str(error))
+
+        first = threading.Thread(target=shutdown)
+        second = threading.Thread(target=shutdown)
+        first.start()
+        self.assertTrue(entered.wait(1.0))
+        second.start()
+        release.set()
+        first.join(1.0)
+        second.join(1.0)
+        self.assertEqual(errors, ["cleanup failed", "cleanup failed"])
+
+        resource.fail = False
+        container.shutdown()
+        self.assertTrue(container.closed)
 
     def setUp(self) -> None:
         self.default = DependencyContainer()
@@ -225,10 +271,27 @@ class DependencyLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cannot close retry"):
             container.unregister("resource")
         self.assertFalse(container.has("resource"))
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.instance("resource", object())
 
         resource.fail = False
-        container.shutdown()
+        container.unregister("resource")
         self.assertEqual(resource.close_count, 2)
+
+    def test_successful_shutdown_is_terminal_for_all_lifetimes(self) -> None:
+        container = DependencyContainer()
+        container.transient("transient", object)
+        container.scoped("scoped", object)
+        container.singleton("singleton", object)
+        container.resolve("singleton")
+        container.shutdown()
+
+        self.assertTrue(container.closed)
+        for token in ("transient", "scoped", "singleton"):
+            with self.assertRaises(DependencyContainerClosedError):
+                container.resolve(token)
+        with self.assertRaises(DependencyContainerClosedError):
+            container.instance("new", object())
 
     def test_scoped_resolution_is_singleton_per_scope_across_threads(self) -> None:
         created = 0
@@ -327,6 +390,20 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(closed, ["resource"])
         self.assertEqual(resource.close_count, 1)
+
+    async def test_failed_async_unregister_reserves_token_until_retry(self) -> None:
+        resource = _AsyncResource("async", [], fail=True)
+        container = DependencyContainer()
+        container.instance("resource", resource)
+
+        with self.assertRaisesRegex(RuntimeError, "cannot close async"):
+            await container.unregister_async("resource")
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.instance("resource", object())
+
+        resource.fail = False
+        await container.unregister_async("resource")
+        self.assertEqual(resource.close_count, 2)
 
     async def test_async_shutdown_aggregates_errors_and_continues(self) -> None:
         closed: list[str] = []
