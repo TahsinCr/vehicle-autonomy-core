@@ -9,11 +9,23 @@ from typing import TYPE_CHECKING, Any
 
 from .controller import MissionController
 from .execution import MissionExecutionContext
-from .models import MissionSnapshot
+from .enums import MissionPhase
+from .models import MissionSnapshot, MissionTransition
 
 if TYPE_CHECKING:
     from .base import Mission
     from .engine import MissionEngine
+
+
+@dataclass(slots=True)
+class PendingTerminalIntent:
+    """Terminal result retained until cleanup and transition commit succeed."""
+
+    phase: MissionPhase
+    result: Mapping[str, Any] | None = None
+    reason: str = ""
+    retryable: bool = False
+    transition: MissionTransition | None = None
 
 
 @dataclass(slots=True)
@@ -36,7 +48,7 @@ class MissionRuntime:
     execution_node: str | None = None
     activation_guard: Callable[[], bool] | None = None
     cleanup_error: Exception | None = None
-    pending_exit: Any | None = None
+    pending_terminal: PendingTerminalIntent | None = None
 
 
 class BoundMissionController(MissionController):

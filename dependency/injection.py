@@ -13,7 +13,7 @@ from .annotations import (
     ensure_hashable_token,
     marker_from_annotation,
     merge_dependencies,
-    safe_type_hints,
+    resolve_type_hints,
     token_from_annotation,
 )
 from .registration import DependencyMap, Inject, MISSING, T, Token
@@ -233,7 +233,7 @@ def get_injection_plan(
     # Local classes used only in postponed annotations are not recoverable via
     # get_type_hints(). Keep the raw annotation as a token so strict mode can
     # report its exact unresolved name instead of hiding the parameter.
-    hints = safe_type_hints(func)
+    hints = resolve_type_hints(func)
     dependencies = dict(dependency_items_)
     candidates: list[InjectCandidate] = []
     used: set[str] = set()

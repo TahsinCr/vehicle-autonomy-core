@@ -116,9 +116,11 @@ optional `requester_id` and `reason`. `complete`, `fail`, `progress` and
 tags=(), resources=())` allows a running mission to affect lower-authority work
 without knowing concrete mission IDs.
 
-If callback-driven completion or failure cannot clean up, the original terminal
-phase, result, reason and retryability remain pending. After fixing the cause,
-`retry_cleanup(reference)` retries cleanup and completes that original intent.
+If completion, failure or an uncaught worker error cannot clean up, the original
+terminal phase, result, reason and retryability remain pending. This applies to
+callback-driven and external lifecycle calls. Competing stop/cancel calls are
+rejected while that outcome is pending. After fixing the cause,
+`retry_cleanup(reference)` retries cleanup and commits the original intent.
 
 Only an active running requester may control another mission. Lower numeric
 priority carries greater authority.

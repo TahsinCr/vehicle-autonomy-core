@@ -87,8 +87,10 @@ Lifecycle: `pause`, `resume`, `stop_mission`, `cancel` requester/reason alır;
 `stop_matching(requester_id, tags=(), resources=())`, aktif requester'ın somut
 ID bilmeden düşük yetkili işi durdurmasını sağlar.
 
-Callback içinden istenen başarı veya hata sırasında cleanup tamamlanamazsa
-orijinal terminal phase, result, reason ve retry bilgisi korunur. Neden
+Completion, failure veya yakalanmamış worker hatası sırasında cleanup
+tamamlanamazsa orijinal terminal phase, result, reason ve retry bilgisi korunur.
+Bu davranış callback içinden ve dışarıdan verilen lifecycle çağrıları için
+geçerlidir. Sonuç beklerken rakip stop/cancel çağrıları reddedilir. Neden
 giderildikten sonra `retry_cleanup(reference)` cleanup'ı ve aynı terminal
 niyeti yeniden yürütür.
 

@@ -5,7 +5,6 @@ import queue
 import threading
 import time
 import unittest
-from dataclasses import dataclass
 from typing import Any
 
 from src.core.mavlink.connection import MavlinkConnection

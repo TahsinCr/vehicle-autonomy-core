@@ -647,6 +647,87 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
         self.assertEqual(mission.starts, 2)
 
+    def test_uncaught_exception_intent_survives_cleanup_failure(self) -> None:
+        class RaisingWithBrokenCleanup(Mission):
+            retry = MissionRetryPolicy(attempts=2)
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.starts = 0
+                self.cleanup_fails = True
+
+            def start(self) -> None:
+                self.starts += 1
+                if self.starts == 1:
+                    raise RuntimeError("pipeline failed")
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+
+        mission = RaisingWithBrokenCleanup()
+        self.engine.launch(mission)
+        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
+        self.assertTrue(self.engine.snapshot(mission).cleanup_pending)
+
+        mission.cleanup_fails = False
+        queued = self.engine.retry_cleanup(mission)
+        self.assertEqual(queued.phase, MissionPhase.QUEUED)
+        wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
+        self.assertEqual(mission.starts, 2)
+
+    def test_external_completion_intent_survives_cleanup_failure(self) -> None:
+        class BrokenCleanupMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_fails = True
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+                super().stop()
+
+        mission = BrokenCleanupMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.started.wait(1.0))
+        with self.assertRaises(MissionCleanupError):
+            self.engine.complete(mission, {"target": 7})
+
+        with self.assertRaises(MissionTransitionError):
+            self.engine.stop_mission(mission)
+        with self.assertRaises(MissionTransitionError):
+            self.engine.cancel(mission)
+
+        mission.cleanup_fails = False
+        completed = self.engine.retry_cleanup(mission)
+        self.assertEqual(completed.phase, MissionPhase.SUCCEEDED)
+        self.assertEqual(completed.result, {"target": 7})
+
+    def test_external_failure_retry_intent_survives_cleanup_failure(self) -> None:
+        class BrokenCleanupMission(BlockingMission):
+            retry = MissionRetryPolicy(attempts=2)
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_fails = True
+
+            def stop(self) -> None:
+                if self.cleanup_fails:
+                    raise RuntimeError("cleanup blocked")
+                super().stop()
+
+        mission = BrokenCleanupMission()
+        self.engine.launch(mission)
+        self.assertTrue(mission.started.wait(1.0))
+        with self.assertRaises(MissionCleanupError):
+            self.engine.fail(mission, "link lost", retryable=True)
+
+        mission.cleanup_fails = False
+        queued = self.engine.retry_cleanup(mission)
+        self.assertEqual(queued.phase, MissionPhase.QUEUED)
+        wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
+        self.assertEqual(self.engine.snapshot(mission).attempt, 2)
+
     def test_swallowed_internal_exit_still_finalizes_mission(self) -> None:
         class DefensiveMission(Mission):
             def start(self) -> None:

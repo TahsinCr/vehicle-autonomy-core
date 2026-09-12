@@ -355,9 +355,13 @@ task'ları arasında yakalanır. Eşzamanlı cleanup yolları kullanıcı kodunu
 çağırmadan önce kaynağı sahiplenir; aynı instance iki kez kapatılmaz.
 
 Unregister cleanup başarısız olursa token ayrılmış durumda kalır ve cleanup
-başarana kadar yeniden kaydedilemez. Eşzamanlı senkron shutdown çağrıları aynı
-sonucu bekler. Başarılı shutdown terminaldir; `container.closed` true olur ve
-sonraki kayıt veya resolution `DependencyContainerClosedError` verir.
+başarana kadar yeniden kaydedilemez. Eşzamanlı unregister ve shutdown çağrıları
+ortak cleanup sonucunu bekler. Container genelindeki başarısız cleanup
+`container.cleanup_pending` değerini ayarlar; shutdown başarıyla yeniden
+denenene kadar normal kullanım engellenir. Parent shutdown başladıktan sonra
+child scope parent provider'larına dönemez. Başarılı shutdown terminaldir;
+`container.closed` true olur ve sonraki kayıt veya resolution
+`DependencyContainerClosedError` verir.
 
 Uygulamaya ait composition root için `BaseDependencyContainer` sınıfından
 miras alıp kayıtları `configure()` içinde tutabilirsiniz.
@@ -788,8 +792,9 @@ komutu verebilir.
 `start()`/`tick()` içinden `complete()` veya `fail()` çağrılırsa callback hemen
 sonlanır; terminal durum ve kaynak bırakma stack açıldıktan sonra yapılır.
 `stop()` hata verirse mission `STOPPING` durumunda ve resource sahibi olarak
-kalır; `MissionCleanupError` cleanup'ın tamamlanmadığını bildirir. Callback'in
-terminal niyeti, result ve retry bilgisi korunur; sorun çözüldükten sonra
+kalır; `MissionCleanupError` cleanup'ın tamamlanmadığını bildirir. Dışarıdan
+verilen completion/failure ve yakalanmamış worker hataları dahil terminal niyeti,
+result ve retry bilgisi korunur; rakip stop/cancel çağrıları reddedilir. Sorun çözüldükten sonra
 `engine.retry_cleanup(mission)` çağrılır. Cleanup başarılı
 olmadan resource başka bir mission'a verilmez. Terminal mission'lar yeni
 checkpoint kabul etmez ve checkpoint event adını aynı isimli value ezemez.
@@ -1402,6 +1407,22 @@ python -m unittest discover -v
 python -m compileall -q .
 ```
 
+Opsiyonel kalite araçlarını kurup CI ile aynı statik ve coverage kontrollerini
+çalıştırabilirsiniz:
+
+```bash
+python -m pip install -e ".[quality]"
+ruff check .
+pyright
+coverage run run_tests.py
+coverage report
+python run_stress_tests.py --repeats 25
+```
+
+Coverage branch'leri de ölçer ve şu anda en az %82 ister. Stress runner;
+mission, dependency, event ve MAVLink yaşam döngüsündeki en riskli yarışları
+her turda yeni test nesneleriyle tekrarlar.
+
 Geliştirme sırasında tek paket çalıştırılabilir:
 
 ```bash
@@ -1437,6 +1458,8 @@ asenkron event, dependency, MAVLink ve mission yollarını ölçer:
 ```bash
 python run_benchmarks.py --quick
 python run_benchmarks.py --json > benchmark.json
+python run_benchmarks.py --quick --compare benchmark.json
+python run_benchmarks.py --load-profile normal --load-storage sqlite
 ```
 
 Sonuçlar genel yapılardan alana özel işlemlere doğru sıralanır. Beş zamanlı
@@ -1444,6 +1467,13 @@ Sonuçlar genel yapılardan alana özel işlemlere doğru sıralanır. Beş zama
 oran, işlem başına kalıcı bellek ve tek işlemin tepe bellek değeri verir.
 Mutlak süreler sisteme göre değişir; regresyon karşılaştırmasını aynı donanım
 ve Python sürümüyle yapmak gerekir.
+
+Karşılaştırma komutu işlemleri sabit kategori/isim üzerinden eşleştirir ve
+varsayılan olarak suite geneline kalibre maliyetteki %40 üzeri gerilemeyi reddeder. Birleşik yük
+profilleri throughput, p50/p95/p99 dispatch gecikmesi, mesaj başına CPU/bellek,
+writer kuyruk baskısı, başarısız kayıt ve thread artışını raporlar. `normal`,
+`medium`, `heavy` ve `stress` profilleri yazılım regresyon ölçümüdür; uçuş veya
+hard-real-time garantisi değildir.
 
 ## Katkı
 

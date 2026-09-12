@@ -56,7 +56,9 @@ def infer_token_from_factory(factory: Any) -> Token | None:
         ensure_hashable_token(token)
         return token
     if callable(factory):
-        annotation = safe_type_hints(factory).get("return", inspect.Signature.empty)
+        annotation = resolve_type_hints(factory, strict=True).get(
+            "return", inspect.Signature.empty
+        )
         annotation_token = token_from_annotation(annotation)
         if annotation_token is not None:
             ensure_hashable_token(annotation_token.token)
@@ -148,7 +150,13 @@ def unwrap_optional_annotation(annotation: Any) -> tuple[Any, bool]:
 
 
 @functools.lru_cache(maxsize=4096)
-def safe_type_hints(func: Callable[..., Any]) -> Mapping[str, Any]:
+def resolve_type_hints(
+    func: Callable[..., Any],
+    *,
+    strict: bool = False,
+) -> Mapping[str, Any]:
+    """Resolve annotations, optionally surfacing invalid forward references."""
+
     target = func
     if inspect.isclass(func):
         target = func.__init__
@@ -156,5 +164,10 @@ def safe_type_hints(func: Callable[..., Any]) -> Mapping[str, Any]:
         target = getattr(func, "__call__", func)
     try:
         return get_type_hints(target, include_extras=True)
-    except Exception:
+    except Exception as error:
+        if strict:
+            name = getattr(func, "__qualname__", repr(func))
+            raise DependencyResolutionError(
+                f"{name} type annotations could not be resolved: {error}"
+            ) from error
         return {}

@@ -87,6 +87,23 @@ Syntax/import derlemesini doğrulayın:
 python -m compileall -q .
 ```
 
+Geliştirme kalite kapılarını kurup çalıştırın:
+
+```bash
+python -m pip install -e ".[quality]"
+ruff check .
+pyright
+coverage run run_tests.py
+coverage report
+python run_stress_tests.py --repeats 25
+```
+
+Coverage branch kararlarını da ölçer ve proje genelinde %82 taban sınırı
+uygular. Pyright ilk aşamada production modüllerindeki kesin isim ve kontrol
+akışı hatalarını denetler; bu kademeli başlangıç dinamik provider/callback
+yapılarını geniş cast'lerle gizlemez. Stress runner seçilen concurrency
+regresyonlarını her turda yeni suite ile tekrarlar.
+
 CI matrisi desteklenen Python sürümlerini çalıştırır ve wheel üretir. Testler
 hem bağımsız checkout'u hem amaçlanan `src/core` submodule yerleşimini kapsar.
 
@@ -94,6 +111,9 @@ hem bağımsız checkout'u hem amaçlanan `src/core` submodule yerleşimini kaps
 
 ```bash
 python run_benchmarks.py
+python run_benchmarks.py --quick --json > benchmark.json
+python run_benchmarks.py --quick --compare benchmark.json
+python run_benchmarks.py --load-profile normal --load-storage sqlite
 ```
 
 Benchmark; wall time, CPU time, işlem başına tutulan byte ve geçici peak
@@ -104,6 +124,24 @@ mission işlemlerini kapsar.
 Bu değerler karşılaştırma içindir; hard real-time garantisi değildir. Aynı
 interpreter, CPU governor ve sistem yüküyle karşılaştırma yapın. Başka bir
 makinenin sabit mikrosaniye eşiği yerine oranlara ve dağılım eğilimine bakın.
+
+`--compare`, sabit işlem adlarını eşleştirir ve
+`--max-regression-percent` değiştirilmezse önce suite genelindeki sistem hızı
+farkını kalibre eder, sonra işleme özel maliyetteki %40 üzeri artışı
+reddeder. Regresyonun hem wall hem CPU zamanında görülmesi gerekir; bu,
+tutarlı kod yolu yavaşlamasını saklamadan runner scheduling gürültüsünü
+süzer. Paylaşımlı CI işlemci tahsisi değişken olduğu için CI %60 tolerans,
+kontrollü yerel çalıştırma ise daha sıkı %40 varsayılanını kullanır.
+Birleşik profiller (`normal`, `medium`, `heavy`, `stress`); routing,
+çoklu araç state'i, birden fazla callback ve background memory/SQLite kaydını
+aynı anda çalıştırır. Throughput, p50/p95/p99 gecikme, mesaj başına CPU ve
+bellek, writer baskısı, başarısız kayıt ve thread artışı raporlanır.
+
+Production kurulumlarında beklenen kaynak sayısı ölçüldükten sonra sonlu
+`state_capacity` ve `source_capacity` değerleri açıkça verilmelidir. Geçerli
+state'i sessizce çıkarmak her ortamda daha güvenli olmadığı için genel varsayılan
+`None` kalır. Dispatcher'da `workers=1` de sıralı varsayılandır; yalnız bağımsız
+ve thread-safe handler'lar için artırılmalıdır.
 
 ## Donanım ve entegrasyon doğrulaması
 

@@ -24,10 +24,11 @@ cleanup claims each instance once, preventing double-close.
 
 A failed unregister leaves the token in cleanup-pending state. The same token
 cannot be registered again until `unregister()` or `unregister_async()` closes
-the old resource successfully. Concurrent synchronous shutdown callers wait
-for the same cleanup result. Successful shutdown is terminal: `closed` becomes
-true and later registration, resolution, construction or scope creation raises
-`DependencyContainerClosedError`.
+the old resource successfully. Concurrent unregister callers share one disposal
+attempt. A failed container-wide cleanup sets `cleanup_pending`; registration,
+resolution and new scopes remain blocked until shutdown completes the remaining
+cleanup. Successful shutdown is terminal. A child scope also stops resolving
+fallback providers as soon as its parent starts shutting down.
 
 ## `DependencyContainer`
 
@@ -61,6 +62,10 @@ lookup key; `provider`/`concrete`/`factory`/`instance` chooses construction.
 `dependencies` maps callable parameter names to dependency tokens. Lower
 numeric `priority` values warm first.
 
+When the token is inferred from a provider return annotation, an invalid or
+unresolvable forward reference raises `DependencyResolutionError` at
+registration time instead of silently dropping inference.
+
 ```python
 container = DependencyContainer()
 container.instance("settings", settings)
@@ -92,6 +97,7 @@ async registration lifecycle when the old object has asynchronous cleanup.
 | `shutdown()` | none | sync deterministic cleanup |
 | `shutdown_async()` | none | async deterministic cleanup |
 | `closed` | property | whether terminal shutdown completed |
+| `cleanup_pending` | property | whether failed global cleanup must be retried |
 
 `DependencyCleanupPendingError` reports token reuse while old cleanup remains;
 `DependencyContainerClosedError` reports use after successful shutdown. Sync

@@ -15,6 +15,22 @@ Run the complete suite from the repository root:
 python run_tests.py
 ```
 
+Concurrency lifecycle regressions can be repeated independently:
+
+```bash
+python run_stress_tests.py --repeats 25
+```
+
+The optional `quality` dependencies provide Ruff, Pyright and branch coverage:
+
+```bash
+python -m pip install -e ".[quality]"
+ruff check .
+pyright
+coverage run run_tests.py
+coverage report
+```
+
 The runner discovers every `test*.py` file under `tests` and exits with a
 non-zero status when a test fails. The equivalent standard-library command is:
 

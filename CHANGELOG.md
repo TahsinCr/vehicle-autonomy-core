@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.7.2] - 2026-09-12
+
+### Added
+
+- Added Ruff correctness checks, a gradual Pyright baseline, branch coverage
+  enforcement and repeatable concurrency stress checks.
+- Added combined MAVLink router, vehicle registry, callback and history load
+  profiles plus same-machine JSON benchmark regression comparison.
+- Added dedicated CI jobs for quality gates, concurrency stress, performance
+  regression and native ARM64 execution.
+
+### Changed
+
+- Invalid provider return annotations now produce a focused dependency
+  registration error instead of silently disabling token inference.
+- A failed container-wide cleanup now places the container in an explicit
+  cleanup-pending state; normal use stays blocked until shutdown is retried.
+
+### Fixed
+
+- Reserve dependency tokens for the complete unregister/disposal operation,
+  prevent registrations from committing after shutdown starts and make
+  concurrent async cleanup callers observe one cancellation-safe result.
+- Stop child scopes from resolving through a parent whose shutdown has begun.
+- Preserve mission success/failure intent for external lifecycle calls and
+  uncaught worker errors until cleanup and the terminal transition both commit.
+  Competing stop/cancel commands can no longer replace that pending outcome.
+
+### Documentation
+
+- Documented the quality commands, stress runner, benchmark baselines, combined
+  SQLite load profiles and production capacity recommendations in both languages.
+
 ## [v1.7.1] - 2026-09-12
 
 ### Added
@@ -618,7 +651,8 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.1...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.2...HEAD
+[v1.7.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.1...v1.7.2
 [v1.7.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7...v1.7.1
 [v1.7]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.6...v1.7
 [v1.6]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.5...v1.6

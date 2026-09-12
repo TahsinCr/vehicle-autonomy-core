@@ -7,6 +7,7 @@ from src.core.dependency import (
     AsyncDependencyError,
     DependencyContainer,
     DependencyNotFoundError,
+    DependencyResolutionError,
     Inject,
     Lifetime,
 )
@@ -70,7 +71,7 @@ class DependencyInjectionTests(unittest.TestCase):
     def test_strict_injection_reports_unresolved_annotation(self) -> None:
         container = DependencyContainer(auto_wire=False)
 
-        def call(service: "MisspelledService") -> object:
+        def call(service: "MisspelledService") -> object:  # noqa: F821
             return service
 
         decorated = container.inject(call, strict=True)
@@ -103,6 +104,18 @@ class DependencyInjectionTests(unittest.TestCase):
         container.singleton(str, factory=factory)
         with self.assertRaises(AsyncDependencyError):
             container.resolve(str)
+
+    def test_provider_token_inference_reports_invalid_forward_reference(self) -> None:
+        container = DependencyContainer()
+
+        def factory() -> "MissingProviderType":  # noqa: F821
+            return object()  # type: ignore[return-value]
+
+        with self.assertRaisesRegex(
+            DependencyResolutionError,
+            "MissingProviderType",
+        ):
+            container.singleton(factory=factory)
 
 
 class AsyncDependencyInjectionTests(unittest.IsolatedAsyncioTestCase):

@@ -197,6 +197,9 @@ class MissionScheduler:
 
         queued = None
         retry_preempt_ids: tuple[int, ...] = ()
+        transition: MissionTransition | None = None
+        generation: int | None = None
+        snapshot = runtime.snapshot
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission_id)
             missing = self._missing_prerequisites_locked(runtime.mission)
@@ -239,6 +242,10 @@ class MissionScheduler:
                         self.engine._conflict_message(runtime, conflicts)
                     )
             else:
+                if runtime.pending_terminal is not None:
+                    raise RuntimeError(
+                        "Mission cannot start with a stale terminal intent"
+                    )
                 runtime.stop_event.clear()
                 runtime.cleaned = False
                 snapshot, transition = self.engine.lifecycle._transition_locked(
@@ -263,6 +270,8 @@ class MissionScheduler:
             snapshot, transition = queued
         self.engine.lifecycle._publish_transition(transition)
         if queued is None:
+            if generation is None:
+                raise RuntimeError("Mission launch admission did not produce a generation")
             with self.engine._condition:
                 runtime = self.engine._runtime_locked(mission_id)
                 if (

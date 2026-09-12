@@ -18,7 +18,6 @@ else:
         DependencyMap,
         Inject,
         Lifetime,
-        MISSING,
         Token,
     )
     from .errors import (

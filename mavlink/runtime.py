@@ -19,6 +19,7 @@ from .dispatch import (
 )
 from .endpoint import MavlinkEndpoint
 from .history import MessageHistory
+from .message import MavlinkMessageEnvelope
 from .delivery import CallbackWorker
 from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
 from .peer import MavlinkApplicationPeer, MavlinkApplicationResponse

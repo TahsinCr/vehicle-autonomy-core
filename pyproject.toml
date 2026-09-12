@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vehicle-autonomy-core"
-version = "1.7.1"
+version = "1.7.2"
 description = "Reusable vehicle-agnostic autonomy infrastructure for Python projects"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,6 +24,11 @@ classifiers = [
 
 [project.optional-dependencies]
 mavlink = ["pymavlink>=2.4"]
+quality = [
+  "coverage[toml]>=7.8,<8",
+  "pyright>=1.1.400,<2",
+  "ruff>=0.12,<1",
+]
 
 [project.urls]
 Repository = "https://github.com/TahsinCr/vehicle-autonomy-core"
@@ -33,3 +38,55 @@ Changelog = "https://github.com/TahsinCr/vehicle-autonomy-core/blob/main/CHANGEL
 include-package-data = false
 packages = ["src.core", "src.core.dependency", "src.core.events", "src.core.mavlink", "src.core.mission"]
 package-dir = { "src.core" = ".", "src.core.dependency" = "dependency", "src.core.events" = "events", "src.core.mavlink" = "mavlink", "src.core.mission" = "mission" }
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [".git", ".serena", "build", "dist"]
+
+[tool.ruff.lint]
+# Begin with correctness rules. Style expansion can happen without mixing
+# mechanical rewrites into lifecycle changes.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+include = [
+  "abstracts.py",
+  "compatibility.py",
+  "dependency",
+  "events",
+  "mavlink",
+  "mission",
+]
+exclude = ["tests", "run_benchmarks.py", "run_tests.py", "run_stress_tests.py"]
+reportMissingImports = "none"
+# The initial gate focuses on definite name/control-flow failures. The dynamic
+# provider and callback surfaces are intentionally expanded in later passes.
+reportArgumentType = "none"
+reportAssignmentType = "none"
+reportAttributeAccessIssue = "none"
+reportCallIssue = "none"
+reportGeneralTypeIssues = "none"
+reportOperatorIssue = "none"
+reportOptionalMemberAccess = "none"
+reportReturnType = "none"
+reportUndefinedVariable = "error"
+reportPossiblyUnboundVariable = "error"
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["."]
+omit = [
+  "tests/*",
+  "run_benchmarks.py",
+  "run_stress_tests.py",
+  "run_tests.py",
+]
+
+[tool.coverage.report]
+fail_under = 82
+show_missing = true
+skip_covered = true

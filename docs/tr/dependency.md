@@ -19,10 +19,12 @@ oluşturma sırasında ilerler, her kaynağı dener ve birden fazla hata için
 cleanup aynı instance'ı iki kez kapatmaz.
 
 Başarısız unregister token'ı cleanup-pending durumda tutar. Eski kaynak
-başarıyla kapanmadan aynı token yeniden kaydedilemez. Eşzamanlı senkron
-`shutdown()` çağrıları aynı cleanup sonucunu bekler. Başarılı shutdown
-terminaldir: `closed` true olur; sonraki kayıt, resolution, build veya scope
-oluşturma `DependencyContainerClosedError` verir.
+başarıyla kapanmadan aynı token yeniden kaydedilemez; eşzamanlı unregister
+çağrıları tek disposal girişimini paylaşır. Container genelindeki başarısız
+cleanup `cleanup_pending` değerini ayarlar; kalan cleanup tamamlanana kadar
+kayıt, resolution ve yeni scope oluşturma engellenir. Başarılı shutdown
+terminaldir. Parent shutdown başladığında child scope da parent provider'larına
+dönemez.
 
 ## `DependencyContainer`
 
@@ -48,6 +50,10 @@ Kayıt API'si:
 oluşturma kaynağını seçer. `dependencies`, callable parametre adını token'a
 eşler. Küçük sayısal `priority` warmup sırasında önce gelir.
 
+Token provider dönüş annotation'ından çıkarılıyorsa geçersiz veya
+çözülemeyen forward reference, inference'ı sessizce kapatmak yerine kayıt
+sırasında `DependencyResolutionError` üretir.
+
 ```python
 container = DependencyContainer()
 container.instance("settings", settings)
@@ -71,6 +77,7 @@ Resolution ve yaşam döngüsü:
 - `warmup(tokens=None, lifetimes=(SINGLETON,))`, `warmup_async(...)`
 - `shutdown()`, `shutdown_async()`
 - `closed` property’si
+- `cleanup_pending` property’si
 
 `DependencyCleanupPendingError`, eski kaynağın cleanup'ı beklerken token'ın
 yeniden kullanılmasını bildirir. Sync resolution coroutine provider ve

@@ -8,6 +8,25 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Lint, type check and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ".[quality]"
+      - name: Ruff correctness checks
+        run: ruff check .
+      - name: Pyright baseline
+        run: pyright
+      - name: Branch coverage
+        run: |
+          coverage run run_tests.py
+          coverage report
+
   tests:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -24,6 +43,49 @@ jobs:
         run: python run_tests.py
       - name: Compile sources
         run: python -m compileall -q .
+
+  stress:
+    name: Concurrency stress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python run_stress_tests.py --repeats 20
+
+  benchmark:
+    name: Performance regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Benchmark previous revision
+        run: |
+          git worktree add ../vehicle-core-baseline HEAD^
+          python ../vehicle-core-baseline/run_benchmarks.py --quick --json > /tmp/vehicle-core-baseline.json
+      - name: Reject large microbenchmark regressions
+        run: >-
+          python run_benchmarks.py --quick
+          --compare /tmp/vehicle-core-baseline.json
+          --max-regression-percent 60
+      - name: Exercise the combined SQLite load path
+        run: python run_benchmarks.py --load-profile normal --load-storage sqlite
+
+  arm64:
+    name: ARM64 Python 3.12
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python run_tests.py
+      - run: python -m compileall -q .
 
   wheel:
     name: Build and verify wheel

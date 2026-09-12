@@ -28,4 +28,4 @@ class DependencyCleanupPendingError(DependencyError):
 
 
 class DependencyContainerClosedError(DependencyError):
-    """Raised when an operation requires a container that has not shut down."""
+    """Raised when an operation requires a container that is closing or closed."""

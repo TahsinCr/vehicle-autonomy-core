@@ -20,6 +20,8 @@ import json
 import platform
 import statistics
 import sys
+import tempfile
+import threading
 import time
 import tracemalloc
 import types
@@ -74,7 +76,9 @@ from src.core.mavlink import (  # noqa: E402
     MavlinkMessageRouter,
     MavlinkRemoteLogBatch,
     MavlinkRemoteLogRecord,
+    MessageHistory,
     MessageCache,
+    SqliteMessageHistory,
 )
 from src.core.mission import (  # noqa: E402
     Mission,
@@ -119,6 +123,25 @@ class BenchmarkResult:
     peak_bytes_per_op: int
 
 
+@dataclass(frozen=True, slots=True)
+class LoadBenchmarkResult:
+    profile: str
+    messages: int
+    vehicles: int
+    callbacks: int
+    storage: str
+    throughput_per_second: float
+    latency_p50_ns: float
+    latency_p95_ns: float
+    latency_p99_ns: float
+    cpu_ns_per_message: float
+    retained_bytes_per_message: float
+    peak_bytes_per_message: float
+    writer_max_queued: int
+    writer_failed_records: int
+    thread_delta: int
+
+
 class _TinyService:
     __slots__ = ()
 
@@ -160,6 +183,9 @@ class _MavlinkMessage:
     def get_seq(self) -> int:
         return 1
 
+    def to_dict(self) -> dict[str, int]:
+        return {"type": 2, "autopilot": 3}
+
 
 class _RouterConnection:
     __slots__ = ()
@@ -183,6 +209,9 @@ class _VehicleMessage(_MavlinkMessage):
 
     def get_srcSystem(self):
         return self.system
+
+    def to_dict(self) -> dict[str, int]:
+        return {"system": self.system, "type": self.type, "autopilot": self.autopilot}
 
 
 def _vehicle_cases(base_iterations):
@@ -689,6 +718,167 @@ def run_suite(
     )
 
 
+_LOAD_PROFILES = {
+    "normal": (2_000, 1, 2),
+    "medium": (5_000, 5, 5),
+    "heavy": (10_000, 10, 10),
+    "stress": (20_000, 20, 20),
+}
+
+
+def _percentile(samples: list[int], percentile: float) -> float:
+    ordered = sorted(samples)
+    index = min(len(ordered) - 1, int((len(ordered) - 1) * percentile))
+    return float(ordered[index])
+
+
+def run_load_profile(
+    profile: str,
+    *,
+    storage: str = "sqlite",
+) -> LoadBenchmarkResult:
+    """Measure routing, registry, callbacks and recording as one hot path."""
+
+    if profile not in _LOAD_PROFILES:
+        raise ValueError(f"Unknown load profile: {profile}")
+    if storage not in {"memory", "sqlite"}:
+        raise ValueError("Load storage must be 'memory' or 'sqlite'")
+    messages, vehicles, callbacks = _LOAD_PROFILES[profile]
+    threads_before = threading.active_count()
+    dialect = types.SimpleNamespace(MAV_AUTOPILOT_INVALID=8, MAV_TYPE_GCS=6)
+    runtime = types.SimpleNamespace(connection=types.SimpleNamespace(mavlink=dialect))
+    runtime._application_handlers = ApplicationHandlers(runtime)
+    registry = VehicleRegistry(runtime, history_capacity=32)
+    registry.running = True
+    router = MavlinkMessageRouter(
+        _RouterConnection(),  # type: ignore[arg-type]
+        state_capacity=max(128, vehicles * 8),
+        source_capacity=max(32, vehicles * 4),
+    )
+    temporary = tempfile.TemporaryDirectory(prefix="vehicle-core-benchmark-")
+    history: MessageHistory
+    if storage == "sqlite":
+        history = SqliteMessageHistory(
+            Path(temporary.name) / "telemetry.sqlite3",
+            limit=messages,
+            queue_capacity=messages,
+            batch_size=128,
+            wal=True,
+        )
+    else:
+        history = MessageHistory(
+            limit=messages,
+            background=True,
+            queue_capacity=messages,
+            batch_size=128,
+        )
+    subscriptions = [
+        router.envelopes.subscribe(registry.accept),
+        router.envelopes.subscribe(history.append),
+    ]
+    delivered = 0
+
+    def callback(_message: object) -> None:
+        nonlocal delivered
+        delivered += 1
+
+    subscriptions.extend(
+        router.subscribe(callback, "HEARTBEAT") for _ in range(callbacks)
+    )
+    latencies: list[int] = []
+    max_queued = 0
+    cpu_start = time.process_time_ns()
+    wall_start = time.perf_counter_ns()
+    tracemalloc.start()
+    retained_before, _ = tracemalloc.get_traced_memory()
+    try:
+        for sequence in range(1, messages + 1):
+            message = _VehicleMessage((sequence % vehicles) + 1)
+            envelope = MavlinkMessageEnvelope.wrap(sequence, message)
+            started = time.perf_counter_ns()
+            router._dispatch(envelope)
+            latencies.append(time.perf_counter_ns() - started)
+            if sequence % 64 == 0 and history.writer_stats is not None:
+                max_queued = max(max_queued, history.writer_stats.queued)
+        history.flush(timeout=30.0)
+        wall_elapsed = time.perf_counter_ns() - wall_start
+        cpu_elapsed = time.process_time_ns() - cpu_start
+        retained_after, peak = tracemalloc.get_traced_memory()
+        stats = history.writer_stats
+        if delivered != messages * callbacks:
+            raise RuntimeError("Combined load callback delivery was incomplete")
+        return LoadBenchmarkResult(
+            profile=profile,
+            messages=messages,
+            vehicles=vehicles,
+            callbacks=callbacks,
+            storage=storage,
+            throughput_per_second=messages / (wall_elapsed / 1_000_000_000),
+            latency_p50_ns=_percentile(latencies, 0.50),
+            latency_p95_ns=_percentile(latencies, 0.95),
+            latency_p99_ns=_percentile(latencies, 0.99),
+            cpu_ns_per_message=cpu_elapsed / messages,
+            retained_bytes_per_message=max(0, retained_after - retained_before) / messages,
+            peak_bytes_per_message=max(0, peak - retained_before) / messages,
+            writer_max_queued=max_queued,
+            writer_failed_records=0 if stats is None else stats.failed_records,
+            thread_delta=max(0, threading.active_count() - threads_before),
+        )
+    finally:
+        tracemalloc.stop()
+        for subscription in subscriptions:
+            subscription.cancel()
+        history.close()
+        registry.close()
+        router.messages.close()
+        router.envelopes.close()
+        router.errors.close()
+        temporary.cleanup()
+
+
+def _regressions(
+    results: list[BenchmarkResult],
+    baseline_path: Path,
+    maximum_percent: float,
+) -> list[str]:
+    """Return operation-specific regressions after suite-wide calibration."""
+
+    document = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline = {
+        (item["category"], item["name"]): (
+            float(item["wall_ns_per_op"]),
+            float(item["cpu_ns_per_op"]),
+        )
+        for item in document["results"]
+    }
+    matched = [
+        (result, baseline[(result.category, result.name)])
+        for result in results
+        if result.category != "baseline"
+        and (result.category, result.name) in baseline
+    ]
+    if not matched:
+        raise ValueError("Benchmark baseline has no matching operations")
+    calibration = statistics.median(
+        result.wall_ns_per_op / previous[0] for result, previous in matched
+    )
+    cpu_calibration = statistics.median(
+        result.cpu_ns_per_op / previous[1] for result, previous in matched
+    )
+    failures: list[str] = []
+    factor = 1.0 + maximum_percent / 100.0
+    for result, previous in matched:
+        wall_ratio = (result.wall_ns_per_op / previous[0]) / calibration
+        cpu_ratio = (result.cpu_ns_per_op / previous[1]) / cpu_calibration
+        # A real code-path regression normally appears in both clocks. Requiring
+        # both prevents scheduler and CPU-frequency noise from failing CI.
+        normalized_ratio = min(wall_ratio, cpu_ratio)
+        if normalized_ratio > factor:
+            change = (normalized_ratio - 1.0) * 100.0
+            failures.append(f"{result.category}/{result.name}: +{change:.1f}%")
+    return failures
+
+
 def _print_table(results: list[BenchmarkResult]) -> None:
     category_width = 12
     operation_width = 28
@@ -730,7 +920,59 @@ def main() -> int:
         help="Use 2,000 base iterations for a fast health check",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON output")
+    parser.add_argument(
+        "--load-profile",
+        choices=tuple(_LOAD_PROFILES),
+        help="Run one combined router/vehicle/callback/history load profile",
+    )
+    parser.add_argument(
+        "--load-storage",
+        choices=("memory", "sqlite"),
+        default="sqlite",
+    )
+    parser.add_argument(
+        "--compare",
+        type=Path,
+        help="Fail on operation-specific regression after suite-wide calibration",
+    )
+    parser.add_argument(
+        "--max-regression-percent",
+        type=float,
+        default=40.0,
+        help="Allowed calibrated regression when --compare is used (default: 40)",
+    )
     args = parser.parse_args()
+    if args.max_regression_percent < 0:
+        parser.error("--max-regression-percent must be non-negative")
+    if args.load_profile is not None:
+        result = run_load_profile(args.load_profile, storage=args.load_storage)
+        if args.json:
+            print(json.dumps(asdict(result), indent=2))
+        else:
+            print(f"Combined load profile: {result.profile} ({result.storage})")
+            print(
+                f"{result.messages:,} messages, {result.vehicles} vehicles, "
+                f"{result.callbacks} callbacks"
+            )
+            print(f"Throughput: {result.throughput_per_second:,.1f} messages/s")
+            print(
+                "Latency p50/p95/p99: "
+                f"{result.latency_p50_ns / 1_000:.1f}/"
+                f"{result.latency_p95_ns / 1_000:.1f}/"
+                f"{result.latency_p99_ns / 1_000:.1f} us"
+            )
+            print(f"CPU: {result.cpu_ns_per_message / 1_000:.1f} us/message")
+            print(
+                "Memory retained/peak: "
+                f"{result.retained_bytes_per_message:.1f}/"
+                f"{result.peak_bytes_per_message:.1f} bytes/message"
+            )
+            print(
+                f"Writer max queued: {result.writer_max_queued}; "
+                f"failed records: {result.writer_failed_records}; "
+                f"thread delta: {result.thread_delta}"
+            )
+        return 0
     iterations = 2_000 if args.quick else args.iterations
     results = run_suite(iterations, repeats=args.repeats)
     if args.json:
@@ -748,6 +990,18 @@ def main() -> int:
         )
     else:
         _print_table(results)
+    if args.compare is not None:
+        regressions = _regressions(
+            results,
+            args.compare,
+            args.max_regression_percent,
+        )
+        if regressions:
+            print("Performance regressions:", file=sys.stderr)
+            for regression in regressions:
+                print(f"- {regression}", file=sys.stderr)
+            return 1
+        print("Benchmark regression check passed", file=sys.stderr)
     return 0
 
 

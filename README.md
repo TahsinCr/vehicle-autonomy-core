@@ -358,9 +358,12 @@ paths claim each resource before calling user code, so the same instance cannot
 be closed twice.
 
 If unregister cleanup fails, the token stays reserved and cannot be registered
-again until cleanup succeeds. Concurrent synchronous shutdown callers wait for
-the same result. Successful shutdown is terminal; `container.closed` becomes
-true and later registration or resolution raises
+again until cleanup succeeds. Concurrent unregister and shutdown callers wait
+for their shared cleanup result. Failed container-wide cleanup sets
+`container.cleanup_pending`; normal use remains blocked until shutdown is
+retried successfully. Child scopes cannot fall back to a parent once that
+parent starts shutting down. Successful shutdown is terminal;
+`container.closed` becomes true and later registration or resolution raises
 `DependencyContainerClosedError`.
 
 For a project-owned composition root, subclass `BaseDependencyContainer` and
@@ -786,8 +789,9 @@ run outside the engine state lock and may issue another lifecycle command.
 Calling `complete()` or `fail()` inside `start()`/`tick()` ends that callback
 immediately; terminal state and resource release occur only after it unwinds.
 If `stop()` raises, the mission remains `STOPPING`, its resources remain owned,
-and `MissionCleanupError` reports the incomplete cleanup. Callback-driven
-terminal intent—including result and retryability—is retained; call
+and `MissionCleanupError` reports the incomplete cleanup. Terminal intent—
+including external completion/failure, uncaught worker errors, result and
+retryability—is retained; competing stop/cancel calls are rejected. Call
 `engine.retry_cleanup(mission)` after resolving the cause. The engine never
 makes the resource available to another mission before cleanup succeeds. Terminal
 missions reject new checkpoints, and checkpoint event names cannot be replaced
@@ -1397,6 +1401,22 @@ python -m unittest discover -v
 python -m compileall -q .
 ```
 
+Install the optional quality tools and run the same static and coverage gates
+used by CI:
+
+```bash
+python -m pip install -e ".[quality]"
+ruff check .
+pyright
+coverage run run_tests.py
+coverage report
+python run_stress_tests.py --repeats 25
+```
+
+Coverage includes branches and currently requires at least 82%. The stress
+runner repeatedly exercises the highest-risk mission, dependency, event and
+MAVLink lifecycle races with fresh test instances.
+
 Run one package while developing:
 
 ```bash
@@ -1432,6 +1452,8 @@ network connections:
 ```bash
 python run_benchmarks.py --quick
 python run_benchmarks.py --json > benchmark.json
+python run_benchmarks.py --quick --compare benchmark.json
+python run_benchmarks.py --load-profile normal --load-storage sqlite
 ```
 
 Results are ordered from general primitives to domain-specific operations. The
@@ -1439,6 +1461,13 @@ median of five timed runs is reported as wall time, CPU time, ratio to a no-op
 call, retained bytes per operation and peak bytes for one operation. Absolute
 timings vary by machine; compare runs made with the same Python build and
 hardware when checking a regression.
+
+The comparison command matches operations by stable category/name and rejects
+suite-calibrated cost regressions above 40% by default. Combined load profiles report
+throughput, p50/p95/p99 dispatch latency, CPU and memory per message, writer
+queue pressure, failed records and thread growth. Use `normal`, `medium`,
+`heavy` or `stress`; these are reproducible software probes, not flight-time
+or hard-real-time guarantees.
 
 ## Contributing
 

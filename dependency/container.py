@@ -69,6 +69,14 @@ class _ShutdownAttempt:
         self.error: BaseException | None = None
 
 
+class _TokenDisposalAttempt:
+    __slots__ = ("done", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
 class DependencyContainer:
     """Synchronous and asynchronous dependency injection container."""
 
@@ -79,9 +87,11 @@ class DependencyContainer:
         "_async_operations",
         "_async_shutdown",
         "_providers",
+        "_disposal_attempts",
         "_pending_disposals",
         "_registration_lock",
         "_closed",
+        "_cleanup_failed",
         "_shutdown_attempt",
         "_shutdown_lock",
         "_scope_cache",
@@ -100,6 +110,7 @@ class DependencyContainer:
         self.auto_wire = auto_wire
         self._providers: dict[Token, Provider] = {}
         self._registration_lock = threading.RLock()
+        self._disposal_attempts: dict[Token, _TokenDisposalAttempt] = {}
         self._pending_disposals: dict[Token, tuple[Any, ...]] = {}
         self._scope_cache: dict[Token, Any] = {}
         self._scope_lock = threading.RLock()
@@ -108,6 +119,7 @@ class DependencyContainer:
         self._async_operations: dict[Token, asyncio.Task[None]] = {}
         self._async_shutdown: asyncio.Task[None] | None = None
         self._closed = False
+        self._cleanup_failed = False
         self._shutdown_attempt: _ShutdownAttempt | None = None
         self._shutdown_lock = threading.Lock()
         self._context_tokens: list[
@@ -124,14 +136,27 @@ class DependencyContainer:
         with self._shutdown_lock:
             return self._closed
 
+    @property
+    def cleanup_pending(self) -> bool:
+        """Whether a failed global shutdown must be retried."""
+
+        with self._shutdown_lock:
+            return self._cleanup_failed
+
     def _ensure_open(self) -> None:
         with self._shutdown_lock:
             if self._closed:
                 raise DependencyContainerClosedError("Dependency container is closed")
+            if self._cleanup_failed:
+                raise DependencyCleanupPendingError(
+                    "Dependency container shutdown cleanup is pending"
+                )
             if self._shutdown_attempt is not None:
                 raise DependencyContainerClosedError(
                     "Dependency container is shutting down"
                 )
+        if self.parent is not None:
+            self.parent._ensure_open()
 
     def _claim_shutdown(self, *, wait: bool = True) -> _ShutdownAttempt | None:
         with self._registration_lock, self._shutdown_lock:
@@ -155,14 +180,64 @@ class DependencyContainer:
         self,
         attempt: _ShutdownAttempt,
         error: BaseException | None,
+        *,
+        cleanup_started: bool,
     ) -> None:
         with self._shutdown_lock:
             attempt.error = error
             if error is None:
                 self._closed = True
+                self._cleanup_failed = False
+            elif cleanup_started:
+                self._cleanup_failed = True
             if self._shutdown_attempt is attempt:
                 self._shutdown_attempt = None
             attempt.done.set()
+
+    def _claim_token_disposal(
+        self,
+        token: Token,
+    ) -> tuple[_TokenDisposalAttempt, bool]:
+        with self._registration_lock:
+            attempt = self._disposal_attempts.get(token)
+            if attempt is not None:
+                return attempt, False
+            attempt = _TokenDisposalAttempt()
+            self._disposal_attempts[token] = attempt
+            return attempt, True
+
+    def _finish_token_disposal(
+        self,
+        token: Token,
+        attempt: _TokenDisposalAttempt,
+        error: BaseException | None,
+    ) -> None:
+        attempt.error = error
+        with self._registration_lock:
+            if self._disposal_attempts.get(token) is attempt:
+                self._disposal_attempts.pop(token, None)
+        attempt.done.set()
+
+    def _token_disposals(self) -> tuple[_TokenDisposalAttempt, ...]:
+        with self._registration_lock:
+            return tuple(self._disposal_attempts.values())
+
+    def _complete_async_operation(
+        self,
+        token: Token,
+        task: asyncio.Task[None],
+    ) -> None:
+        with self._registration_lock:
+            if self._async_operations.get(token) is task:
+                self._async_operations.pop(token, None)
+        if not task.cancelled():
+            task.exception()
+
+    def _complete_async_shutdown(self, task: asyncio.Task[None]) -> None:
+        if self._async_shutdown is task:
+            self._async_shutdown = None
+        if not task.cancelled():
+            task.exception()
 
     def __enter__(self) -> DependencyContainer:
         self._ensure_open()
@@ -215,7 +290,10 @@ class DependencyContainer:
         )
         with self._registration_lock:
             self._ensure_open()
-            if registration.token in self._pending_disposals:
+            if (
+                registration.token in self._disposal_attempts
+                or registration.token in self._pending_disposals
+            ):
                 raise DependencyCleanupPendingError(
                     f"{format_token(registration.token)} still has pending cleanup"
                 )
@@ -228,6 +306,14 @@ class DependencyContainer:
             # registration lock is held.
             self.unregister(registration.token)
         with self._registration_lock:
+            self._ensure_open()
+            if (
+                registration.token in self._disposal_attempts
+                or registration.token in self._pending_disposals
+            ):
+                raise DependencyCleanupPendingError(
+                    f"{format_token(registration.token)} still has pending cleanup"
+                )
             if registration.token in self._providers:
                 raise RuntimeError(
                     f"Concurrent registration for {format_token(registration.token)}"
@@ -370,6 +456,22 @@ class DependencyContainer:
         """Unregister a token and synchronously dispose its cached resources."""
 
         self._ensure_open()
+        attempt, owner = self._claim_token_disposal(token)
+        if not owner:
+            attempt.done.wait()
+            if attempt.error is not None:
+                raise attempt.error
+            return
+        error: BaseException | None = None
+        try:
+            self._unregister_owned(token)
+        except BaseException as failure:
+            error = failure
+            raise
+        finally:
+            self._finish_token_disposal(token, attempt, error)
+
+    def _unregister_owned(self, token: Token) -> None:
         with self._registration_lock:
             pending = self._pending_disposals.get(token)
         candidates = pending or self._token_instances(token)
@@ -415,22 +517,22 @@ class DependencyContainer:
 
     async def unregister_async(self, token: Token) -> None:
         self._ensure_open()
-        task = self._async_operations.get(token)
-        if task is None:
-            task = asyncio.create_task(self._unregister_async(token))
+        attempt, owner = self._claim_token_disposal(token)
+        if not owner:
+            await asyncio.to_thread(attempt.done.wait)
+            if attempt.error is not None:
+                raise attempt.error
+            return
+        task = asyncio.create_task(self._run_unregister_async(token, attempt))
+        with self._registration_lock:
             self._async_operations[token] = task
+        task.add_done_callback(
+            lambda finished: self._complete_async_operation(token, finished)
+        )
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            task.cancel()
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                pass
             raise
-        finally:
-            if task.done() and self._async_operations.get(token) is task:
-                self._async_operations.pop(token, None)
 
     def has(self, token: Token) -> bool:
         return self._find_provider(token) is not None
@@ -439,7 +541,9 @@ class DependencyContainer:
         return self.has(token) or (self.auto_wire and can_autowire(token))
 
     def registered_tokens(self) -> tuple[Token, ...]:
-        return tuple(sorted(self._providers, key=format_token))
+        with self._registration_lock:
+            tokens = tuple(self._providers)
+        return tuple(sorted(tokens, key=format_token))
 
     def create_scope(self) -> DependencyContainer:
         self._ensure_open()
@@ -494,7 +598,10 @@ class DependencyContainer:
         if attempt is None:
             return
         error: BaseException | None = None
+        cleanup_started = False
         try:
+            for disposal in self._token_disposals():
+                disposal.done.wait()
             candidates = self._shutdown_instances()
             async_only = next(
                 (item for item in candidates if requires_async_disposal(item)),
@@ -505,6 +612,7 @@ class DependencyContainer:
                     f"{format_token(type(async_only))} async kapanıyor; "
                     "shutdown_async kullan."
                 )
+            cleanup_started = True
             self._retire_all()
             dispose_many(
                 self._detach_shutdown_instances(),
@@ -515,7 +623,11 @@ class DependencyContainer:
             error = failure
             raise
         finally:
-            self._finish_shutdown(attempt, error)
+            self._finish_shutdown(
+                attempt,
+                error,
+                cleanup_started=cleanup_started,
+            )
 
     async def shutdown_async(self) -> None:
         if self._closed:
@@ -524,21 +636,29 @@ class DependencyContainer:
         if task is None:
             task = asyncio.create_task(self._shutdown_async())
             self._async_shutdown = task
+            task.add_done_callback(self._complete_async_shutdown)
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            task.cancel()
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                pass
+            raise
+
+    async def _run_unregister_async(
+        self,
+        token: Token,
+        attempt: _TokenDisposalAttempt,
+    ) -> None:
+        error: BaseException | None = None
+        try:
+            await self._unregister_async_owned(token)
+        except BaseException as failure:
+            error = failure
             raise
         finally:
-            if task.done() and self._async_shutdown is task:
-                self._async_shutdown = None
+            self._finish_token_disposal(token, attempt, error)
 
-    async def _unregister_async(self, token: Token) -> None:
+    async def _unregister_async_owned(self, token: Token) -> None:
         cancelled = False
+        claimed: tuple[Any, ...] = ()
         with self._registration_lock:
             pending = self._pending_disposals.get(token)
         try:
@@ -576,7 +696,14 @@ class DependencyContainer:
             return
         cancelled = False
         failure: BaseException | None = None
+        cleanup_started = False
         try:
+            disposals = self._token_disposals()
+            if disposals:
+                await asyncio.gather(
+                    *(asyncio.to_thread(item.done.wait) for item in disposals)
+                )
+            cleanup_started = True
             try:
                 await self._retire_all_async()
             except asyncio.CancelledError:
@@ -596,7 +723,11 @@ class DependencyContainer:
             failure = error
             raise
         finally:
-            self._finish_shutdown(attempt, failure)
+            self._finish_shutdown(
+                attempt,
+                failure,
+                cleanup_started=cleanup_started,
+            )
 
     def _normalize_registration(
         self,

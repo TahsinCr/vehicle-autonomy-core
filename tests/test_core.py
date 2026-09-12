@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import queue
-import threading
 import unittest
 from abc import ABC
 

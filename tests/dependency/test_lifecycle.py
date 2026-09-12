@@ -293,6 +293,106 @@ class DependencyLifecycleTests(unittest.TestCase):
         with self.assertRaises(DependencyContainerClosedError):
             container.instance("new", object())
 
+    def test_inflight_unregister_reserves_token_and_is_one_barrier(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Resource:
+            calls = 0
+
+            def close(self) -> None:
+                self.calls += 1
+                entered.set()
+                release.wait(1.0)
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance("resource", resource)
+        first = threading.Thread(target=lambda: container.unregister("resource"))
+        second_done = threading.Event()
+        second = threading.Thread(
+            target=lambda: (container.unregister("resource"), second_done.set())
+        )
+        first.start()
+        self.assertTrue(entered.wait(1.0))
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.instance("resource", object())
+        second.start()
+        self.assertFalse(second_done.wait(0.02))
+        release.set()
+        first.join(1.0)
+        second.join(1.0)
+        self.assertTrue(second_done.is_set())
+        self.assertEqual(resource.calls, 1)
+
+    def test_registration_cannot_commit_after_shutdown_claim(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Resource:
+            def close(self) -> None:
+                entered.set()
+                release.wait(1.0)
+
+        container = DependencyContainer()
+        container.instance("resource", Resource())
+        registration_errors: list[BaseException] = []
+
+        def replace() -> None:
+            try:
+                container.instance("resource", object())
+            except BaseException as error:
+                registration_errors.append(error)
+
+        replacing = threading.Thread(target=replace)
+        replacing.start()
+        self.assertTrue(entered.wait(1.0))
+        shutdown = threading.Thread(target=container.shutdown)
+        shutdown.start()
+        for _ in range(100):
+            with container._shutdown_lock:
+                if container._shutdown_attempt is not None:
+                    break
+            time.sleep(0.001)
+        else:
+            self.fail("shutdown did not claim the container")
+        release.set()
+        replacing.join(1.0)
+        shutdown.join(1.0)
+        self.assertTrue(container.closed)
+        self.assertEqual(len(registration_errors), 1)
+        self.assertIsInstance(registration_errors[0], DependencyContainerClosedError)
+
+    def test_partial_shutdown_failure_blocks_normal_use_until_retry(self) -> None:
+        resource = _SyncResource("resource", [], fail=True)
+        container = DependencyContainer()
+        container.instance("resource", resource)
+
+        with self.assertRaisesRegex(RuntimeError, "cannot close resource"):
+            container.shutdown()
+        self.assertTrue(container.cleanup_pending)
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.resolve("resource")
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.instance("new", object())
+        with self.assertRaises(DependencyCleanupPendingError):
+            container.create_scope()
+
+        resource.fail = False
+        container.shutdown()
+        self.assertTrue(container.closed)
+        self.assertFalse(container.cleanup_pending)
+
+    def test_child_cannot_resolve_parent_after_parent_shutdown(self) -> None:
+        root = DependencyContainer()
+        root.transient("resource", object)
+        child = root.create_scope()
+        root.shutdown()
+
+        with self.assertRaises(DependencyContainerClosedError):
+            child.resolve("resource")
+        child.shutdown()
+
     def test_scoped_resolution_is_singleton_per_scope_across_threads(self) -> None:
         created = 0
         lock = threading.Lock()
@@ -424,6 +524,33 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         second.fail = False
         await container.shutdown_async()
         self.assertEqual([first.close_count, second.close_count, third.close_count], [2, 2, 1])
+
+    async def test_cancelled_shutdown_caller_does_not_cancel_shared_cleanup(self) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class Resource:
+            calls = 0
+
+            async def aclose(self) -> None:
+                self.calls += 1
+                entered.set()
+                await release.wait()
+
+        resource = Resource()
+        container = DependencyContainer()
+        container.instance("resource", resource)
+        first = asyncio.create_task(container.shutdown_async())
+        await asyncio.wait_for(entered.wait(), 1.0)
+        second = asyncio.create_task(container.shutdown_async())
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        self.assertFalse(second.done())
+        release.set()
+        await asyncio.wait_for(second, 1.0)
+        self.assertTrue(container.closed)
+        self.assertEqual(resource.calls, 1)
 
     async def test_async_provider_and_scoped_cleanup(self) -> None:
         closed: list[str] = []
@@ -611,11 +738,12 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_shutdown_still_attempts_remaining_resources(self) -> None:
         entered = asyncio.Event()
+        release = asyncio.Event()
 
         class _SlowResource:
             async def aclose(inner_self) -> None:
                 entered.set()
-                await asyncio.Event().wait()
+                await release.wait()
 
         closed: list[str] = []
         container = DependencyContainer()
@@ -628,6 +756,10 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await asyncio.wait_for(shutdown, 1.0)
 
+        retry = asyncio.create_task(container.shutdown_async())
+        self.assertFalse(retry.done())
+        release.set()
+        await asyncio.wait_for(retry, 1.0)
         self.assertEqual(closed, ["remaining"])
 
     async def test_cancelled_unregister_cleans_inflight_resource(self) -> None:
@@ -652,6 +784,7 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await resolution
         with self.assertRaises(asyncio.CancelledError):
             await asyncio.wait_for(unregister, 1.0)
+        await asyncio.wait_for(container.unregister_async("resource"), 1.0)
         self.assertEqual(closed, ["inflight"])
         self.assertFalse(container.has("resource"))
 

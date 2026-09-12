@@ -86,6 +86,23 @@ Verify syntax/import compilation:
 python -m compileall -q .
 ```
 
+Install and run the development quality gates:
+
+```bash
+python -m pip install -e ".[quality]"
+ruff check .
+pyright
+coverage run run_tests.py
+coverage report
+python run_stress_tests.py --repeats 25
+```
+
+Coverage includes branch decisions and enforces an 82% project baseline.
+Pyright starts with definite name and control-flow failures on production
+modules; this gradual baseline avoids hiding dynamic provider/callback behavior
+behind broad casts. The stress runner repeats selected concurrency regressions
+with a fresh suite on every pass.
+
 The CI matrix runs supported Python versions and builds the wheel. Tests cover
 standalone checkout loading and the intended `src/core` submodule layout.
 
@@ -93,6 +110,9 @@ standalone checkout loading and the intended `src/core` submodule layout.
 
 ```bash
 python run_benchmarks.py
+python run_benchmarks.py --quick --json > benchmark.json
+python run_benchmarks.py --quick --compare benchmark.json
+python run_benchmarks.py --load-profile normal --load-storage sqlite
 ```
 
 The benchmark reports wall time, CPU time, retained bytes per operation and peak
@@ -103,6 +123,24 @@ mission operations.
 Benchmark values are comparative, not hard real-time guarantees. Compare the
 same interpreter, CPU governor and load. Prefer ratios and distribution trends
 over a fixed microsecond threshold from another machine.
+
+`--compare` matches stable operation names, calibrates for the suite-wide host
+speed shift and rejects an operation-specific cost increase over 40% unless
+`--max-regression-percent` changes that budget. A regression must appear in
+both wall and CPU time, which filters out
+runner scheduling noise without accepting a consistent code-path slowdown.
+Hosted CI uses a wider 60% budget because its CPU allocation is shared and
+variable; local controlled runs keep the stricter 40% default.
+Combined profiles (`normal`, `medium`, `heavy`, `stress`) exercise routing, multi-vehicle state,
+multiple callbacks and background memory/SQLite recording together. They report
+throughput, p50/p95/p99 latency, CPU and memory per message, writer pressure,
+failed records and thread growth.
+
+Production deployments should explicitly set finite `state_capacity` and
+`source_capacity` values after measuring expected source cardinality. The
+library keeps `None` as the general-purpose default because silently evicting
+valid state is not universally safer. Likewise, dispatcher `workers=1` remains
+the ordered default; increase it only for independent, thread-safe handlers.
 
 ## Hardware and integration validation
 
