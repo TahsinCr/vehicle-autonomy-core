@@ -265,6 +265,7 @@ class MissionEngine(Service):
         self,
         mission: Mission,
         second: Mission,
+        /,
         *missions: Mission,
         requester_id: int | None = None,
         reason: str = "",

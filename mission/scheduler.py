@@ -21,7 +21,6 @@ from .models import (
     MissionSnapshot,
     MissionTransition,
 )
-from .references import MissionReference
 from .runtime import MissionRuntime
 
 if TYPE_CHECKING:

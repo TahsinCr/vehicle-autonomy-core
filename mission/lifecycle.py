@@ -9,7 +9,6 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from ..abstracts import _freeze_model_value
-from .base import Mission
 from .enums import MissionEventType, MissionPhase, ensure_mission_transition
 from .errors import (
     MissionCleanupError,
