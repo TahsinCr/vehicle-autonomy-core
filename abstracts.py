@@ -73,7 +73,7 @@ def _freeze_model_value(value: Any) -> Any:
         )
     if isinstance(value, tuple):
         frozen = tuple(_freeze_model_value(item) for item in value)
-        return value if all(a is b for a, b in zip(value, frozen)) else frozen
+        return value if all(a is b for a, b in zip(value, frozen, strict=True)) else frozen
     if isinstance(value, list):
         return tuple(_freeze_model_value(item) for item in value)
     if isinstance(value, frozenset):

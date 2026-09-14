@@ -379,14 +379,13 @@ class MissionScheduler:
                     or runtime.queued_monotonic != queued_at
                 ):
                     continue
-                snapshot = runtime.snapshot
                 queue_timeout = runtime.mission.queue_timeout_seconds
                 if (
                     queue_timeout is not None
                     and queued_at is not None
                     and now - queued_at >= queue_timeout
                 ):
-                    snapshot, transition = self.engine.lifecycle._transition_locked(
+                    _, transition = self.engine.lifecycle._transition_locked(
                         runtime,
                         MissionPhase.FAILED,
                         reason="Mission queue timed out",

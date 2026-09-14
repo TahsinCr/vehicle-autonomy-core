@@ -201,7 +201,7 @@ class AsyncEventBus(BaseEventBus[T]):
                                 raise ExceptionGroup(
                                     "Async event replay failed",
                                     [exc, *action_errors],
-                                )
+                                ) from exc
                         else:
                             self._delivered += 1
                             if final:

@@ -5,11 +5,16 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from ..abstracts import _freeze_model_value
-from .enums import MissionEventType, MissionPhase, ensure_mission_transition
+from .enums import (
+    MissionEventLevel,
+    MissionEventType,
+    MissionPhase,
+    ensure_mission_transition,
+)
 from .errors import (
     MissionCleanupError,
     MissionConflictError,
@@ -84,13 +89,17 @@ class MissionLifecycle:
             )
         self._publish_transition(transition)
         try:
-            with runtime.callback_lock:
-                with self.engine._condition:
-                    if runtime.snapshot.phase is not MissionPhase.PAUSING:
-                        return runtime.snapshot
-                runtime.mission.pause()
+            terminal_intent = self._invoke_lifecycle_callback(
+                runtime,
+                "pause",
+                MissionPhase.PAUSING,
+                runtime.mission.pause,
+            )
         except Exception as exc:
             return self.fail(runtime.mission.id, str(exc))
+        if terminal_intent is not None:
+            self._publish_intent_transition(terminal_intent)
+            return self._finalize_pending_terminal(runtime, terminal_intent)
         with self.engine._condition:
             if runtime.snapshot.phase is not MissionPhase.PAUSING:
                 return runtime.snapshot
@@ -118,13 +127,17 @@ class MissionLifecycle:
             if runtime.snapshot.phase is not MissionPhase.PAUSED:
                 raise MissionTransitionError("Only a paused mission can resume")
         try:
-            with runtime.callback_lock:
-                with self.engine._condition:
-                    if runtime.snapshot.phase is not MissionPhase.PAUSED:
-                        return runtime.snapshot
-                runtime.mission.resume()
+            terminal_intent = self._invoke_lifecycle_callback(
+                runtime,
+                "resume",
+                MissionPhase.PAUSED,
+                runtime.mission.resume,
+            )
         except Exception as exc:
             return self.fail(runtime.mission.id, str(exc))
+        if terminal_intent is not None:
+            self._publish_intent_transition(terminal_intent)
+            return self._finalize_pending_terminal(runtime, terminal_intent)
         with self.engine._condition:
             if runtime.snapshot.phase is not MissionPhase.PAUSED:
                 return runtime.snapshot
@@ -266,6 +279,8 @@ class MissionLifecycle:
                 return runtime.snapshot
             if runtime.snapshot.phase is MissionPhase.STOPPING and runtime.pending_terminal is not None:
                 if runtime.pending_terminal.phase is not MissionPhase.FAILED:
+                    if runtime.cleanup_owner_thread_id == threading.get_ident():
+                        return runtime.snapshot
                     raise MissionTransitionError(
                         "Mission already has a different terminal intent"
                     )
@@ -296,7 +311,13 @@ class MissionLifecycle:
                         retryable=retryable,
                         transition=stopping_transition,
                     )
-            if runtime.worker is threading.current_thread():
+            if (
+                runtime.worker is threading.current_thread()
+                or (
+                    runtime.callback_owner_thread_id == threading.get_ident()
+                    and runtime.callback_name in {"pause", "resume"}
+                )
+            ):
                 if intent is None:
                     raise MissionTransitionError("Mission failure intent is missing")
                 raise _MissionExit(intent)
@@ -576,10 +597,25 @@ class MissionLifecycle:
             if runtime.pending_terminal is None:
                 runtime.pending_terminal = exit_request.intent
         except Exception as exc:
-            try:
-                self.fail(mission_id, str(exc), retryable=True)
-            except _MissionExit:
-                pass
+            with self.engine._condition:
+                intent = runtime.pending_terminal
+            if intent is not None:
+                self.engine._emit(
+                    MissionEventType.ERROR,
+                    f"Mission callback failed during {intent.phase.value}: {exc}",
+                    level=MissionEventLevel.ERROR,
+                    mission_id=mission_id,
+                    generation=generation,
+                    fields={
+                        "error_type": type(exc).__name__,
+                        "terminal_intent": intent.phase.value,
+                    },
+                )
+            else:
+                try:
+                    self.fail(mission_id, str(exc), retryable=True)
+                except _MissionExit:
+                    pass
         finally:
             # A mission may accidentally catch BaseException and swallow the
             # private unwind sentinel. Finalize the recorded request after all
@@ -668,6 +704,8 @@ class MissionLifecycle:
             if runtime.pending_terminal is not None:
                 intent = runtime.pending_terminal
                 if intent.phase is not terminal:
+                    if runtime.cleanup_owner_thread_id == threading.get_ident():
+                        return runtime.snapshot
                     raise MissionTransitionError(
                         "Mission already has a different terminal intent"
                     )
@@ -694,7 +732,21 @@ class MissionLifecycle:
                     transition=transition,
                 )
                 transition = None
-            if runtime.worker is threading.current_thread() and intent is not None:
+            if (
+                runtime.cleanup_owner_thread_id == threading.get_ident()
+                and intent is not None
+            ):
+                return runtime.snapshot
+            if (
+                intent is not None
+                and (
+                    runtime.worker is threading.current_thread()
+                    or (
+                        runtime.callback_owner_thread_id == threading.get_ident()
+                        and runtime.callback_name in {"pause", "resume"}
+                    )
+                )
+            ):
                 raise _MissionExit(intent)
 
         if intent is not None:
@@ -722,8 +774,35 @@ class MissionLifecycle:
             if runtime.cleaned:
                 return
             with runtime.callback_lock:
-                runtime.mission.stop()
-                runtime.cleaned = True
+                runtime.cleanup_owner_thread_id = threading.get_ident()
+                try:
+                    runtime.mission.stop()
+                    runtime.cleaned = True
+                finally:
+                    runtime.cleanup_owner_thread_id = None
+
+    def _invoke_lifecycle_callback(
+        self,
+        runtime: MissionRuntime,
+        name: str,
+        expected_phase: MissionPhase,
+        callback: Callable[[], None],
+    ) -> PendingTerminalIntent | None:
+        with runtime.callback_lock:
+            with self.engine._condition:
+                if runtime.snapshot.phase is not expected_phase:
+                    return None
+                runtime.callback_owner_thread_id = threading.get_ident()
+                runtime.callback_name = name
+            try:
+                callback()
+            except _MissionExit as exit_request:
+                return exit_request.intent
+            finally:
+                with self.engine._condition:
+                    runtime.callback_owner_thread_id = None
+                    runtime.callback_name = None
+        return None
 
     def _cleanup_or_raise(self, runtime: MissionRuntime) -> None:
         try:

@@ -95,6 +95,12 @@ Auto-wiring observes the same token reservation, so a concrete class cannot be
 recreated while its previous instance is still disposing. A synchronous call
 made on the event-loop thread never waits for async disposal; it raises
 `AsyncDependencyError` and requires the matching async API instead.
+Resource cleanup must not recursively wait for the same token disposal or
+container shutdown that invoked it. Such re-entry raises
+`DependencyResolutionError` immediately instead of deadlocking; unrelated
+concurrent callers continue to share and wait for the original cleanup attempt.
+Process-default container creation and replacement are synchronized across
+threads.
 
 ## `DependencyContainer`
 

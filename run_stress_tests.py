@@ -15,6 +15,8 @@ STRESS_TESTS = (
     "tests.dependency.test_lifecycle.DependencyLifecycleTests."
     "test_concurrent_shutdown_callers_receive_the_same_failure",
     "tests.dependency.test_lifecycle.DependencyLifecycleTests."
+    "test_sync_cleanup_reentrancy_fails_instead_of_deadlocking",
+    "tests.dependency.test_lifecycle.DependencyLifecycleTests."
     "test_cross_thread_initialization_cycle_fails_instead_of_deadlocking",
     "tests.dependency.test_lifecycle.DependencyLifecycleTests."
     "test_inflight_unregister_reserves_token_and_is_one_barrier",
@@ -30,6 +32,8 @@ STRESS_TESTS = (
     "test_cross_task_cached_provider_cycle_is_detected",
     "tests.dependency.test_lifecycle.AsyncDependencyLifecycleTests."
     "test_sync_and_async_unregister_share_one_disposal_attempt",
+    "tests.dependency.test_lifecycle.AsyncDependencyLifecycleTests."
+    "test_async_cleanup_reentrancy_fails_instead_of_deadlocking",
     "tests.events.test_bus.EventBusTests."
     "test_close_reports_a_stuck_periodic_schedule",
     "tests.events.test_bus.EventBusTests."
@@ -52,6 +56,12 @@ STRESS_TESTS = (
     "test_tick_exception_intent_survives_cleanup_failure",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_terminal_commit_rejects_competing_commands_during_cleanup",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_cleanup_terminal_commands_do_not_reenter_finalization",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_pause_and_resume_can_request_terminal_commands",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_callback_error_during_external_stop_is_reported_without_replacing_intent",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_retry_generation_starts_without_stale_terminal_intent",
     "tests.mission.test_engine.MissionEngineLifecycleTests."

@@ -285,6 +285,9 @@ class MissionEngine(Service):
         pending = (mission, *missions)
         if any(not isinstance(item, Mission) for item in pending):
             raise TypeError("run() requires Mission instances")
+        mission_ids = tuple(item.id for item in pending)
+        if len(mission_ids) != len(set(mission_ids)):
+            raise ValueError("run() requires unique Mission instances")
         snapshots = tuple(
             self.scheduler.run(
                 item,

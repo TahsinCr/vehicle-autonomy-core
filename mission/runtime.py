@@ -52,6 +52,9 @@ class MissionRuntime:
     activation_guard: Callable[[], bool] | None = None
     cleanup_error: Exception | None = None
     pending_terminal: PendingTerminalIntent | None = None
+    cleanup_owner_thread_id: int | None = None
+    callback_owner_thread_id: int | None = None
+    callback_name: str | None = None
 
 
 class BoundMissionController(MissionController):

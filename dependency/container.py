@@ -57,18 +57,23 @@ from .resolution import (
 
 
 class _ShutdownAttempt:
-    __slots__ = ("done", "error")
+    __slots__ = ("async_owner", "done", "error", "owner_task", "owner_thread_id")
 
-    def __init__(self) -> None:
+    def __init__(self, *, async_owner: bool = False) -> None:
+        self.async_owner = async_owner
         self.done = threading.Event()
         self.error: BaseException | None = None
+        self.owner_task: asyncio.Task[Any] | None = None
+        self.owner_thread_id = threading.get_ident()
 
 
 class _TokenDisposalAttempt:
-    __slots__ = ("async_owner_thread_id", "done", "error")
+    __slots__ = ("async_owner", "done", "error", "owner_task", "owner_thread_id")
 
     def __init__(self, *, async_owner: bool = False) -> None:
-        self.async_owner_thread_id = threading.get_ident() if async_owner else None
+        self.async_owner = async_owner
+        self.owner_thread_id = threading.get_ident()
+        self.owner_task: asyncio.Task[Any] | None = None
         self.done = threading.Event()
         self.error: BaseException | None = None
 
@@ -81,7 +86,6 @@ class DependencyContainer:
         "parent",
         "_context_tokens",
         "_async_operations",
-        "_async_shutdown",
         "_providers",
         "_disposal_attempts",
         "_pending_disposals",
@@ -113,7 +117,6 @@ class DependencyContainer:
         self._scope_initializers: dict[Token, InitializationGate] = {}
         self._tracker = ResourceTracker()
         self._async_operations: dict[Token, asyncio.Task[None]] = {}
-        self._async_shutdown: asyncio.Task[None] | None = None
         self._closed = False
         self._cleanup_failed = False
         self._shutdown_attempt: _ShutdownAttempt | None = None
@@ -154,23 +157,25 @@ class DependencyContainer:
         if self.parent is not None:
             self.parent._ensure_open()
 
-    def _claim_shutdown(self, *, wait: bool = True) -> _ShutdownAttempt | None:
+    def _claim_shutdown(self, *, async_owner: bool = False) -> tuple[_ShutdownAttempt | None, bool]:
         with self._registration_lock, self._shutdown_lock:
             if self._closed:
-                return None
+                return None, False
             attempt = self._shutdown_attempt
             if attempt is None:
-                attempt = _ShutdownAttempt()
+                attempt = _ShutdownAttempt(async_owner=async_owner)
                 self._shutdown_attempt = attempt
-                return attempt
-            if not wait:
+                return attempt, True
+            current_task = asyncio.current_task() if async_owner else None
+            if attempt.owner_task is not None and attempt.owner_task is current_task:
                 raise DependencyResolutionError(
-                    "Dependency container shutdown is already in progress"
+                    "Dependency container shutdown cannot re-enter its own cleanup"
                 )
-        attempt.done.wait()
-        if attempt.error is not None:
-            raise attempt.error
-        return None
+            if not attempt.async_owner and attempt.owner_thread_id == threading.get_ident():
+                raise DependencyResolutionError(
+                    "Dependency container shutdown cannot re-enter its own cleanup"
+                )
+            return attempt, False
 
     def _finish_shutdown(
         self,
@@ -207,7 +212,11 @@ class DependencyContainer:
 
     @staticmethod
     def _wait_for_token_disposal(attempt: _TokenDisposalAttempt) -> None:
-        if attempt.async_owner_thread_id == threading.get_ident():
+        if attempt.owner_thread_id == threading.get_ident():
+            if not attempt.async_owner:
+                raise DependencyResolutionError(
+                    "Dependency cleanup cannot re-enter its own token disposal"
+                )
             raise AsyncDependencyError(
                 "Async dependency cleanup cannot be awaited through the synchronous API; "
                 "use unregister_async() or shutdown_async()"
@@ -240,12 +249,6 @@ class DependencyContainer:
         with self._registration_lock:
             if self._async_operations.get(token) is task:
                 self._async_operations.pop(token, None)
-        if not task.cancelled():
-            task.exception()
-
-    def _complete_async_shutdown(self, task: asyncio.Task[None]) -> None:
-        if self._async_shutdown is task:
-            self._async_shutdown = None
         if not task.cancelled():
             task.exception()
 
@@ -527,11 +530,16 @@ class DependencyContainer:
         self._ensure_open()
         attempt, owner = self._claim_token_disposal(token, async_owner=True)
         if not owner:
+            if attempt.owner_task is asyncio.current_task():
+                raise DependencyResolutionError(
+                    "Dependency cleanup cannot re-enter its own token disposal"
+                )
             await asyncio.to_thread(attempt.done.wait)
             if attempt.error is not None:
                 raise attempt.error
             return
         task = asyncio.create_task(self._run_unregister_async(token, attempt))
+        attempt.owner_task = task
         with self._registration_lock:
             self._async_operations[token] = task
         task.add_done_callback(
@@ -607,8 +615,17 @@ class DependencyContainer:
             await self.resolve_async(provider.token)
 
     def shutdown(self) -> None:
-        attempt = self._claim_shutdown()
+        attempt, owner = self._claim_shutdown()
         if attempt is None:
+            return
+        if not owner:
+            if attempt.async_owner and attempt.owner_thread_id == threading.get_ident():
+                raise AsyncDependencyError(
+                    "Cannot synchronously wait for async shutdown on its event-loop thread"
+                )
+            attempt.done.wait()
+            if attempt.error is not None:
+                raise attempt.error
             return
         error: BaseException | None = None
         cleanup_started = False
@@ -643,17 +660,17 @@ class DependencyContainer:
             )
 
     async def shutdown_async(self) -> None:
-        if self._closed:
+        attempt, owner = self._claim_shutdown(async_owner=True)
+        if attempt is None:
             return
-        task = self._async_shutdown
-        if task is None:
-            task = asyncio.create_task(self._shutdown_async())
-            self._async_shutdown = task
-            task.add_done_callback(self._complete_async_shutdown)
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            raise
+        if not owner:
+            await asyncio.to_thread(attempt.done.wait)
+            if attempt.error is not None:
+                raise attempt.error
+            return
+        task = asyncio.create_task(self._shutdown_async(attempt))
+        attempt.owner_task = task
+        await asyncio.shield(task)
 
     async def _run_unregister_async(
         self,
@@ -703,10 +720,7 @@ class DependencyContainer:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def _shutdown_async(self) -> None:
-        attempt = self._claim_shutdown(wait=False)
-        if attempt is None:
-            return
+    async def _shutdown_async(self, attempt: _ShutdownAttempt) -> None:
         cancelled = False
         failure: BaseException | None = None
         cleanup_started = False

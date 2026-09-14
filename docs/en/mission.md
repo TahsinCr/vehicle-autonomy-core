@@ -111,6 +111,9 @@ is the concrete class name exactly and may be overridden per instance.
 `MissionNode(name, mission)` gives a configured instance a stable execution key
 without changing the mission's own name. When an instance is placed directly in
 a chain or group, its mission name is used as the node key.
+Calling `to_dict()` on a node, chain, group or execution snapshot represents
+each live mission as an `id`, `name` and concrete `type` descriptor. Runtime
+locks, transports and controller state are never copied into serialized plans.
 
 ### Mission methods and properties
 
@@ -124,8 +127,10 @@ a chain or group, its mission name is used as the node key.
 - Coordination: `wait_for_stop(timeout=None)`, `stop_missions(tags=(), resources=())`.
 
 Calling `complete()`, `fail()`, self-targeted `stop()` or self-targeted
-`cancel()` inside `start()`/`tick()` unwinds that callback. Terminal publication
-and resource release occur after user code stops. If
+`cancel()` inside a lifecycle callback safely unwinds or defers terminalization
+until that callback releases its lock. Terminal publication and resource release
+occur after user code stops. A callback failure racing an existing terminal
+command is emitted as an error event without replacing the first intent. If
 `stop()` fails, the mission remains `STOPPING`, retains resources and raises
 `MissionCleanupError`; retry the lifecycle operation after fixing the cause.
 
@@ -161,7 +166,9 @@ Custom `MissionLifecycle` and `MissionScheduler` objects are bound to the engine
 
 A mission reference is a mission ID or instance for observation and lifecycle
 commands. Execution through `run()` accepts only `Mission` instances. One input
-returns one snapshot; multiple inputs return a snapshot tuple.
+returns one snapshot; multiple inputs return a snapshot tuple. The same instance
+cannot appear twice in one call; duplicate inputs raise `ValueError` before any
+mission is admitted.
 
 Multiple inputs are independent and admitted in argument order. If a later
 mission is rejected, earlier missions keep running and later inputs are not

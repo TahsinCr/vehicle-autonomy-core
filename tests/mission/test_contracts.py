@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from types import MappingProxyType
 
@@ -15,6 +16,7 @@ from src.core.mission import (
     MissionEventQuery,
     MissionEventType,
     MissionNode,
+    MissionParallelGroup,
     MissionPhase,
     MissionRetryPolicy,
     MissionSnapshot,
@@ -202,6 +204,28 @@ class MissionContractTests(unittest.TestCase):
             MissionChain("class.chain", (PrimaryMission,))  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
             MissionChainSnapshot(chain, current_index=-1, active=True)
+
+    def test_execution_models_serialize_mission_identity_not_runtime_state(self) -> None:
+        mission = PrimaryMission()
+        mission.transport_lock = threading.Lock()
+        secondary = SurveyMission()
+        secondary.transport_lock = threading.Lock()
+        node = MissionNode("survey", secondary)
+        chain = MissionChain("flight", (mission, node))
+        group = MissionParallelGroup("parallel", (node,))
+
+        descriptor = {"id": mission.id, "name": mission.name, "type": "PrimaryMission"}
+        node_descriptor = {
+            "name": "survey",
+            "mission": {
+                "id": secondary.id,
+                "name": secondary.name,
+                "type": "SurveyMission",
+            },
+        }
+        self.assertEqual(node.to_dict(), node_descriptor)
+        self.assertEqual(chain.to_dict()["stages"], (descriptor, node_descriptor))
+        self.assertEqual(group.to_dict()["nodes"], (node.to_dict(),))
 
 
 if __name__ == "__main__":

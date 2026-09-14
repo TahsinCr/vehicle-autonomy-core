@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, overload
 
 from ..events import AsyncEventBus, Subscription
 
@@ -13,6 +13,7 @@ from .actions import AsyncDelivery
 from .runtime import MavlinkRuntime
 from .history import MessageHistory
 from .router import MavlinkIngressFilter
+from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
 
 
 class AsyncMavlinkRuntime:
@@ -155,20 +156,44 @@ class AsyncMavlinkRuntime:
     def errors(self):
         return self._errors
 
+    @overload
     def subscribe(
         self,
-        message_types: Any,
-        callback: Callable[[Any], Awaitable[None]] | None = None,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: None = None,
         *,
-        predicate: Callable[[Any], bool] | None = None,
+        predicate: MessagePredicate | None = None,
         once: bool = False,
         **options: Any,
-    ):
+    ) -> Callable[[Callable[[Any], Awaitable[None]]], Subscription]: ...
+
+    @overload
+    def subscribe(
+        self,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: Callable[[Any], Awaitable[None]],
+        *,
+        predicate: MessagePredicate | None = None,
+        once: bool = False,
+        **options: Any,
+    ) -> Subscription: ...
+
+    def subscribe(
+        self,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: Callable[[Any], Awaitable[None]] | None = None,
+        *,
+        predicate: MessagePredicate | None = None,
+        once: bool = False,
+        **options: Any,
+    ) -> Subscription | Callable[[Callable[[Any], Awaitable[None]]], Subscription]:
         if callback is None:
-            def decorate(function):
+            def decorate(
+                function: Callable[[Any], Awaitable[None]],
+            ) -> Subscription:
                 return self.subscribe(message_types, function, predicate=predicate, once=once, **options)
             return decorate
-        logical = self._runtime.subscribe(
+        logical = self._support.subscribe(
             message_types,
             callback,
             predicate=predicate,

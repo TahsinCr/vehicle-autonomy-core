@@ -5,15 +5,19 @@ import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from src.core.dependency import (
     AsyncDependencyError,
     DependencyCleanupPendingError,
     DependencyContainer,
     DependencyContainerClosedError,
+    DependencyResolutionError,
     get_current_container,
     set_default_container,
 )
+from src.core.dependency import context as dependency_context
+from src.core.dependency import container as dependency_container_module
 from src.core.dependency.registration import InitializationGate
 from src.core.compatibility import ExceptionGroup
 
@@ -59,6 +63,66 @@ class _AsyncResource:
 
 
 class DependencyLifecycleTests(unittest.TestCase):
+    def test_default_container_initialization_is_thread_safe(self) -> None:
+        barrier = threading.Barrier(2)
+        constructed: list[object] = []
+
+        class SlowContainer:
+            def __init__(self) -> None:
+                constructed.append(self)
+                time.sleep(0.02)
+
+        dependency_context._default_container = None
+        results: list[object] = []
+        with patch.object(
+            dependency_container_module,
+            "DependencyContainer",
+            SlowContainer,
+        ):
+            threads = [
+                threading.Thread(
+                    target=lambda: (
+                        barrier.wait(),
+                        results.append(dependency_context.get_default_container()),
+                    )
+                )
+                for _ in range(2)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(1.0)
+        set_default_container(DependencyContainer())
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(constructed), 1)
+        self.assertIs(results[0], results[1])
+
+    def test_sync_cleanup_reentrancy_fails_instead_of_deadlocking(self) -> None:
+        for operation in ("unregister", "shutdown"):
+            with self.subTest(operation=operation):
+                container = DependencyContainer()
+                errors: list[BaseException] = []
+
+                class Resource:
+                    def close(self) -> None:
+                        try:
+                            if operation == "unregister":
+                                container.unregister("resource")
+                            else:
+                                container.shutdown()
+                        except BaseException as error:
+                            errors.append(error)
+
+                container.instance("resource", Resource())
+                if operation == "unregister":
+                    container.unregister("resource")
+                else:
+                    container.shutdown()
+
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], DependencyResolutionError)
+
     def test_concurrent_shutdown_disposes_a_resource_once(self) -> None:
         entered = threading.Event()
         release = threading.Event()
@@ -593,6 +657,34 @@ class DependencyLifecycleTests(unittest.TestCase):
 
 
 class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_cleanup_reentrancy_fails_instead_of_deadlocking(self) -> None:
+        for operation in ("unregister", "shutdown"):
+            with self.subTest(operation=operation):
+                container = DependencyContainer()
+                errors: list[BaseException] = []
+
+                class Resource:
+                    async def aclose(self) -> None:
+                        try:
+                            if operation == "unregister":
+                                await container.unregister_async("resource")
+                            else:
+                                await container.shutdown_async()
+                        except BaseException as error:
+                            errors.append(error)
+
+                container.instance("resource", Resource())
+                if operation == "unregister":
+                    await asyncio.wait_for(
+                        container.unregister_async("resource"),
+                        timeout=1.0,
+                    )
+                else:
+                    await asyncio.wait_for(container.shutdown_async(), timeout=1.0)
+
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], DependencyResolutionError)
+
     async def asyncSetUp(self) -> None:
         self.default = DependencyContainer()
         set_default_container(self.default)

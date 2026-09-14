@@ -106,6 +106,9 @@ rehberinde açıklanır.
 stop_on_failure=True)`, `MissionParallelStage(name, nodes, failure_policy)` ve
 `MissionParallelGroup(group_id, nodes, failure_policy)` yapılandırılmış mission
 instance'ları kabul eder; mission class kabul etmez.
+Bu modellerin `to_dict()` çıktısı executable mission nesnesini
+`id`/`name`/`type` descriptor'ıyla değiştirir. `MissionEngine.run()`, herhangi
+bir girdiyi başlatmadan önce duplicate instance ID'lerini reddeder.
 
 ## `src.core.mavlink`
 
@@ -153,6 +156,10 @@ Bu tablolar hızlı sözleşmedir. Modül rehberleri aynı işlemleri gerçekçi
 | `warmup` / `warmup_async` | opsiyonel token ve lifetime'lar | Artan priority sırasında eager resolution yapar. |
 | `unregister` / `unregister_async` | token | Kaydı siler, sahipsiz cache'i tam bir kez kapatır. |
 | `shutdown` / `shutdown_async` | yok | Ters sıralı terminal cleanup; başarısız kaynak retry için sahiplikte kalır. |
+
+Cleanup'ın kendi unregister veya shutdown girişimine yeniden girmesi
+`DependencyResolutionError` üretir; bağımsız eşzamanlı çağrılar aktif girişimi
+paylaşmayı sürdürür.
 
 ### Event işlemleri
 

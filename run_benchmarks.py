@@ -14,30 +14,94 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import gc
+from importlib.metadata import PackageNotFoundError, version
 import importlib.util
 import json
 import platform
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import tracemalloc
 import types
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_LOG_PATH = ROOT / "benchmark-logs.json"
+BENCHMARK_LOG_SCHEMA = 1
+
+
+def _project_version() -> str:
+    for line in (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
+        if line.startswith("version = "):
+            return line.partition("=")[2].strip().strip('"')
+    try:
+        return version("vehicle-autonomy-core")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _git_metadata() -> tuple[str, bool]:
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ("git", *args), cwd=ROOT, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    try:
+        changes = run("status", "--porcelain").splitlines()
+        dirty = any(line[3:] != "benchmark-logs.json" for line in changes)
+        return run("rev-parse", "HEAD"), dirty
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown", False
+
+
+def _append_benchmark_log(path: Path, *, mode: str, result: object, status: str) -> None:
+    """Append one reproducible run record with an atomic file replacement."""
+
+    commit, dirty = _git_metadata()
+    document: dict[str, object] = {"schema_version": BENCHMARK_LOG_SCHEMA, "runs": []}
+    if path.exists():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if loaded.get("schema_version") != BENCHMARK_LOG_SCHEMA:
+            raise ValueError(f"Unsupported benchmark log schema in {path}")
+        document = loaded
+    runs = document.get("runs")
+    if not isinstance(runs, list):
+        raise ValueError(f"Invalid benchmark log structure in {path}")
+    runs.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(), "version": _project_version(),
+        "commit": commit, "dirty": dirty, "python": platform.python_version(),
+        "platform": platform.platform(), "mode": mode, "status": status, "result": result,
+    })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as output:
+        json.dump(document, output, indent=2)
+        output.write("\n")
+        temporary = Path(output.name)
+    temporary.replace(path)
+
+
+def _load_failures(result: "LoadBenchmarkResult") -> list[str]:
+    failures: list[str] = []
+    if result.writer_failed_records:
+        failures.append(f"history writer lost {result.writer_failed_records} records")
+    if result.thread_delta > 0:
+        failures.append(f"load run leaked {result.thread_delta} thread(s)")
+    return failures
 
 
 def _load_standalone_checkout() -> None:
     """Expose a standalone checkout under its intended ``src.core`` name."""
 
     try:
-        import src.core  # noqa: F401
+        import src.core
     except ModuleNotFoundError:
         src = sys.modules.get("src")
         if src is None:
@@ -50,7 +114,7 @@ def _load_standalone_checkout() -> None:
             submodule_search_locations=[str(ROOT)],
         )
         if spec is None or spec.loader is None:
-            raise RuntimeError("Could not load the core package")
+            raise RuntimeError("Could not load the core package") from None
         module = importlib.util.module_from_spec(spec)
         sys.modules["src.core"] = module
         spec.loader.exec_module(module)
@@ -807,7 +871,7 @@ def run_load_profile(
         stats = history.writer_stats
         if delivered != messages * callbacks:
             raise RuntimeError("Combined load callback delivery was incomplete")
-        return LoadBenchmarkResult(
+        result = LoadBenchmarkResult(
             profile=profile,
             messages=messages,
             vehicles=vehicles,
@@ -822,7 +886,7 @@ def run_load_profile(
             peak_bytes_per_message=max(0, peak - retained_before) / messages,
             writer_max_queued=max_queued,
             writer_failed_records=0 if stats is None else stats.failed_records,
-            thread_delta=max(0, threading.active_count() - threads_before),
+            thread_delta=0,
         )
     finally:
         tracemalloc.stop()
@@ -834,6 +898,10 @@ def run_load_profile(
         router.envelopes.close()
         router.errors.close()
         temporary.cleanup()
+    return replace(
+        result,
+        thread_delta=max(0, threading.active_count() - threads_before),
+    )
 
 
 def _regressions(
@@ -938,14 +1006,17 @@ def main() -> int:
     parser.add_argument(
         "--max-regression-percent",
         type=float,
-        default=40.0,
-        help="Allowed calibrated regression when --compare is used (default: 40)",
+        default=35.0,
+        help="Allowed calibrated regression when --compare is used (default: 35)",
     )
+    parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG_PATH)
+    parser.add_argument("--no-log", action="store_true", help="Do not append benchmark history")
     args = parser.parse_args()
     if args.max_regression_percent < 0:
         parser.error("--max-regression-percent must be non-negative")
     if args.load_profile is not None:
         result = run_load_profile(args.load_profile, storage=args.load_storage)
+        failures = _load_failures(result)
         if args.json:
             print(json.dumps(asdict(result), indent=2))
         else:
@@ -972,7 +1043,12 @@ def main() -> int:
                 f"failed records: {result.writer_failed_records}; "
                 f"thread delta: {result.thread_delta}"
             )
-        return 0
+        status = "failed" if failures else "passed"
+        if not args.no_log:
+            _append_benchmark_log(args.log_file, mode=f"load:{args.load_profile}:{args.load_storage}", result=asdict(result), status=status)
+        for failure in failures:
+            print(f"Load acceptance failure: {failure}", file=sys.stderr)
+        return 1 if failures else 0
     iterations = 2_000 if args.quick else args.iterations
     results = run_suite(iterations, repeats=args.repeats)
     if args.json:
@@ -990,6 +1066,7 @@ def main() -> int:
         )
     else:
         _print_table(results)
+    regressions: list[str] = []
     if args.compare is not None:
         regressions = _regressions(
             results,
@@ -1000,9 +1077,12 @@ def main() -> int:
             print("Performance regressions:", file=sys.stderr)
             for regression in regressions:
                 print(f"- {regression}", file=sys.stderr)
-            return 1
-        print("Benchmark regression check passed", file=sys.stderr)
-    return 0
+        else:
+            print("Benchmark regression check passed", file=sys.stderr)
+    status = "failed" if regressions else "passed"
+    if not args.no_log:
+        _append_benchmark_log(args.log_file, mode="quick" if args.quick else "suite", result={"base_iterations": iterations, "repeats": args.repeats, "results": [asdict(result) for result in results], "regressions": regressions}, status=status)
+    return 1 if regressions else 0
 
 
 if __name__ == "__main__":

@@ -124,6 +124,29 @@ class MissionNode(Model):
             raise ValueError("Mission node requires a Mission instance")
         object.__setattr__(self, "name", name)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the node without copying its live mission runtime graph."""
+
+        return {"name": self.name, "mission": _mission_descriptor(self.mission)}
+
+
+def _mission_descriptor(mission: "Mission") -> dict[str, Any]:
+    return {
+        "id": mission.id,
+        "name": mission.name,
+        "type": type(mission).__name__,
+    }
+
+
+def _execution_entry_dict(
+    entry: "Mission" | MissionNode | MissionParallelStage,
+) -> dict[str, Any]:
+    from .base import Mission
+
+    if isinstance(entry, Mission):
+        return _mission_descriptor(entry)
+    return entry.to_dict()
+
 
 def _mission_nodes(
     values: tuple[MissionNode | "Mission", ...],
@@ -224,6 +247,15 @@ class MissionChain(Model):
             raise ValueError("Mission chain node and stage names must be unique")
         object.__setattr__(self, "chain_id", chain_id)
         object.__setattr__(self, "stages", stages)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize executable stages as stable mission descriptors."""
+
+        return {
+            "chain_id": self.chain_id,
+            "stages": tuple(_execution_entry_dict(stage) for stage in self.stages),
+            "stop_on_failure": self.stop_on_failure,
+        }
 
 
 @dataclass(frozen=True, slots=True)

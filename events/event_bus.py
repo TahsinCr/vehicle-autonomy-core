@@ -220,7 +220,7 @@ class EventBus(BaseEventBus[T]):
                             raise ExceptionGroup(
                                 "Event replay failed",
                                 [exc, *action_errors],
-                            )
+                            ) from exc
                     else:
                         with self._lock:
                             self._delivered += 1
@@ -307,7 +307,7 @@ class EventBus(BaseEventBus[T]):
                     errors.append(exc)
                 else:
                     futures.append((subscriber, future))
-            for subscriber, future in futures:
+            for _subscriber, future in futures:
                 try:
                     future.result()
                 except Exception as exc:

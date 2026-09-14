@@ -109,6 +109,9 @@ Model constructor fields and every engine operation, including
 stop_on_failure=True)`, `MissionParallelStage(name, nodes, failure_policy)` and
 `MissionParallelGroup(group_id, nodes, failure_policy)` accept configured
 mission instances, never mission classes.
+Their `to_dict()` output replaces each executable mission object with an
+`id`/`name`/`type` descriptor. `MissionEngine.run()` rejects duplicate instance
+IDs before admitting any input.
 
 ## `src.core.mavlink`
 
@@ -156,6 +159,10 @@ in context and contain complete examples.
 | `warmup` / `warmup_async` | optional tokens and lifetimes | Eagerly resolves in ascending priority order. |
 | `unregister` / `unregister_async` | `token` | Removes the registration and closes unreferenced cached values exactly once. |
 | `shutdown` / `shutdown_async` | none | Terminal reverse-order cleanup. Failed resources remain owned for retry. |
+
+Cleanup re-entry into its own unregister or shutdown attempt raises
+`DependencyResolutionError`; independent concurrent callers still share the
+active attempt.
 
 ### Event operations
 

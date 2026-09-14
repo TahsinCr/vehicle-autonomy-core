@@ -128,12 +128,23 @@ interpreter, CPU governor ve sistem yüküyle karşılaştırma yapın. Başka b
 makinenin sabit mikrosaniye eşiği yerine oranlara ve dağılım eğilimine bakın.
 
 `--compare`, sabit işlem adlarını eşleştirir ve
-`--max-regression-percent` değiştirilmezse önce suite genelindeki sistem hızı
+`--max-regression-percent` değiştirilmezse (%35) önce suite genelindeki sistem hızı
 farkını kalibre eder, sonra işleme özel maliyetteki %40 üzeri artışı
 reddeder. Regresyonun hem wall hem CPU zamanında görülmesi gerekir; bu,
 tutarlı kod yolu yavaşlamasını saklamadan runner scheduling gürültüsünü
-süzer. Paylaşımlı CI işlemci tahsisi değişken olduğu için CI %60 tolerans,
-kontrollü yerel çalıştırma ise daha sıkı %40 varsayılanını kullanır.
+süzer. CI da aynı kalibre edilmiş %35 sınırını kullanır. Her çalışma; UTC zaman,
+paket sürümü, commit, kirli çalışma ağacı bilgisi, platform ve sonuçlarla birlikte
+atomik olarak `benchmark-logs.json` dosyasına eklenir. Geçici ölçümlerde
+`--no-log` kullanılabilir. Birleşik yük testi SQLite kayıt kaybı veya kalan worker
+thread tespit ederse başarısız olur.
+
+## Uyumluluk ve sürümleme
+
+Patch sürümleri (`1.x.y`) yayımlanmış API'yi korur; uyumlu hata, performans ve
+dokümantasyon düzeltmeleri taşır. Minor sürümler (`1.x.0`) public API'yi bilinçli
+olarak geliştirebilir; bu değişiklikler eski uyumluluk takma adları bırakılmadan
+changelog'da açıklanır. Major sürüm yalnız çekirdek sözleşmelerin temel bir
+yeniden tasarımı için artırılır.
 Birleşik profiller (`normal`, `medium`, `heavy`, `stress`); routing,
 çoklu araç state'i, birden fazla callback ve background memory/SQLite kaydını
 aynı anda çalıştırır. Throughput, p50/p95/p99 gecikme, mesaj başına CPU ve

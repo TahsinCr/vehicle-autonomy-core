@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 from .actions import MavlinkAction
 
 if TYPE_CHECKING:
+    from ..events import Subscription
+    from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
     from .runtime import MavlinkRuntime
 
 
@@ -27,6 +29,23 @@ class MavlinkRuntimeSupport:
 
     def fail_waiters(self) -> None:
         self._runtime._registry.fail_waiters()
+
+    def subscribe(
+        self,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: Callable[[Any], Any],
+        *,
+        predicate: MessagePredicate | None = None,
+        once: bool = False,
+        **options: Any,
+    ) -> Subscription:
+        return self._runtime._subscribe(
+            message_types,
+            callback,
+            predicate=predicate,
+            once=once,
+            **options,
+        )
 
     def has_pending_handlers(self) -> bool:
         return bool(self._runtime._application_handlers._tasks)

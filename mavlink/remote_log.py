@@ -151,7 +151,7 @@ class MavlinkRemoteLogBatch:
             )
         if any(
             current.sequence >= following.sequence
-            for current, following in zip(records, records[1:])
+            for current, following in zip(records, records[1:], strict=False)
         ):
             raise ValueError("Remote log records must be ordered by unique sequence")
         if not math.isfinite(created_at) or created_at <= 0:

@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, overload
 
 from ..abstracts import Service
 from ..compatibility import ExceptionGroup
@@ -420,6 +420,28 @@ class MavlinkRuntime(MavlinkActions, Service):
         self.stop()
         self.start()
 
+    @overload
+    def subscribe(
+        self,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: None = None,
+        *,
+        predicate: MessagePredicate | None = None,
+        once: bool = False,
+        **options: Any,
+    ) -> Callable[[Callable[[Any], None]], Subscription]: ...
+
+    @overload
+    def subscribe(
+        self,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: Callable[[Any], None],
+        *,
+        predicate: MessagePredicate | None = None,
+        once: bool = False,
+        **options: Any,
+    ) -> Subscription: ...
+
     def subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
@@ -427,10 +449,33 @@ class MavlinkRuntime(MavlinkActions, Service):
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
-        **options,
-    ) -> Subscription:
+        **options: Any,
+    ) -> Subscription | Callable[[Callable[[Any], None]], Subscription]:
         if callback is None:
-            return lambda function: self.subscribe(message_types, function, predicate=predicate, once=once, **options)
+            return lambda function: self._subscribe(
+                message_types,
+                function,
+                predicate=predicate,
+                once=once,
+                **options,
+            )
+        return self._subscribe(
+            message_types,
+            callback,
+            predicate=predicate,
+            once=once,
+            **options,
+        )
+
+    def _subscribe(
+        self,
+        message_types: MavlinkMessageFilter | MessageTypeInput,
+        callback: Callable[[Any], Any],
+        *,
+        predicate: MessagePredicate | None = None,
+        once: bool = False,
+        **options: Any,
+    ) -> Subscription:
         message_filter = (
             message_types
             if isinstance(message_types, MavlinkMessageFilter)

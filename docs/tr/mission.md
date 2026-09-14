@@ -106,6 +106,9 @@ name doğrudan somut class adıdır ve instance için değiştirilebilir.
 `MissionNode(name, mission)`, mission'ın kendi adını değiştirmeden
 yapılandırılmış instance'a sabit bir execution anahtarı verir. Instance chain
 veya group'a doğrudan konursa node anahtarı olarak mission adı kullanılır.
+Node, chain, group veya execution snapshot üzerinde `to_dict()` çağrıldığında
+canlı mission; `id`, `name` ve somut `type` bilgileriyle temsil edilir. Runtime
+lock'ları, transport ve controller state'i serileştirme sırasında kopyalanmaz.
 
 Gerekli metotlar `start()` ve `stop()`; opsiyonel hook'lar `pause()`, `resume()`,
 `tick(elapsed_seconds)`. Mission içinden `complete(result=None)`,
@@ -114,8 +117,11 @@ Gerekli metotlar `start()` ve `stop()`; opsiyonel hook'lar `pause()`, `resume()`
 `stop_missions(tags=(), resources=())` kullanılabilir.
 
 `bind_control`/`unbind_control` engine wiring içindir. `id`, `name`, `control`,
-`runtime`, `stop_requested` okunabilir. Callback içindeki complete/fail ile
-mission'ın kendisine verdiği stop/cancel komutları callback'i sonlandırır.
+`runtime`, `stop_requested` okunabilir. Lifecycle callback'i içindeki
+complete/fail ve mission'ın kendisine verdiği stop/cancel komutları, callback
+kilidi bırakıldıktan sonra güvenle tamamlanır. Mevcut terminal komutuyla aynı
+anda callback hatası oluşursa ilk intent korunur ve asıl hata error event olarak
+yayınlanır.
 `stop()` hata verirse mission `STOPPING` kalır, resource'u korur ve
 `MissionCleanupError` verir.
 
@@ -138,6 +144,9 @@ Kayıt ve çalıştırma:
   hazır instance'ı birbirinden bağımsız çalıştır
 - `run_parallel(group)`: takip edilen bir `MissionParallelGroup` çalıştır
 - `wait(reference, timeout=None)`
+
+Aynı instance tek bir `run()` çağrısına iki kez verilemez. Duplicate girdiler
+hiçbir mission admission'a alınmadan önce `ValueError` üretir.
 
 Çoklu girdiler bağımsızdır ve argüman sırasıyla admission'a alınır. Sonraki bir
 mission reddedilirse öncekiler çalışmaya devam eder, daha sonraki girdiler

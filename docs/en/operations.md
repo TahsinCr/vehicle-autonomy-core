@@ -128,11 +128,21 @@ over a fixed microsecond threshold from another machine.
 
 `--compare` matches stable operation names, calibrates for the suite-wide host
 speed shift and rejects an operation-specific cost increase over 40% unless
-`--max-regression-percent` changes that budget. A regression must appear in
+`--max-regression-percent` changes that budget. The default is 35%. A regression must appear in
 both wall and CPU time, which filters out
 runner scheduling noise without accepting a consistent code-path slowdown.
-Hosted CI uses a wider 60% budget because its CPU allocation is shared and
-variable; local controlled runs keep the stricter 40% default.
+CI uses the same calibrated 35% budget. Every run is appended atomically to
+`benchmark-logs.json` with UTC time, package version, commit, dirty-tree state,
+platform and result data. Use `--no-log` only for disposable probes. Combined
+load runs fail when SQLite loses records or leaves worker threads behind.
+
+## Compatibility and versioning
+
+Patch releases (`1.x.y`) preserve the published API and contain compatible
+fixes, performance work and documentation updates. Minor releases (`1.x.0`)
+may deliberately refine the public API; each such change is listed in the
+changelog without keeping obsolete compatibility aliases. A new major version
+is reserved for a foundational redesign of the core contracts.
 Combined profiles (`normal`, `medium`, `heavy`, `stress`) exercise routing, multi-vehicle state,
 multiple callbacks and background memory/SQLite recording together. They report
 throughput, p50/p95/p99 latency, CPU and memory per message, writer pressure,

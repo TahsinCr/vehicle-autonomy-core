@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## [v1.8.1] - 2026-09-14
+
+### Added
+
+- Added an append-only `benchmark-logs.json` history with UTC timestamp,
+  package version, Git commit, working-tree and platform metadata for each run.
+- Added load acceptance checks and a generated public callable-signature
+  contract that makes accidental API changes visible in CI.
+
+### Changed
+
+- Expanded Ruff with bug-risk and async correctness rules, and Pyright with
+  unused production-symbol diagnostics.
+- Tightened calibrated benchmark regressions from 60% in CI (40% locally) to
+  one 35% standard, and fail combined SQLite loads on record loss or thread leaks.
+- Documented the project's patch, minor and major compatibility policy.
+- Mission execution models now serialize configured missions as stable
+  `id`/`name`/`type` descriptors instead of copying live runtime objects.
+- Sync and async MAVLink subscription overloads now describe direct and
+  decorator registration accurately to type checkers.
+
+### Fixed
+
+- Unified synchronous and asynchronous dependency shutdown behind one
+  loop-neutral ownership barrier; callers now share completion and failures
+  across threads and event loops without awaiting a foreign-loop task.
+
+- Prevent mission cleanup and dependency disposal from deadlocking when user
+  cleanup code re-enters its own terminal operation.
+- Defer terminal commands raised by mission `pause()` and `resume()` hooks until
+  their callback lock is released, matching start/tick lifecycle safety.
+- Preserve the first terminal intent when a concurrent mission callback fails
+  and publish the original callback failure as an error event.
+- Make process-default dependency-container creation thread-safe.
+- Reject repeated mission instances in one multi-mission `run()` call before
+  any input is admitted.
+
+### Tests
+
+- Added deterministic mission callback, cleanup reentrancy, execution-model
+  serialization, dependency reentrancy and default-container race regressions;
+  concurrency-sensitive cases are also part of the repeated stress suite.
+
 ## [v1.8] - 2026-09-14
 
 ### Changed
@@ -730,7 +775,9 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.3...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.1...HEAD
+[v1.8.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8...v1.8.1
+[v1.8]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.3...v1.8
 [v1.7.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.2...v1.7.3
 [v1.7.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.1...v1.7.2
 [v1.7.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7...v1.7.1

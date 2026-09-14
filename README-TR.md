@@ -151,6 +151,8 @@ python run_benchmarks.py
 
 Benchmark sonuçları makineye bağlı yazılım regresyonu araçlarıdır; hard-real-time
 garantisi değildir. Baseline'ları aynı Python sürümü ve donanımda karşılaştırın.
+Çalışmalar `benchmark-logs.json` içinde kaydedilir; kabul sınırları ve seçenekler
+operasyon rehberinde açıklanır.
 
 ## Katkı
 

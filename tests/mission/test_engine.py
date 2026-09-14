@@ -13,6 +13,7 @@ from src.core.mission import (
     MissionConflictPolicy,
     MissionEngine,
     MissionError,
+    MissionEventType,
     MissionLifecycle,
     MissionNode,
     MissionNotFoundError,
@@ -443,6 +444,15 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "Mission instances"):
             self.engine.run(mission, BlockingMission)  # type: ignore[arg-type]
+
+        with self.assertRaises(MissionNotFoundError):
+            self.engine.snapshot(mission)
+
+    def test_multi_run_rejects_duplicate_instances_before_admission(self) -> None:
+        mission = BlockingMission()
+
+        with self.assertRaisesRegex(ValueError, "unique Mission instances"):
+            self.engine.run(mission, mission)
 
         with self.assertRaises(MissionNotFoundError):
             self.engine.snapshot(mission)
@@ -927,6 +937,114 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(cancelled.phase, MissionPhase.CANCELLED)
         self.assertFalse(mission.after_cancel)
         self.assertTrue(mission.cleanup_after_unwind)
+
+    def test_cleanup_terminal_commands_do_not_reenter_finalization(self) -> None:
+        class ReentrantCleanupMission(BlockingMission):
+            def __init__(self, command: str) -> None:
+                super().__init__()
+                self.command = command
+                self.cleanup_returned = False
+
+            def stop(self) -> None:
+                if self.command == "stop":
+                    self.control.stop(self.id)
+                else:
+                    self.control.cancel(self.id)
+                self.cleanup_returned = True
+
+        for command, phase in (
+            ("stop", MissionPhase.STOPPED),
+            ("cancel", MissionPhase.CANCELLED),
+        ):
+            with self.subTest(command=command):
+                mission = ReentrantCleanupMission(command)
+                self.engine.run(mission)
+                self.assertTrue(mission.started.wait(1.0))
+                snapshot = (
+                    self.engine.stop_mission(mission)
+                    if command == "stop"
+                    else self.engine.cancel(mission)
+                )
+                self.assertEqual(snapshot.phase, phase)
+                self.assertTrue(mission.cleanup_returned)
+
+    def test_pause_and_resume_can_request_terminal_commands(self) -> None:
+        class CallbackTerminalMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cancel_on_resume = False
+
+            def pause(self) -> None:
+                if not self.cancel_on_resume:
+                    self.control.stop(self.id)
+
+            def resume(self) -> None:
+                if self.cancel_on_resume:
+                    self.control.cancel(self.id)
+
+        stopping = CallbackTerminalMission()
+        self.engine.run(stopping)
+        self.assertTrue(stopping.started.wait(1.0))
+        self.assertEqual(self.engine.pause(stopping).phase, MissionPhase.STOPPED)
+
+        cancelling = CallbackTerminalMission()
+        cancelling.cancel_on_resume = True
+        self.engine.run(cancelling)
+        self.assertTrue(cancelling.started.wait(1.0))
+        self.assertEqual(self.engine.pause(cancelling).phase, MissionPhase.PAUSED)
+        self.assertEqual(self.engine.resume(cancelling).phase, MissionPhase.CANCELLED)
+
+        class FailingPauseMission(BlockingMission):
+            def pause(self) -> None:
+                self.fail("pause callback failed")
+
+        failing = FailingPauseMission()
+        self.engine.run(failing)
+        self.assertTrue(failing.started.wait(1.0))
+        failed = self.engine.pause(failing)
+        self.assertEqual(failed.phase, MissionPhase.FAILED)
+        self.assertEqual(failed.reason, "pause callback failed")
+
+    def test_callback_error_during_external_stop_is_reported_without_replacing_intent(self) -> None:
+        class FailingTickMission(Mission):
+            tick_interval = 0.001
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.tick_entered = threading.Event()
+                self.release_tick = threading.Event()
+
+            def start(self) -> None:
+                pass
+
+            def tick(self, elapsed_seconds: float) -> None:
+                self.tick_entered.set()
+                self.release_tick.wait(1.0)
+                raise RuntimeError("vision failed")
+
+            def stop(self) -> None:
+                pass
+
+        mission = FailingTickMission()
+        self.engine.run(mission)
+        self.assertTrue(mission.tick_entered.wait(1.0))
+        stopped: list[MissionSnapshot] = []
+        caller = threading.Thread(
+            target=lambda: stopped.append(self.engine.stop_mission(mission))
+        )
+        caller.start()
+        wait_for_phase(self.engine, mission, MissionPhase.STOPPING)
+        mission.release_tick.set()
+        caller.join(1.0)
+
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(stopped[0].phase, MissionPhase.STOPPED)
+        errors = [
+            event
+            for event in self.engine.query_events()
+            if event.event_type is MissionEventType.ERROR
+        ]
+        self.assertTrue(any("vision failed" in event.message for event in errors))
 
     def test_cancel_intent_survives_cleanup_failure_and_rejects_stop(self) -> None:
         class BrokenCleanupMission(BlockingMission):

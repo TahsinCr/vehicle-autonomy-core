@@ -152,6 +152,8 @@ python run_benchmarks.py
 
 Benchmark results are machine-dependent regression probes, not hard-real-time
 guarantees. Compare baselines produced with the same Python build and hardware.
+Runs are recorded in `benchmark-logs.json`; detailed gates and options are in
+the operations guide.
 
 ## Contributing
 

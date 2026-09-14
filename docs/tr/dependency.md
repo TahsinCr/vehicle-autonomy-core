@@ -91,6 +91,11 @@ Auto-wire aynı token reservation kuralına uyar; önceki instance dispose edili
 concrete class yeniden üretilemez. Event-loop thread'inde yapılan senkron çağrı
 async disposal'ı bekleyip kilitlenmez; `AsyncDependencyError` verir ve eşdeğer
 async API'nin kullanılmasını ister.
+Kaynak cleanup kodu kendisini çağıran aynı token disposal veya container
+shutdown işlemini tekrar bekleyemez. Bu re-entry, deadlock yerine hemen
+`DependencyResolutionError` üretir; ilgisiz eşzamanlı çağrılar ilk cleanup
+girişimini paylaşmaya devam eder. Process-default container oluşturma ve
+değiştirme işlemleri thread'ler arasında senkronize edilir.
 
 ## `DependencyContainer`
 

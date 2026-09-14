@@ -72,7 +72,7 @@ jobs:
         run: >-
           python run_benchmarks.py --quick
           --compare /tmp/vehicle-core-baseline.json
-          --max-regression-percent 60
+          --max-regression-percent 35
       - name: Exercise the combined SQLite load path
         run: python run_benchmarks.py --load-profile normal --load-storage sqlite
 
