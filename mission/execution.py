@@ -112,7 +112,7 @@ class MissionNode(Model):
     """A uniquely named mission inside an execution graph."""
 
     name: str
-    mission_type: type["Mission"]
+    mission: "Mission"
 
     def __post_init__(self) -> None:
         from .base import Mission
@@ -120,25 +120,27 @@ class MissionNode(Model):
         name = str(self.name).strip()
         if not name:
             raise ValueError("Mission node name cannot be empty")
-        if not isinstance(self.mission_type, type) or not issubclass(
-            self.mission_type,
-            Mission,
-        ):
-            raise ValueError("Mission node type must be a Mission subclass")
+        if not isinstance(self.mission, Mission):
+            raise ValueError("Mission node requires a Mission instance")
         object.__setattr__(self, "name", name)
 
 
 def _mission_nodes(
-    values: tuple[MissionNode | type["Mission"], ...],
+    values: tuple[MissionNode | "Mission", ...],
 ) -> tuple[MissionNode, ...]:
+    from .base import Mission
+
     nodes: list[MissionNode] = []
     for value in values:
         if isinstance(value, MissionNode):
             nodes.append(value)
-        elif isinstance(value, type):
-            nodes.append(MissionNode(value.__name__, value))
+        elif isinstance(value, Mission):
+            nodes.append(MissionNode(value.name, value))
         else:
-            raise ValueError("Parallel entries must be missions or named nodes")
+            raise ValueError("Parallel entries must be Mission instances or nodes")
+    mission_ids = tuple(node.mission.id for node in nodes)
+    if len(mission_ids) != len(set(mission_ids)):
+        raise ValueError("Parallel mission instances must be unique")
     return tuple(nodes)
 
 
@@ -147,7 +149,7 @@ class MissionParallelStage(Model):
     """A named set of missions launched as one chain stage."""
 
     name: str
-    nodes: tuple[MissionNode | type["Mission"], ...]
+    nodes: tuple[MissionNode | "Mission", ...]
     failure_policy: ParallelFailurePolicy = ParallelFailurePolicy.WAIT_ALL
 
     def __post_init__(self) -> None:
@@ -169,10 +171,10 @@ class MissionParallelStage(Model):
 
 @dataclass(frozen=True, slots=True)
 class MissionParallelGroup(Model):
-    """Reusable definition for a controlled parallel mission execution."""
+    """Configured mission instances for one controlled parallel execution."""
 
     group_id: str
-    nodes: tuple[MissionNode | type["Mission"], ...]
+    nodes: tuple[MissionNode | "Mission", ...]
     failure_policy: ParallelFailurePolicy = ParallelFailurePolicy.WAIT_ALL
 
     def __post_init__(self) -> None:
@@ -185,7 +187,7 @@ class MissionParallelGroup(Model):
 @dataclass(frozen=True, slots=True)
 class MissionChain(Model):
     chain_id: str
-    stages: tuple[type["Mission"] | MissionNode | MissionParallelStage, ...]
+    stages: tuple["Mission" | MissionNode | MissionParallelStage, ...]
     stop_on_failure: bool = True
 
     def __post_init__(self) -> None:
@@ -198,28 +200,26 @@ class MissionChain(Model):
         if not stages:
             raise ValueError("Mission chain must contain at least one mission")
         if any(
-            not isinstance(entry, (MissionNode, MissionParallelStage))
-            and (not isinstance(entry, type) or not issubclass(entry, Mission))
+            not isinstance(entry, (Mission, MissionNode, MissionParallelStage))
             for entry in stages
         ):
             raise ValueError(
-                "Mission chain entries must be missions, nodes, or parallel stages"
+                "Mission chain entries must be Mission instances, nodes, or parallel stages"
             )
         node_names: list[str] = []
-        type_counts: dict[type[Mission], int] = {}
+        mission_ids: list[int] = []
         for entry in stages:
             if isinstance(entry, MissionParallelStage):
                 node_names.append(entry.name)
+                mission_ids.extend(node.mission.id for node in entry.nodes)
             elif isinstance(entry, MissionNode):
-                node_names.append(entry.name)
+                node_names.append(str(entry.name))
+                mission_ids.append(entry.mission.id)
             else:
-                type_counts[entry] = type_counts.get(entry, 0) + 1
-                occurrence = type_counts[entry]
-                node_names.append(
-                    entry.__name__
-                    if occurrence == 1
-                    else f"{entry.__name__}#{occurrence}"
-                )
+                node_names.append(entry.name)
+                mission_ids.append(entry.id)
+        if len(mission_ids) != len(set(mission_ids)):
+            raise ValueError("Mission chain instances must be unique")
         if len(node_names) != len(set(node_names)):
             raise ValueError("Mission chain node and stage names must be unique")
         object.__setattr__(self, "chain_id", chain_id)
@@ -249,7 +249,7 @@ class MissionChainSnapshot(Model):
     @property
     def current_stage(
         self,
-    ) -> type["Mission"] | MissionNode | MissionParallelStage | None:
+    ) -> "Mission" | MissionNode | MissionParallelStage | None:
         if not self.active or self.current_index >= len(self.chain.stages):
             return None
         return self.chain.stages[self.current_index]

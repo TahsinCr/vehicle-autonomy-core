@@ -6,6 +6,59 @@ The mission module runs application-defined work while owning state transitions,
 priority, prerequisites, conflicts, retries, timing and cleanup. Mission logic
 stays in subclasses; the engine does not contain vehicle-specific behavior.
 
+## Reading path
+
+```text
+Create Mission instance → run → observe state → resources and priority
+                        → chain/parallel/background → cleanup and recovery
+```
+
+Construct and configure a mission explicitly, then pass that instance to
+`run(instance)`. Independent missions naturally execute concurrently when
+admission allows it. `run_parallel()` instead creates one tracked aggregate
+execution.
+
+## Complete health-check example
+
+```python
+from src.core import Mission, MissionEngine, MissionPhase
+
+class SensorGateway:
+    def all_ready(self) -> bool:
+        return True
+
+class SystemCheck(Mission):
+    resources = frozenset({"sensor-health"})
+    timeout_seconds = 2.0
+
+    def __init__(self, sensors: SensorGateway) -> None:
+        super().__init__()
+        self.sensors = sensors
+
+    def start(self) -> None:
+        self.checkpoint("sensor-scan", attempted=True)
+        if not self.sensors.all_ready():
+            self.fail("A required sensor is unavailable", retryable=True)
+        self.update_progress(1.0, reason="All sensors responded")
+        self.complete({"ready": True})
+
+    def stop(self) -> None:
+        pass
+
+sensors = SensorGateway()
+engine = MissionEngine()
+
+with engine:
+    started = engine.run(SystemCheck())
+    finished = engine.wait(started.mission_id, timeout=3.0)
+    assert finished is not None
+    assert finished.phase is MissionPhase.SUCCEEDED
+```
+
+The application supplies the sensor adapter; the core only creates, schedules
+and observes the mission. Checkpoint and progress data remain visible without
+making the engine understand the sensor domain.
+
 ## Defining a mission
 
 ```python
@@ -52,8 +105,12 @@ class SurveyMission(Mission):
 | `queue_timeout_seconds` | `None` | Maximum queued duration |
 | `retry` | one attempt | `MissionRetryPolicy(attempts, delay)` |
 
-`Mission(name=None)` creates a unique integer `id`; its default name is derived
-from the class name and may be overridden per instance.
+`Mission(name=None)` creates a unique UUID-backed integer `id`; its default name
+is the concrete class name exactly and may be overridden per instance.
+
+`MissionNode(name, mission)` gives a configured instance a stable execution key
+without changing the mission's own name. When an instance is placed directly in
+a chain or group, its mission name is used as the node key.
 
 ### Mission methods and properties
 
@@ -83,14 +140,12 @@ MissionEngine(
     execution_history=256,
     max_active_missions=None,
     max_queued_missions=None,
-    mission_factory=None,
     lifecycle=None,
     scheduler=None,
 )
 ```
 
-`mission_factory` constructs class references; the default calls the class with
-no arguments. Supply a factory when mission constructors need dependencies.
+Direct, chain and parallel execution all receive configured mission instances.
 Custom `MissionLifecycle` and `MissionScheduler` objects are bound to the engine.
 
 ### Registration and execution
@@ -100,14 +155,18 @@ Custom `MissionLifecycle` and `MissionScheduler` objects are bound to the engine
 | `register(mission)` | Register an existing instance |
 | `unregister(mission)` | Remove an inactive mission; returns whether found |
 | `mission(reference)` | Return the registered instance |
-| `launch(reference, requester_id=None, reason="")` | Start or apply queue/conflict policy |
-| `run(reference, ...)` | Register class/instance if needed, then launch |
-| `launch_many(*missions)` | Launch several references |
-| `run_parallel(*missions)` | Convenience parallel launch |
+| `run(mission, *missions, requester_id=None, reason="")` | Run one or more configured instances independently |
+| `run_parallel(group)` | Run one tracked `MissionParallelGroup` |
 | `wait(reference, timeout=None)` | Wait for terminal state; `None` on timeout |
 
-A mission reference may be a mission ID, registered instance, or mission class
-where accepted by the operation.
+A mission reference is a mission ID or instance for observation and lifecycle
+commands. Execution through `run()` accepts only `Mission` instances. One input
+returns one snapshot; multiple inputs return a snapshot tuple.
+
+Multiple inputs are independent and admitted in argument order. If a later
+mission is rejected, earlier missions keep running and later inputs are not
+attempted. The rejected mission remains registered for observation or a later
+retry. This operation is intentionally not transactional.
 
 ### Lifecycle commands
 
@@ -151,25 +210,27 @@ enough timestamps are available.
 
 ## Chains
 
-`MissionChain(chain_id, stages, stop_on_failure=True)` runs ordered stages. A
-stage is a mission class, `MissionNode`, or `MissionParallelStage`.
+`MissionChain(chain_id, stages, stop_on_failure=True)` runs configured instances
+in order. A stage is a `Mission`, `MissionNode`, or `MissionParallelStage`.
+The plan owns those instances; construct a new plan with new instances for a
+separate execution.
 
 ```python
 chain = MissionChain(
     "inspection",
     (
-        TakeoffMission,
+        TakeoffMission(),
         MissionParallelStage(
             "inspect",
-            (MissionNode("camera", CameraMission),
-             MissionNode("mapping", MappingMission)),
+            (MissionNode("camera", CameraMission()),
+             MissionNode("mapping", MappingMission())),
             failure_policy=ParallelFailurePolicy.CANCEL_REMAINING,
         ),
-        LandMission,
+        LandMission(),
     ),
 )
 
-execution = engine.start_chain(
+execution = engine.run_chain(
     chain,
     input={"altitude": 30},
     metadata={"operator": "station-1"},
@@ -177,7 +238,7 @@ execution = engine.start_chain(
 finished = engine.wait_chain(execution.chain.chain_id, timeout=180.0)
 ```
 
-Chain methods: `start_chain`, `chain_snapshot`, `wait_chain`, `stop_chain`,
+Chain methods: `run_chain`, `chain_snapshot`, `wait_chain`, `stop_chain`,
 `cancel_chain`, `forget_chain`. Execution results are passed through
 `MissionExecutionContext`, whose fields are `chain_id`, `execution_id`,
 `current_index`, `input`, `metadata`, `previous_mission`, `previous_result` and
@@ -192,16 +253,20 @@ chain context to a running mission.
 
 ## Parallel groups
 
+A parallel group owns configured instances for one execution. Create a new
+group with new instances when the work needs to run again.
+
 ```python
 group = MissionParallelGroup(
     "preflight",
-    (MissionNode("sensors", SensorCheck), MissionNode("link", LinkCheck)),
+    (MissionNode("sensors", SensorCheck()),
+     MissionNode("link", LinkCheck())),
     failure_policy=ParallelFailurePolicy.WAIT_ALL,
 )
-snapshot = engine.start_parallel(group)
+snapshot = engine.run_parallel(group)
 ```
 
-Methods: `start_parallel`, `parallel_snapshot`, `wait_parallel`,
+Methods: `run_parallel`, `parallel_snapshot`, `wait_parallel`,
 `stop_parallel`, `cancel_parallel`, `forget_parallel`.
 
 `MissionParallelSnapshot` contains `group`, `execution_id`, lifecycle flags,
@@ -210,7 +275,7 @@ Methods: `start_parallel`, `parallel_snapshot`, `wait_parallel`,
 ## Background missions
 
 ```python
-background = engine.launch_background(
+background = engine.run_background(
     HealthMonitorMission(),
     owner=chain_snapshot,
     termination_policy=OwnerTerminationPolicy.STOP_WITH_OWNER,
@@ -273,7 +338,7 @@ active, queued and paused IDs plus current resource owners.
 
 `MissionController` is the abstract command surface bound to a mission.
 `MissionLifecycle` implements lifecycle operations and may be subclassed for a
-different execution mechanism. `MissionScheduler` implements launch policy and
+different execution mechanism. `MissionScheduler` implements run admission and
 may be subclassed without changing mission classes.
 Both extension components expose `bind(engine)` and are normally bound by the
 engine constructor. `background_snapshot(mission_id)` inspects a registered

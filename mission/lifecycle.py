@@ -18,13 +18,11 @@ from .errors import (
     MissionTransitionError,
 )
 from .models import MissionSnapshot, MissionTransition
+from .references import MissionReference
 from .runtime import MissionRuntime, PendingTerminalIntent
 
 if TYPE_CHECKING:
     from .engine import MissionEngine
-
-
-MissionReference = Mission | int
 
 
 class _MissionExit(BaseException):
@@ -251,7 +249,7 @@ class MissionLifecycle:
             if intent is not None:
                 runtime.pending_terminal = None
         self._publish_transition(transition)
-        self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=True)
+        self.engine.scheduler._after_terminal(runtime.mission.id)
         return snapshot
 
     def fail(
@@ -353,7 +351,7 @@ class MissionLifecycle:
         self._publish_transition(transition)
         self._publish_transition(queued_transition)
         if not should_retry:
-            self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
+            self.engine.scheduler._after_terminal(runtime.mission.id)
             if retry_rejected:
                 self.engine._emit(
                     MissionEventType.ERROR,
@@ -646,10 +644,7 @@ class MissionLifecycle:
                     )
                     runtime.pending_terminal = None
                 self._publish_transition(transition)
-                self.engine.scheduler._after_terminal(
-                    runtime.mission.id,
-                    succeeded=False,
-                )
+                self.engine.scheduler._after_terminal(runtime.mission.id)
         return snapshot
 
     def _finish_by_command(
@@ -708,7 +703,7 @@ class MissionLifecycle:
             return self._finalize_pending_terminal(runtime, intent)
 
         self._publish_transition(transition)
-        self.engine.scheduler._after_terminal(runtime.mission.id, succeeded=False)
+        self.engine.scheduler._after_terminal(runtime.mission.id)
         self.engine._scheduler_wake.set()
         return snapshot
 

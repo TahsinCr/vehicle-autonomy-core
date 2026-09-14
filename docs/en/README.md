@@ -9,6 +9,22 @@ vehicle-specific mission logic.
 
 ## Documentation map
 
+```text
+Install and import
+       │
+       ▼
+Core contracts ──► Dependency injection ──► Events
+                                      │
+                                      ▼
+                                  Missions
+                                      │
+                                      ▼
+                         MAVLink and application protocol
+                                      │
+                                      ▼
+                           Operations and performance
+```
+
 - [Getting started](getting-started.md) — installation, source layout and first programs
 - [Architecture](architecture.md) — module boundaries, threading and ownership
 - [Core abstractions](core.md) — `Model`, `Service` and serialization
@@ -19,6 +35,26 @@ vehicle-specific mission logic.
 - [Application protocol](application-protocol.md) — fragmented packets, peers and dispatch
 - [API index](api-reference.md) — every supported public symbol by package
 - [Operations and testing](operations.md) — shutdown, observability, tests and benchmarks
+
+## Choose a path
+
+If this is your first visit, read [Getting started](getting-started.md), then
+open only the module you need. Each module guide starts with a complete but
+small vehicle-oriented example and gradually introduces advanced behavior.
+
+| I want to… | Start here |
+|---|---|
+| Construct services and manage their lifetime | [Dependency injection](dependency.md) |
+| Publish state changes or decouple components | [Events](events.md) |
+| Run, pause, retry or coordinate vehicle work | [Missions](mission.md) |
+| Discover vehicles and consume telemetry | [MAVLink](mavlink.md) |
+| Exchange structured request/response packets | [Application protocol](application-protocol.md) |
+| Look up one exact signature or exception | [API reference](api-reference.md) |
+| Prepare deployment limits and health checks | [Operations](operations.md) |
+
+Every guide is usable on its own. Concepts are introduced before lifecycle,
+concurrency and failure details, so reading from top to bottom is the easiest
+route while the contents links support quick lookup.
 
 ## Import conventions
 

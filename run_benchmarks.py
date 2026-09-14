@@ -349,7 +349,7 @@ def build_cases(base_iterations: int) -> list[BenchmarkCase]:
 
     def mission_lifecycle_cycle() -> object:
         mission = _CompletingMission()
-        engine.launch(mission)
+        engine.run(mission)
         result = engine.wait(mission, timeout=1.0)
         engine.unregister(mission)
         return result

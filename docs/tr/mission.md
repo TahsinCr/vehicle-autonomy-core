@@ -6,6 +6,58 @@ Mission modülü uygulamanın tanımladığı işi çalıştırırken transition
 prerequisite, conflict, retry, timing ve cleanup'ı yönetir. Araca özel mantık
 subclass'ta kalır.
 
+## Okuma akışı
+
+```text
+Mission instance oluştur → run → durumu izle → resource ve priority
+                        → chain/parallel/background → cleanup ve recovery
+```
+
+Mission açıkça oluşturulup yapılandırıldıktan sonra `run(instance)` kullanılır.
+Admission izin verdiğinde bağımsız mission'lar doğal olarak eşzamanlı çalışır.
+`run_parallel()` ise tek bir tracked aggregate execution oluşturur.
+
+## Tam bir sağlık kontrolü örneği
+
+```python
+from src.core import Mission, MissionEngine, MissionPhase
+
+class SensorGateway:
+    def all_ready(self) -> bool:
+        return True
+
+class SystemCheck(Mission):
+    resources = frozenset({"sensor-health"})
+    timeout_seconds = 2.0
+
+    def __init__(self, sensors: SensorGateway) -> None:
+        super().__init__()
+        self.sensors = sensors
+
+    def start(self) -> None:
+        self.checkpoint("sensor-scan", attempted=True)
+        if not self.sensors.all_ready():
+            self.fail("Gerekli bir sensöre ulaşılamıyor", retryable=True)
+        self.update_progress(1.0, reason="Tüm sensörler cevap verdi")
+        self.complete({"ready": True})
+
+    def stop(self) -> None:
+        pass
+
+sensors = SensorGateway()
+engine = MissionEngine()
+
+with engine:
+    started = engine.run(SystemCheck())
+    finished = engine.wait(started.mission_id, timeout=3.0)
+    assert finished is not None
+    assert finished.phase is MissionPhase.SUCCEEDED
+```
+
+Sensor adapter'ını application verir; core yalnızca mission'ı oluşturur,
+schedule eder ve izler. Checkpoint ile progress, engine sensör domain'ini
+bilmeden snapshot'ta görünür kalır.
+
 ## Mission tanımlama
 
 ```python
@@ -48,8 +100,12 @@ Class ayarları:
 | `queue_timeout_seconds` | `None` | Kuyrukta kalma timeout'u |
 | `retry` | 1 deneme | `MissionRetryPolicy(attempts, delay)` |
 
-`Mission(name=None)` benzersiz integer `id` oluşturur. Varsayılan name class
-adından gelir ve instance için değiştirilebilir.
+`Mission(name=None)` UUID tabanlı benzersiz integer `id` oluşturur. Varsayılan
+name doğrudan somut class adıdır ve instance için değiştirilebilir.
+
+`MissionNode(name, mission)`, mission'ın kendi adını değiştirmeden
+yapılandırılmış instance'a sabit bir execution anahtarı verir. Instance chain
+veya group'a doğrudan konursa node anahtarı olarak mission adı kullanılır.
 
 Gerekli metotlar `start()` ve `stop()`; opsiyonel hook'lar `pause()`, `resume()`,
 `tick(elapsed_seconds)`. Mission içinden `complete(result=None)`,
@@ -69,19 +125,24 @@ mission'ın kendisine verdiği stop/cancel komutları callback'i sonlandırır.
 MissionEngine(*, scheduler_interval=0.05, stop_timeout=2.0,
               event_history=1000, execution_history=256,
               max_active_missions=None, max_queued_missions=None,
-              mission_factory=None, lifecycle=None, scheduler=None)
+              lifecycle=None, scheduler=None)
 ```
 
-`mission_factory`, class reference'i instance'a çevirir. Constructor dependency
-gerekiyorsa custom factory verilir. Custom lifecycle/scheduler engine'e bağlanır.
+Doğrudan, chain ve parallel çalıştırmalarının tamamında yapılandırılmış mission
+instance'ları verilir. Custom lifecycle/scheduler engine'e bağlanır.
 
 Kayıt ve çalıştırma:
 
 - `register(mission)`, `unregister(reference)`, `mission(reference)`
-- `launch(reference, requester_id=None, reason="")`
-- `run(reference, requester_id=None, reason="")`
-- `launch_many(*missions)`, `run_parallel(*missions)`
+- `run(mission, *missions, requester_id=None, reason="")`: bir veya daha fazla
+  hazır instance'ı birbirinden bağımsız çalıştır
+- `run_parallel(group)`: takip edilen bir `MissionParallelGroup` çalıştır
 - `wait(reference, timeout=None)`
+
+Çoklu girdiler bağımsızdır ve argüman sırasıyla admission'a alınır. Sonraki bir
+mission reddedilirse öncekiler çalışmaya devam eder, daha sonraki girdiler
+denenmez. Reddedilen mission gözlem veya sonraki bir deneme için kayıtlı kalır.
+İşlem bilinçli olarak transactional değildir.
 
 Lifecycle: `pause`, `resume`, `stop_mission`, `cancel` requester/reason alır;
 `complete`, `fail`, `progress`, `checkpoint` seçilen mission'ı günceller.
@@ -111,28 +172,31 @@ State API'si: `snapshot`, `snapshots`, `manager_snapshot`, `query_events`,
 
 ## Chain
 
-`MissionChain(chain_id, stages, stop_on_failure=True)` sıralı stage çalıştırır.
-Stage; mission class, `MissionNode` veya `MissionParallelStage` olabilir.
+`MissionChain(chain_id, stages, stop_on_failure=True)` yapılandırılmış
+instance'ları sıralı çalıştırır. Stage; `Mission`, `MissionNode` veya
+`MissionParallelStage` olabilir.
+Plan bu instance'ların sahibidir; ayrı bir execution için yeni instance'larla
+yeni bir plan oluşturulur.
 
 ```python
 chain = MissionChain(
     "inspection",
     (
-        TakeoffMission,
+        TakeoffMission(),
         MissionParallelStage(
             "inspect",
-            (MissionNode("camera", CameraMission),
-             MissionNode("mapping", MappingMission)),
+            (MissionNode("camera", CameraMission()),
+             MissionNode("mapping", MappingMission())),
             failure_policy=ParallelFailurePolicy.CANCEL_REMAINING,
         ),
-        LandMission,
+        LandMission(),
     ),
 )
-execution = engine.start_chain(chain, input={"altitude": 30})
+execution = engine.run_chain(chain, input={"altitude": 30})
 finished = engine.wait_chain("inspection", timeout=180.0)
 ```
 
-API: `start_chain`, `chain_snapshot`, `wait_chain`, `stop_chain`, `cancel_chain`,
+API: `run_chain`, `chain_snapshot`, `wait_chain`, `stop_chain`, `cancel_chain`,
 `forget_chain`. `MissionChainSnapshot.current_stage` aktif stage'i verir.
 
 `MissionExecutionContext` alanları: `chain_id`, `execution_id`, `current_index`,
@@ -144,12 +208,14 @@ parallel stage için `mission_id=None` olur.
 ## Parallel ve background
 
 `MissionParallelGroup(group_id, nodes, failure_policy=WAIT_ALL)` için
-`start_parallel`, `parallel_snapshot`, `wait_parallel`, `stop_parallel`,
+`run_parallel`, `parallel_snapshot`, `wait_parallel`, `stop_parallel`,
 `cancel_parallel`, `forget_parallel` kullanılır. Snapshot; group, execution ID,
 lifecycle flag'leri, children, phases, results ve reason taşır.
+Group tek execution için yapılandırılmış instance'ların sahibidir. Yeniden
+çalıştırmak için yeni instance'larla yeni bir group oluşturulur.
 
 ```python
-background = engine.launch_background(
+background = engine.run_background(
     HealthMonitorMission(),
     owner=chain_snapshot,
     termination_policy=OwnerTerminationPolicy.STOP_WITH_OWNER,
@@ -189,7 +255,8 @@ bilgisini ve policy'leri taşır.
 ## Genişletme ve hatalar
 
 `MissionController` abstract komut yüzeyidir. `MissionLifecycle` lifecycle,
-`MissionScheduler` launch policy uygular; ikisi de `bind(engine)` sunar ve
+`MissionScheduler` çalıştırma admission policy'sini uygular; ikisi de
+`bind(engine)` sunar ve
 gerektiğinde subclass edilebilir.
 
 Hatalar: `MissionError`, `MissionRegistrationError`, `MissionPermissionError`,

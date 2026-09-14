@@ -14,7 +14,12 @@ from typing import Generic, TypeVar
 from ..compatibility import ExceptionGroup
 
 from .actions import EventBusActions, EventErrorContext, EventTimeoutContext
-from .base import BaseEventBus
+from .base import (
+    BaseEventBus,
+    normalize_replay_capacity,
+    validate_positive_capacity,
+    validate_positive_timeout,
+)
 from .contracts import ErrorPolicy, EventBusStats, PublishResult
 from .errors import EventBusError, EventShutdownTimeoutError, InvalidEventHandlerError
 from .filtering import EventFilter, EventType, coerce_event_filter
@@ -86,21 +91,15 @@ class EventBus(BaseEventBus[T]):
         on_timeout: Callable[[EventTimeoutContext[T]], None] | None = None,
     ) -> None:
         super().__init__(history=history, error_policy=error_policy)
-        if replay_buffer_limit <= 0:
-            raise ValueError("Replay buffer limit must be positive")
-        if (
-            isinstance(max_schedules, bool)
-            or not isinstance(max_schedules, int)
-            or max_schedules <= 0
-        ):
-            raise ValueError("Maximum periodic schedules must be a positive integer")
-        if (
-            isinstance(shutdown_timeout, bool)
-            or not isinstance(shutdown_timeout, (int, float))
-            or not math.isfinite(shutdown_timeout)
-            or shutdown_timeout <= 0
-        ):
-            raise ValueError("Shutdown timeout must be positive and finite")
+        replay_buffer_limit = normalize_replay_capacity(replay_buffer_limit)
+        max_schedules = validate_positive_capacity(
+            max_schedules,
+            name="Maximum periodic schedules",
+        )
+        shutdown_timeout = validate_positive_timeout(
+            shutdown_timeout,
+            name="Shutdown timeout",
+        )
         direct_actions = (on_before, on_after, on_error, on_timeout)
         if actions is not None and any(action is not None for action in direct_actions):
             raise ValueError("Use actions or direct on_* callbacks, not both")
@@ -122,9 +121,9 @@ class EventBus(BaseEventBus[T]):
                 )
         self._executor = executor
         self._executor_context = threading.local()
-        self._replay_buffer_limit = int(replay_buffer_limit)
+        self._replay_buffer_limit = replay_buffer_limit
         self._max_schedules = max_schedules
-        self._shutdown_timeout = float(shutdown_timeout)
+        self._shutdown_timeout = shutdown_timeout
         self._subscribers: dict[int, _Subscriber[T]] = {}
         self._next_id = 0
         self._closed = False

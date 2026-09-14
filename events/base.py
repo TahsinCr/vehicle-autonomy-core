@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any, Generic, TypeVar
@@ -14,6 +15,35 @@ from .history import EventHistory, MemoryEventHistory
 
 
 T = TypeVar("T")
+
+
+def validate_positive_capacity(value: int, *, name: str) -> int:
+    """Validate a bounded collection/schedule capacity."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def normalize_replay_capacity(value: int) -> int:
+    """Preserve the event buses' established replay-capacity normalization."""
+
+    if value <= 0:
+        raise ValueError("Replay buffer limit must be positive")
+    return int(value)
+
+
+def validate_positive_timeout(value: float, *, name: str) -> float:
+    """Validate and normalize a finite timeout value."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be positive and finite")
+    return float(value)
 
 
 class BaseEventBus(Generic[T], ABC):

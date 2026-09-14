@@ -54,6 +54,23 @@ class DocumentationTests(unittest.TestCase):
                     missing.append(str(page.relative_to(ROOT)))
         self.assertEqual(missing, [])
 
+    def test_python_examples_are_syntactically_valid(self) -> None:
+        invalid: list[tuple[str, int, str]] = []
+        pages = (ROOT / "README.md", ROOT / "README-TR.md", *DOCS.rglob("*.md"))
+        for page in pages:
+            content = page.read_text(encoding="utf-8")
+            for index, block in enumerate(
+                re.findall(r"```python\n(.*?)```", content, flags=re.DOTALL),
+                start=1,
+            ):
+                try:
+                    ast.parse(block)
+                except SyntaxError as error:
+                    invalid.append(
+                        (str(page.relative_to(ROOT)), index, error.msg)
+                    )
+        self.assertEqual(invalid, [])
+
     @staticmethod
     def _public_modules() -> tuple[str, ...]:
         return (

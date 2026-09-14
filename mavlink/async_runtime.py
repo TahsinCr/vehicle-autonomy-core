@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from dataclasses import replace
-from itertools import count
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..events import AsyncEventBus, Subscription
 
-from .actions import AsyncDelivery, MavlinkAction
+from .actions import AsyncDelivery
 from .runtime import MavlinkRuntime
 from .history import MessageHistory
 from .router import MavlinkIngressFilter
@@ -33,13 +33,13 @@ class AsyncMavlinkRuntime:
             callback_concurrency,
         )
         self._runtime = MavlinkRuntime(endpoint, _delivery=self._delivery, **options)
-        self._runtime._registry.async_io = self._finish_io
+        self._support = self._runtime._support
+        self._support.configure_async_io(self._finish_io)
         self._delivery.on_failure = self._report_delivery_failure
         self.vehicles = self._runtime.vehicles
         self._lifecycle_lock = asyncio.Lock()
         self._closing = False
         self._close_task = None
-        self._raw_ids = count(1)
         self._raw_subscriptions = []
         self._messages = AsyncEventBus()
         self._packets = AsyncEventBus()
@@ -61,8 +61,8 @@ class AsyncMavlinkRuntime:
         return replace(self._runtime.state, running=self.running)
 
     async def _report_delivery_failure(self, error):
-        self._runtime._registry.fail_waiters()
-        await self._runtime._emit_async("action:error", MavlinkAction(self, error=error))
+        self._support.fail_waiters()
+        await self._support.emit_error(error, self)
 
     @property
     def running(self):
@@ -155,33 +155,33 @@ class AsyncMavlinkRuntime:
     def errors(self):
         return self._errors
 
-    def subscribe(self, message_types, callback=None, *, predicate=None, once=False, **options):
+    def subscribe(
+        self,
+        message_types: Any,
+        callback: Callable[[Any], Awaitable[None]] | None = None,
+        *,
+        predicate: Callable[[Any], bool] | None = None,
+        once: bool = False,
+        **options: Any,
+    ):
         if callback is None:
             def decorate(function):
                 return self.subscribe(message_types, function, predicate=predicate, once=once, **options)
             return decorate
-        if not (inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(
-                getattr(callback, "__call__", None))):
-            raise TypeError("Async runtime requires an async callback")
-        topic = f"raw:{next(self._raw_ids)}"
-        from .filter import MavlinkMessageFilter
-        message_filter = message_types if isinstance(message_types, MavlinkMessageFilter) else MavlinkMessageFilter(message_types=message_types)
-        if isinstance(message_types, MavlinkMessageFilter) and predicate is not None:
-            raise ValueError("Use a MavlinkMessageFilter or predicate, not both")
-        logical = self._runtime._register(topic, callback, once=once,
-            predicate=predicate or message_filter.predicate, **options)
-        message_filter = replace(message_filter, predicate=None)
-        try:
-            source = self.client.subscribe(lambda message: self._runtime._emit(topic, message), message_filter)
-        except BaseException:
-            logical.cancel()
-            raise
+        logical = self._runtime.subscribe(
+            message_types,
+            callback,
+            predicate=predicate,
+            once=once,
+            **options,
+        )
         original_cancel = logical._cancel
+
         def cancel():
             original_cancel()
-            source.cancel()
             if logical in self._raw_subscriptions:
                 self._raw_subscriptions.remove(logical)
+
         logical._cancel = cancel
         self._raw_subscriptions.append(logical)
         if not logical.active:
@@ -223,7 +223,7 @@ class AsyncMavlinkRuntime:
             if self._closing:
                 raise RuntimeError("MAVLink runtime is closing")
             was_running = self.running
-            if not was_running and self._runtime._application_handlers._tasks:
+            if not was_running and self._support.has_pending_handlers():
                 raise RuntimeError("Previous application handlers have not stopped")
             self._delivery.start()
             try:
@@ -236,7 +236,7 @@ class AsyncMavlinkRuntime:
                 raise
         if not was_running:
             try:
-                await self._runtime._emit_async("action:start", MavlinkAction(self))
+                await self._support.emit_action("start", self)
             except BaseException:
                 await self.stop()
                 raise
@@ -250,9 +250,9 @@ class AsyncMavlinkRuntime:
                 try:
                     await self._delivery.stop()
                 finally:
-                    await self._runtime._application_handlers.finish_async()
+                    await self._support.finish_handlers()
         if was_running:
-            await self._runtime._emit_async("action:stop", MavlinkAction(self))
+            await self._support.emit_action("stop", self)
 
     async def close(self):
         current = asyncio.current_task()

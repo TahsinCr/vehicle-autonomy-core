@@ -5,9 +5,71 @@
 The dependency package provides explicit registration, automatic constructor
 injection, sync/async resolution, nested scopes and deterministic cleanup.
 
+## On this page
+
+- [Mental model](#mental-model)
+- [A vehicle-service example](#a-vehicle-service-example)
+- [Lifetimes](#lifetimes)
+- [`DependencyContainer`](#dependencycontainer)
+- [Injection](#injection)
+- [Application composition roots](#application-composition-roots)
+- [Ambient helpers and errors](#ambient-container-helpers)
+
 ```python
 from src.core.dependency import DependencyContainer, Inject, Lifetime, injection
 ```
+
+## Mental model
+
+A **token** answers “what is requested?”, a **provider** answers “how is it
+created?”, and a **lifetime** decides who owns the resulting object. `resolve()`
+walks constructor annotations and creates the complete object graph.
+
+```text
+VehicleStatusService
+    ├── TelemetryStore   singleton: one per owning container
+    └── OperationLog    scoped: one per child scope
+```
+
+Cached objects belong to the container and are cleaned up in reverse creation
+order. Transient objects belong to their caller.
+
+## A vehicle-service example
+
+```python
+from dataclasses import dataclass
+from src.core import DependencyContainer
+
+@dataclass(frozen=True)
+class VehicleSettings:
+    stale_after: float = 3.0
+
+class TelemetryStore:
+    def __init__(self) -> None:
+        self.latest: dict[str, object] = {}
+
+    def close(self) -> None:
+        self.latest.clear()
+
+class VehicleStatusService:
+    def __init__(self, store: TelemetryStore,
+                 settings: VehicleSettings) -> None:
+        self.store = store
+        self.settings = settings
+
+with DependencyContainer() as container:
+    container.instance(VehicleSettings, VehicleSettings())
+    container.singleton(TelemetryStore)
+    container.transient(VehicleStatusService)
+
+    first = container.resolve(VehicleStatusService)
+    second = container.resolve(VehicleStatusService)
+    assert first is not second
+    assert first.store is second.store
+```
+
+The status service is created per request; both instances share the
+container-owned store. Exiting the context calls the store's `close()` method.
 
 ## Lifetimes
 

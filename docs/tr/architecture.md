@@ -41,7 +41,7 @@ ve kaynak/tür filtreleme bu sıcak yolda çalıştığı için hızlı olmalıd
 kuyrukları sınırlıdır. Async transport iptal edilse bile başlamış blocking işlem
 sahipsiz bırakılmaz.
 
-Mission scheduler launch kararlarını koordine eder. Worker `start()` ve periyodik
+Mission scheduler çalıştırma kararlarını koordine eder. Worker `start()` ve periyodik
 `tick()` çağrılarını yürütür. Callback tamamen sonlanmadan ve cleanup başarılı
 olmadan resource bırakılmaz.
 

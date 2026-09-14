@@ -27,6 +27,7 @@ from .router import MavlinkIngressFilter, MavlinkRouterStats
 from .actions import MavlinkAction, MavlinkActions
 from .vehicles import VehicleRegistry
 from .handlers import ApplicationHandlers
+from .runtime_support import MavlinkRuntimeSupport
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         )
         self.vehicles = self._registry.vehicles
         self._application_handlers = ApplicationHandlers(self)
+        self._support = MavlinkRuntimeSupport(self)
         if self._worker is not None:
             self._worker.on_failure = self._worker_failed
         self._bridge_errors()

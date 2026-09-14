@@ -14,11 +14,13 @@ from src.core.mission import (
     MissionEngine,
     MissionError,
     MissionLifecycle,
+    MissionNode,
     MissionNotFoundError,
     MissionPermissionError,
     MissionPhase,
     MissionPrerequisitePolicy,
     MissionPriority,
+    MissionRegistrationError,
     MissionRetryPolicy,
     MissionScheduler,
     MissionSnapshot,
@@ -228,7 +230,7 @@ class RecordingScheduler(MissionScheduler):
         super().__init__()
         self.launched: list[int] = []
 
-    def launch(
+    def run(
         self,
         mission: Mission | int,
         *,
@@ -237,7 +239,7 @@ class RecordingScheduler(MissionScheduler):
     ) -> MissionSnapshot:
         mission_id = mission.id if isinstance(mission, Mission) else mission
         self.launched.append(mission_id)
-        return super().launch(
+        return super().run(
             mission,
             requester_id=requester_id,
             reason=reason,
@@ -262,7 +264,7 @@ class MissionComponentTests(unittest.TestCase):
             self.assertIs(lifecycle.engine, engine)
             self.assertIs(scheduler.engine, engine)
 
-            engine.launch(mission)
+            engine.run(mission)
             result = engine.wait(mission, timeout=1.0)
 
             self.assertEqual(result.phase, MissionPhase.SUCCEEDED)
@@ -301,7 +303,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
     def test_launch_binds_control_tracks_progress_and_completes(self) -> None:
         mission = CompletingMission()
 
-        self.engine.launch(mission)
+        self.engine.run(mission)
         snapshot = self.engine.wait(mission, timeout=1.0)
 
         self.assertIsNotNone(snapshot)
@@ -312,9 +314,25 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(mission.stop_count, 1)
         self.assertGreaterEqual(len(self.engine.query_events()), 4)
 
+    def test_run_requires_a_mission_instance(self) -> None:
+        engine = MissionEngine(scheduler_interval=0.001, stop_timeout=0.5)
+        try:
+            mission = CompletingMission(name="Configured mission")
+            launched = engine.run(mission)
+            finished = engine.wait(launched.mission_id, timeout=1.0)
+
+            self.assertIsNotNone(finished)
+            assert finished is not None
+            self.assertEqual(finished.name, "Configured mission")
+            self.assertEqual(finished.phase, MissionPhase.SUCCEEDED)
+            with self.assertRaisesRegex(TypeError, "Mission instance"):
+                engine.run(CompletingMission)  # type: ignore[arg-type]
+        finally:
+            engine.close()
+
     def test_complete_unwinds_callback_before_terminal_cleanup(self) -> None:
         mission = TerminalBeforeReturnMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         snapshot = self.engine.wait(mission, timeout=1.0)
         self.assertIsNotNone(snapshot)
         self.assertEqual(snapshot.phase, MissionPhase.SUCCEEDED)
@@ -323,21 +341,21 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         with self.assertRaises(MissionNotFoundError):
             self.engine.snapshot(mission)
 
-    def test_concurrent_launch_is_idempotent_for_one_mission(self) -> None:
+    def test_concurrent_run_is_idempotent_for_one_mission(self) -> None:
         mission = BlockingMission()
         callers = 8
         barrier = threading.Barrier(callers)
         results: list[MissionSnapshot] = []
         errors: list[BaseException] = []
 
-        def launch() -> None:
+        def run() -> None:
             try:
                 barrier.wait()
-                results.append(self.engine.launch(mission))
+                results.append(self.engine.run(mission))
             except BaseException as exc:  # pragma: no cover - asserted below
                 errors.append(exc)
 
-        threads = [threading.Thread(target=launch) for _ in range(callers)]
+        threads = [threading.Thread(target=run) for _ in range(callers)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -381,9 +399,9 @@ class MissionEngineLifecycleTests(unittest.TestCase):
     def test_queue_timeout_uses_monotonic_age_and_launch_clears_marker(self) -> None:
         owner = ExclusiveMission()
         waiting = QueueTimedMission()
-        self.engine.launch(owner)
+        self.engine.run(owner)
         self.assertTrue(owner.started.wait(1.0))
-        self.assertEqual(self.engine.launch(waiting).phase, MissionPhase.QUEUED)
+        self.assertEqual(self.engine.run(waiting).phase, MissionPhase.QUEUED)
         runtime = self.engine._runtime(waiting)
 
         with self.engine._condition:
@@ -400,7 +418,9 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         first = BlockingMission(name="First")
         second = BlockingMission(name="Second")
 
-        self.engine.run_parallel(first, second)
+        snapshots = self.engine.run(first, second)
+        self.assertIsInstance(snapshots, tuple)
+        self.assertEqual(tuple(item.mission_id for item in snapshots), (first.id, second.id))
         self.assertTrue(first.started.wait(1.0))
         self.assertTrue(second.started.wait(1.0))
         self.assertEqual(
@@ -418,6 +438,29 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertTrue(first.stopped.is_set())
         self.assertTrue(second.stopped.is_set())
 
+    def test_run_validates_every_instance_before_starting_any(self) -> None:
+        mission = BlockingMission()
+
+        with self.assertRaisesRegex(TypeError, "Mission instances"):
+            self.engine.run(mission, BlockingMission)  # type: ignore[arg-type]
+
+        with self.assertRaises(MissionNotFoundError):
+            self.engine.snapshot(mission)
+
+    def test_multi_run_keeps_independent_missions_running_after_later_rejection(self) -> None:
+        owner = ExclusiveMission()
+        independent = BlockingMission()
+        conflicting = RejectingExclusiveMission()
+        self.engine.run(owner)
+        self.assertTrue(owner.started.wait(1.0))
+
+        with self.assertRaises(MissionConflictError):
+            self.engine.run(independent, conflicting)
+
+        self.assertTrue(independent.started.wait(1.0))
+        self.assertIs(self.engine.snapshot(independent).phase, MissionPhase.RUNNING)
+        self.assertIs(self.engine.snapshot(conflicting).phase, MissionPhase.REGISTERED)
+
     def test_active_and_queue_capacities_apply_backpressure(self) -> None:
         engine = MissionEngine(
             scheduler_interval=0.001,
@@ -430,11 +473,11 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         try:
             self.assertEqual(engine.max_active_missions, 1)
             self.assertEqual(engine.max_queued_missions, 1)
-            engine.launch(first)
+            engine.run(first)
             self.assertTrue(first.started.wait(1.0))
-            self.assertEqual(engine.launch(second).phase, MissionPhase.QUEUED)
+            self.assertEqual(engine.run(second).phase, MissionPhase.QUEUED)
             with self.assertRaisesRegex(MissionConflictError, "capacity"):
-                engine.launch(third)
+                engine.run(third)
 
             engine.stop_mission(first)
             self.assertTrue(second.started.wait(1.0))
@@ -455,9 +498,9 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         failing = RetryableBlockingMission()
         waiting = BlockingMission()
         try:
-            engine.launch(failing)
+            engine.run(failing)
             self.assertTrue(failing.started.wait(1.0))
-            self.assertEqual(engine.launch(waiting).phase, MissionPhase.QUEUED)
+            self.assertEqual(engine.run(waiting).phase, MissionPhase.QUEUED)
 
             failed = engine.fail(failing, "failed", retryable=True)
             self.assertEqual(failed.phase, MissionPhase.FAILED)
@@ -469,9 +512,9 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         first = ExclusiveMission(name="Owner")
         second = ExclusiveMission(name="Waiting")
 
-        self.engine.launch(first)
+        self.engine.run(first)
         self.assertTrue(first.started.wait(1.0))
-        queued = self.engine.launch(second)
+        queued = self.engine.run(second)
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
 
         self.engine.stop_mission(first)
@@ -482,14 +525,14 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         low = ExclusiveMission(name="Low resource owner")
         critical = CriticalMission(name="Critical")
 
-        self.engine.launch(low)
+        self.engine.run(low)
         self.assertTrue(low.started.wait(1.0))
-        self.engine.launch(critical)
+        self.engine.run(critical)
         self.assertTrue(critical.started.wait(1.0))
         self.assertEqual(self.engine.snapshot(low).phase, MissionPhase.STOPPED)
 
         weak = LowPriorityMission()
-        self.engine.launch(weak)
+        self.engine.run(weak)
         self.assertTrue(weak.started.wait(1.0))
         with self.assertRaises(MissionPermissionError):
             self.engine.stop_mission(critical, requester_id=weak.id)
@@ -497,7 +540,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
     def test_retry_policy_relaunches_failed_work(self) -> None:
         mission = FlakyMission()
 
-        self.engine.launch(mission)
+        self.engine.run(mission)
         snapshot = self.engine.wait(mission, timeout=1.0)
 
         self.assertIsNotNone(snapshot)
@@ -507,17 +550,17 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
     def test_prerequisite_queue_and_tag_based_mission_control(self) -> None:
         dependent = DependentMission()
-        queued = self.engine.launch(dependent)
+        queued = self.engine.run(dependent)
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
 
         prerequisite = CompletingMission()
-        self.engine.launch(prerequisite)
+        self.engine.run(prerequisite)
         self.assertEqual(self.engine.wait(prerequisite, 1.0).phase, MissionPhase.SUCCEEDED)
         self.assertEqual(self.engine.wait(dependent, 1.0).phase, MissionPhase.SUCCEEDED)
 
         coordinator = CriticalCoordinator()
         background = LowPriorityMission()
-        self.engine.run_parallel(coordinator, background)
+        self.engine.run(coordinator, background)
         self.assertTrue(coordinator.started.wait(1.0))
         self.assertTrue(background.started.wait(1.0))
 
@@ -526,7 +569,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(self.engine.snapshot(background).phase, MissionPhase.STOPPED)
         self.engine.stop_mission(coordinator)
         replacement = LowPriorityMission()
-        self.engine.launch(replacement)
+        self.engine.run(replacement)
         self.assertTrue(replacement.started.wait(1.0))
         with self.assertRaises(MissionPermissionError):
             coordinator.stop_missions(tags={"background"})
@@ -535,7 +578,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         engine = MissionEngine(scheduler_interval=0.001, stop_timeout=0.01)
         mission = StuckMission()
         try:
-            engine.launch(mission)
+            engine.run(mission)
             self.assertTrue(mission.entered.wait(1.0))
 
             with self.assertRaises(MissionTimeoutError):
@@ -557,14 +600,14 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         stuck = StuckExclusiveMission()
         waiting = RejectingExclusiveMission()
         try:
-            engine.launch(stuck)
+            engine.run(stuck)
             self.assertTrue(stuck.entered.wait(1.0))
 
             with self.assertRaises(MissionTimeoutError):
                 engine.fail(stuck, "external failure")
             self.assertEqual(engine.snapshot(stuck).phase, MissionPhase.STOPPING)
             with self.assertRaises(MissionConflictError):
-                engine.launch(waiting)
+                engine.run(waiting)
 
             stuck.release.set()
             failed = engine.fail(stuck, "external failure")
@@ -591,20 +634,20 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         replacement = RejectingExclusiveMission()
         replacement.resources = frozenset({"guidance"})
         try:
-            engine.launch(mission)
+            engine.run(mission)
             self.assertTrue(mission.started.wait(1.0))
             with self.assertRaises(MissionCleanupError):
                 engine.stop_mission(mission)
             self.assertEqual(engine.snapshot(mission).phase, MissionPhase.STOPPING)
             with self.assertRaises(MissionConflictError):
-                engine.launch(replacement)
+                engine.run(replacement)
 
             mission.cleanup_fails = False
             self.assertEqual(
                 engine.retry_cleanup(mission).phase,
                 MissionPhase.STOPPED,
             )
-            self.assertEqual(engine.launch(replacement).phase, MissionPhase.STARTING)
+            self.assertEqual(engine.run(replacement).phase, MissionPhase.STARTING)
         finally:
             mission.cleanup_fails = False
             engine.close()
@@ -623,7 +666,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                     raise RuntimeError("cleanup blocked")
 
         mission = CompletingWithBrokenCleanup()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         pending = wait_for_cleanup_pending(self.engine, mission)
         self.assertEqual(pending.cleanup_error, "cleanup blocked")
 
@@ -653,7 +696,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                     raise RuntimeError("cleanup blocked")
 
         mission = FailingWithBrokenCleanup()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         wait_for_cleanup_pending(self.engine, mission)
         mission.cleanup_fails = False
         queued = self.engine.retry_cleanup(mission)
@@ -680,7 +723,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                     raise RuntimeError("cleanup blocked")
 
         mission = RaisingWithBrokenCleanup()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         wait_for_cleanup_pending(self.engine, mission)
 
         mission.cleanup_fails = False
@@ -712,7 +755,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                     raise RuntimeError("cleanup blocked")
 
         mission = TickFailureWithBrokenCleanup()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         pending = wait_for_cleanup_pending(self.engine, mission)
         self.assertIn("tick pipeline failed", pending.reason)
 
@@ -734,7 +777,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 super().stop()
 
         mission = BrokenCleanupMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.started.wait(1.0))
         result = {"target": 7, "path": {"points": [1, 2]}}
         with self.assertRaises(MissionCleanupError):
@@ -766,7 +809,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 super().stop()
 
         mission = BrokenCleanupMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.started.wait(1.0))
         with self.assertRaises(MissionCleanupError):
             self.engine.fail(mission, "link lost", retryable=True)
@@ -789,7 +832,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 self.release_cleanup.wait(1.0)
 
         mission = BlockingCleanupMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.started.wait(1.0))
         completed: list[MissionSnapshot] = []
         errors: list[BaseException] = []
@@ -841,7 +884,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
         mission = SelfStoppingMission()
         replacement = ReplacementMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         stopped = self.engine.wait(mission, timeout=1.0)
 
         self.assertIsNotNone(stopped)
@@ -849,7 +892,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(stopped.phase, MissionPhase.STOPPED)
         self.assertFalse(mission.after_stop)
         self.assertTrue(mission.cleanup_after_unwind)
-        self.assertEqual(self.engine.launch(replacement).phase, MissionPhase.STARTING)
+        self.assertEqual(self.engine.run(replacement).phase, MissionPhase.STARTING)
 
     def test_self_cancel_unwinds_tick_before_cleanup(self) -> None:
         class SelfCancellingMission(Mission):
@@ -876,7 +919,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 self.cleanup_after_unwind = not self.tick_active
 
         mission = SelfCancellingMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         cancelled = self.engine.wait(mission, timeout=1.0)
 
         self.assertIsNotNone(cancelled)
@@ -896,7 +939,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                     raise RuntimeError("cleanup blocked")
 
         mission = BrokenCleanupMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.started.wait(1.0))
         with self.assertRaises(MissionCleanupError):
             self.engine.cancel(mission, reason="operator cancelled")
@@ -921,7 +964,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         engine = MissionEngine(scheduler_interval=0.001)
         mission = BrokenCleanupMission()
         try:
-            engine.launch(mission)
+            engine.run(mission)
             self.assertTrue(mission.started.wait(1.0))
             with self.assertRaises(ExceptionGroup):
                 engine.stop()
@@ -987,7 +1030,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 pass
 
         mission = RetryThenCompleteMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.first_started.wait(1.0))
         self.engine.fail(mission, "retry requested", retryable=True)
 
@@ -1010,7 +1053,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 pass
 
         mission = DefensiveMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         snapshot = self.engine.wait(mission, timeout=1.0)
         self.assertEqual(snapshot.phase, MissionPhase.SUCCEEDED)
 
@@ -1018,7 +1061,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         mission = BlockingMission()
         events = []
         self.engine.events.subscribe(events.append)
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.started.wait(1.0))
         self.engine.checkpoint(mission, "real", {"name": "fake"})
         self.assertEqual(events[-1].fields["name"], "real")
@@ -1029,11 +1072,11 @@ class MissionEngineLifecycleTests(unittest.TestCase):
     def test_engine_stop_rejects_reentrant_launch(self) -> None:
         active = BlockingMission()
         late = BlockingMission()
-        self.engine.launch(active)
+        self.engine.run(active)
         self.assertTrue(active.started.wait(1.0))
 
         self.engine.transitions.subscribe(
-            lambda transition: self.engine.launch(late)
+            lambda transition: self.engine.run(late)
             if transition.mission_id == active.id
             and transition.current is MissionPhase.STOPPED
             else None
@@ -1049,7 +1092,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
             timeout_seconds = 0.01
 
         mission = StartTimedMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.entered.wait(1.0))
 
         wait_for_phase(self.engine, mission, MissionPhase.STOPPING, timeout=0.3)
@@ -1058,23 +1101,23 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
     def test_execution_and_queue_timeouts_fail_deterministically(self) -> None:
         timed = TimedMission()
-        self.engine.launch(timed)
+        self.engine.run(timed)
         timed_result = self.engine.wait(timed, timeout=1.0)
         self.assertEqual(timed_result.phase, MissionPhase.FAILED)
         self.assertIn("timed out", timed_result.reason)
 
         owner = ExclusiveMission()
         waiting = QueueTimedMission()
-        self.engine.launch(owner)
+        self.engine.run(owner)
         self.assertTrue(owner.started.wait(1.0))
-        self.assertEqual(self.engine.launch(waiting).phase, MissionPhase.QUEUED)
+        self.assertEqual(self.engine.run(waiting).phase, MissionPhase.QUEUED)
         waiting_result = self.engine.wait(waiting, timeout=1.0)
         self.assertEqual(waiting_result.phase, MissionPhase.FAILED)
         self.assertIn("queue timed out", waiting_result.reason)
 
     def test_stop_waits_for_tick_before_cleanup(self) -> None:
         mission = BlockingTickMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.tick_entered.wait(1.0))
 
         stopped: list[MissionSnapshot] = []
@@ -1093,7 +1136,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
 
     def test_pause_waits_for_tick_and_blocks_new_ticks(self) -> None:
         mission = PausableTickMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.tick_entered.wait(1.0))
 
         paused: list[MissionSnapshot] = []
@@ -1115,14 +1158,14 @@ class MissionEngineLifecycleTests(unittest.TestCase):
                 self.engine.stop_mission(mission)
 
         self.engine.transitions.subscribe(stop_on_starting)
-        snapshot = self.engine.launch(mission)
+        snapshot = self.engine.run(mission)
 
         self.assertEqual(snapshot.phase, MissionPhase.STOPPED)
         self.assertFalse(mission.started.is_set())
 
     def test_execution_timeout_excludes_paused_time(self) -> None:
         mission = PausedTimeoutMission()
-        self.engine.launch(mission)
+        self.engine.run(mission)
         self.assertTrue(mission.started.wait(1.0))
         time.sleep(0.01)
         self.engine.pause(mission)
@@ -1140,9 +1183,12 @@ class MissionEngineChainTests(unittest.TestCase):
         try:
             chain = MissionChain(
                 "startup",
-                (CompletingMission, CompletingMission),
+                (
+                    MissionNode("first", CompletingMission()),
+                    MissionNode("second", CompletingMission()),
+                ),
             )
-            engine.start_chain(chain)
+            engine.run_chain(chain)
 
             deadline = time.monotonic() + 1.0
             while engine.chain_snapshot("startup").active and time.monotonic() < deadline:
@@ -1164,19 +1210,18 @@ class MissionEngineChainTests(unittest.TestCase):
         finally:
             engine.close()
 
-    def test_chain_factory_failure_marks_chain_inactive(self) -> None:
-        def broken_factory(_mission_type: type[Mission]) -> Mission:
-            raise RuntimeError("factory failed")
-
-        engine = MissionEngine(mission_factory=broken_factory)
+    def test_chain_registration_failure_marks_chain_inactive(self) -> None:
+        engine = MissionEngine()
+        mission = CompletingMission()
         try:
-            with self.assertRaisesRegex(RuntimeError, "factory failed"):
-                engine.start_chain(MissionChain("broken", (CompletingMission,)))
+            engine.register(mission)
+            with self.assertRaises(MissionRegistrationError):
+                engine.run_chain(MissionChain("broken", (mission,)))
 
             snapshot = engine.chain_snapshot("broken")
             self.assertFalse(snapshot.active)
             self.assertTrue(snapshot.failed)
-            self.assertIn("factory failed", snapshot.reason)
+            self.assertIn("already registered", snapshot.reason)
         finally:
             engine.close()
 
@@ -1184,12 +1229,12 @@ class MissionEngineChainTests(unittest.TestCase):
         engine = MissionEngine(scheduler_interval=0.001)
         owner = ExclusiveMission()
         try:
-            engine.launch(owner)
+            engine.run(owner)
             self.assertTrue(owner.started.wait(1.0))
-            engine.start_chain(
+            engine.run_chain(
                 MissionChain(
                     "conflicted",
-                    (CompletingMission, RejectingExclusiveMission),
+                    (CompletingMission(), RejectingExclusiveMission()),
                 )
             )
 

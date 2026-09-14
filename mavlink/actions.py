@@ -194,7 +194,7 @@ class MavlinkActions:
 
     def __init__(self, delivery: AsyncDelivery | None = None) -> None:
         self._delivery = delivery
-        self._topics: dict[str, dict[int, tuple]] = {}
+        self._topics: dict[str, dict[int, CallbackSubscription]] = {}
         self._ids = count(1)
         self._topics_lock = threading.RLock()
         self._actions_closed = False
@@ -227,20 +227,22 @@ class MavlinkActions:
 
             subscription = CallbackSubscription(identifier, cancel, callback,
                 asynchronous=self._delivery is not None, once=once, **options)
-            self._topics.setdefault(topic, {})[identifier] = (subscription, callback, False)
+            self._topics.setdefault(topic, {})[identifier] = subscription
             return subscription
 
-    def _claim(self, subscription, once):
+    def _claim(self, subscription: CallbackSubscription) -> bool:
         with self._topics_lock:
             if self._actions_closed or not subscription.active:
                 return False
-            if once:
-                subscription.cancel()
             return True
 
-    async def _deliver_async(self, topic, entry, event):
-        subscription, callback, once = entry
-        if self._claim(subscription, once):
+    async def _deliver_async(
+        self,
+        topic: str,
+        subscription: CallbackSubscription,
+        event: Any,
+    ) -> None:
+        if self._claim(subscription):
             try:
                 await subscription.invoke_async(event)
             except asyncio.CancelledError:
@@ -258,8 +260,8 @@ class MavlinkActions:
     async def _emit_async(self, topic, event):
         with self._topics_lock:
             entries = tuple(self._topics.get(topic, {}).values())
-        for entry in entries:
-            await self._deliver_async(topic, entry, event)
+        for subscription in entries:
+            await self._deliver_async(topic, subscription, event)
 
     def on(self, name: str, callback=None, *, once: bool = False, **options):
         if name not in self.action_names:
@@ -304,14 +306,13 @@ class MavlinkActions:
             return
         with self._topics_lock:
             entries = tuple(self._topics.get(topic, {}).values())
-        for entry in entries:
+        for subscription in entries:
             if self._delivery is not None:
-                async def deliver(event, entry=entry):
-                    await self._deliver_async(topic, entry, event)
+                async def deliver(event, subscription=subscription):
+                    await self._deliver_async(topic, subscription, event)
                 self._delivery.submit(deliver, event)
             else:
-                subscription, callback, once = entry
-                if self._claim(subscription, once):
+                if self._claim(subscription):
                     try:
                         result = subscription.invoke(event)
                         if inspect.isawaitable(result):
@@ -326,8 +327,8 @@ class MavlinkActions:
         if entries is None:
             with self._topics_lock:
                 entries = tuple(self._topics.get(topic, {}).values())
-        for subscription, callback, once in entries:
-            if not self._claim(subscription, once):
+        for subscription in entries:
+            if not self._claim(subscription):
                 continue
             try:
                 subscription.invoke(event)
@@ -341,8 +342,11 @@ class MavlinkActions:
     def _close_actions(self) -> None:
         with self._topics_lock:
             self._actions_closed = True
-            subscriptions = tuple(entry[0] for entries in self._topics.values()
-                                  for entry in entries.values())
+            subscriptions = tuple(
+                subscription
+                for entries in self._topics.values()
+                for subscription in entries.values()
+            )
             self._topics.clear()
         for subscription in subscriptions:
             subscription.cancel()

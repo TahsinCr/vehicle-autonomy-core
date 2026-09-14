@@ -12,6 +12,52 @@ The MAVLink package has four levels:
 Most applications should start with a runtime. Lower levels remain public for
 custom transport composition.
 
+## Reading path
+
+```text
+Endpoint → Runtime → Vehicle → Component → subscribe/latest/wait_for
+                                      → optional history/application protocol
+```
+
+Use one runtime per physical connection. Its router is the only reader; every
+vehicle and component view filters the shared stream by source IDs.
+
+## Practical multi-vehicle telemetry
+
+```python
+from src.core.mavlink import MavlinkEndpoint, MavlinkRuntime
+
+positions: dict[int, object] = {}
+
+with MavlinkRuntime(
+    MavlinkEndpoint.udp("0.0.0.0", 14550),
+    vehicle_state_retention=60.0,
+) as link:
+    @link.vehicles.on_added
+    def configure_vehicle(action) -> None:
+        vehicle = action.vehicle
+
+        @vehicle.subscribe("GLOBAL_POSITION_INT", frequency_hz=10.0)
+        def update_position(message) -> None:
+            positions[vehicle.system_id] = message
+
+        @vehicle.on_disconnected
+        def mark_disconnected(_action) -> None:
+            positions.pop(vehicle.system_id, None)
+
+    first = link.vehicles.wait_for(timeout=5.0)
+    if first is None:
+        raise RuntimeError("No vehicle heartbeat received")
+
+    autopilot = first.get_component(1)
+    last_heartbeat = first.latest("HEARTBEAT")
+```
+
+`on_added` handles every discovered vehicle, so no fixed system ID is needed.
+Nested subscriptions are source-scoped. `latest()` reads cache immediately;
+`wait_for()` waits for a future observation. Component lookup returns `None`
+until that component has been observed.
+
 ## Endpoints
 
 ```text

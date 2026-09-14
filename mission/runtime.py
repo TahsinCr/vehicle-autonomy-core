@@ -41,7 +41,7 @@ class MissionRuntime:
     cleanup_lock: threading.Lock = field(default_factory=threading.Lock)
     terminal_lock: threading.Lock = field(default_factory=threading.Lock)
     callback_lock: threading.RLock = field(default_factory=threading.RLock)
-    launch_lock: threading.RLock = field(default_factory=threading.RLock)
+    run_lock: threading.RLock = field(default_factory=threading.RLock)
     active_elapsed: float = 0.0
     active_started_monotonic: float | None = None
     attempt_started_monotonic: float | None = None
@@ -84,7 +84,7 @@ class BoundMissionController(MissionController):
         return self._engine._wait_for_stop(self._mission_id, timeout)
 
     def start(self, mission_id: int, *, reason: str = "") -> MissionSnapshot:
-        return self._engine.launch(
+        return self._engine.scheduler._run_registered(
             mission_id,
             requester_id=self._mission_id,
             reason=reason,

@@ -19,13 +19,11 @@ from .execution import (
     MissionExecutionContext,
     MissionParallelSnapshot,
 )
+from .references import MissionOwner
 
 if TYPE_CHECKING:
     from .engine import MissionEngine
     from .orchestration import MissionOrchestrator
-
-
-MissionOwner = Mission | int | MissionChainSnapshot | MissionParallelSnapshot
 
 
 class MissionBackgroundExecutor:
@@ -39,7 +37,7 @@ class MissionBackgroundExecutor:
     def engine(self) -> "MissionEngine":
         return self.orchestrator.engine
 
-    def launch(
+    def start(
         self,
         mission: Mission,
         *,
@@ -81,7 +79,7 @@ class MissionBackgroundExecutor:
             if not self._missions[mission.id].active:
                 return self._missions[mission.id]
         try:
-            self.engine.launch(mission)
+            self.engine.run(mission)
         except Exception:
             with self.engine._condition:
                 runtime = self.engine._runtime_locked(mission.id)
@@ -99,7 +97,7 @@ class MissionBackgroundExecutor:
         if abandoned and not phase.terminal:
             self.engine.stop_mission(
                 mission.id,
-                reason="Background owner terminated during launch",
+                reason="Background owner terminated during start",
             )
         return self.snapshot(mission.id)
 

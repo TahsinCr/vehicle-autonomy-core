@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar
@@ -17,11 +16,6 @@ from .enums import (
 )
 from .errors import MissionError, MissionRegistrationError
 from .models import MissionRetryPolicy, MissionSnapshot
-
-
-def _default_mission_name(class_name: str) -> str:
-    name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", class_name)
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name).strip()
 
 
 class Mission(Service, ABC):
@@ -43,7 +37,7 @@ class Mission(Service, ABC):
 
     def __init__(self, *, name: str | None = None) -> None:
         self._id = uuid4().int
-        resolved_name = _default_mission_name(type(self).__name__) if name is None else name
+        resolved_name = type(self).__name__ if name is None else name
         resolved_name = str(resolved_name).strip()
         if not resolved_name:
             raise ValueError("Mission name cannot be empty")

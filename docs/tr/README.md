@@ -8,6 +8,22 @@ yönetimi, event'ler, mission orkestrasyonu ve MAVLink taşıması sunar.
 
 ## Dokümantasyon haritası
 
+```text
+Kurulum ve import
+       │
+       ▼
+Core sözleşmeleri ──► Dependency injection ──► Event
+                                             │
+                                             ▼
+                                          Mission
+                                             │
+                                             ▼
+                              MAVLink ve uygulama protokolü
+                                             │
+                                             ▼
+                                  Operasyon ve performans
+```
+
 - [Başlangıç](getting-started.md) — kurulum, kaynak yerleşimi ve ilk uygulamalar
 - [Mimari](architecture.md) — modül sınırları, thread ve sahiplik
 - [Core soyutlamaları](core.md) — `Model`, `Service` ve serialization
@@ -18,6 +34,26 @@ yönetimi, event'ler, mission orkestrasyonu ve MAVLink taşıması sunar.
 - [Uygulama protokolü](application-protocol.md) — parçalı paket, peer ve dispatch
 - [API indeksi](api-reference.md) — desteklenen tüm public semboller
 - [Operasyon ve test](operations.md) — kapanış, gözlemlenebilirlik ve benchmark
+
+## Okuma yolunu seçin
+
+İlk kez kullanıyorsanız [Başlangıç](getting-started.md) sayfasını okuyun ve
+ardından yalnızca ihtiyacınız olan modüle geçin. Her modül rehberi küçük ama
+gerçekçi bir araç senaryosuyla başlar, ileri davranışları adım adım ekler.
+
+| Yapmak istediğim… | Başlangıç sayfası |
+|---|---|
+| Servis oluşturmak ve yaşam sürelerini yönetmek | [Dependency injection](dependency.md) |
+| Durum değişikliği yayınlamak veya bileşenleri ayırmak | [Event](events.md) |
+| Araç işlerini çalıştırmak, duraklatmak veya zincirlemek | [Mission](mission.md) |
+| Araç keşfetmek ve telemetri tüketmek | [MAVLink](mavlink.md) |
+| Yapısal request/response paketleri taşımak | [Uygulama protokolü](application-protocol.md) |
+| Bir imza, parametre veya hatayı hızla bulmak | [API referansı](api-reference.md) |
+| Deployment limitleri ve sağlık kontrollerini hazırlamak | [Operasyon](operations.md) |
+
+Her rehber tek başına okunabilir. Kavramlar lifecycle, concurrency ve hata
+ayrıntılarından önce tanıtılır; baştan sona okumak en rahat yoldur, içindekiler
+bağlantıları ise hızlı başvuru içindir.
 
 ## Import düzeni
 

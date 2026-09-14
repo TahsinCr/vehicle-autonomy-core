@@ -318,11 +318,8 @@ class MissionChainExecutor:
                 )
             return
 
-        node = entry if isinstance(entry, MissionNode) else MissionNode(
-            self._node_name(snapshot),
-            entry,
-        )
-        mission = self.orchestrator.create_mission(node)
+        node = entry if isinstance(entry, MissionNode) else MissionNode(entry.name, entry)
+        mission = self.orchestrator.mission_for(node)
         self.engine.register(mission)
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission.id)
@@ -335,7 +332,7 @@ class MissionChainExecutor:
                 child_mission_ids=current.child_mission_ids + (mission.id,),
             )
         try:
-            self.engine.launch(mission)
+            self.engine.run(mission)
         except Exception:
             with self.engine._condition:
                 runtime = self.engine._runtime_locked(mission.id)
@@ -415,10 +412,12 @@ class MissionChainExecutor:
         return self.snapshot(snapshot.execution_id)
 
     def _retain_terminal_locked(self, execution_id: str) -> None:
-        if execution_id not in self._completed:
-            self._completed.append(execution_id)
-        while len(self._completed) > self.engine._execution_history_limit:
-            self._remove_run_locked(self._completed.popleft())
+        self.orchestrator.retain_bounded_execution(
+            self._completed,
+            execution_id,
+            self.engine._execution_history_limit,
+            self._remove_run_locked,
+        )
 
     def _remove_run_locked(self, execution_id: str) -> None:
         snapshot = self._runs.pop(execution_id, None)
@@ -446,25 +445,4 @@ class MissionChainExecutor:
         )
 
     def _is_pending(self, mission_id: int) -> bool:
-        with self.engine._condition:
-            phase = self.engine._runtime_locked(mission_id).snapshot.phase
-            return phase.active or phase in {
-                MissionPhase.REGISTERED,
-                MissionPhase.QUEUED,
-            }
-
-    @staticmethod
-    def _node_name(snapshot: MissionChainSnapshot) -> str:
-        entry = snapshot.chain.stages[snapshot.current_index]
-        if not isinstance(entry, type):
-            raise TypeError("Sequential chain entries must be mission types or nodes")
-        occurrence = sum(
-            1
-            for previous in snapshot.chain.stages[:snapshot.current_index]
-            if previous is entry
-        )
-        return (
-            entry.__name__
-            if occurrence == 0
-            else f"{entry.__name__}#{occurrence + 1}"
-        )
+        return self.orchestrator.is_pending(mission_id)

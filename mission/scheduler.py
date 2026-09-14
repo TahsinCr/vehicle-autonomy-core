@@ -21,13 +21,11 @@ from .models import (
     MissionSnapshot,
     MissionTransition,
 )
+from .references import MissionReference
 from .runtime import MissionRuntime
 
 if TYPE_CHECKING:
     from .engine import MissionEngine
-
-
-MissionReference = Mission | int
 
 
 class SchedulerWake:
@@ -87,35 +85,49 @@ class MissionScheduler:
         self._engine = engine
         return self
 
-    def launch(
+    def run(
         self,
-        mission: MissionReference,
+        mission: Mission,
         *,
         requester_id: int | None = None,
         reason: str = "",
     ) -> MissionSnapshot:
-        """Register when needed and start or queue one mission."""
+        """Register when needed and start or queue one mission instance."""
 
         self.engine._ensure_launchable()
-        if isinstance(mission, Mission):
-            with self.engine._condition:
-                registered = self.engine._runtimes.get(mission.id)
-            if registered is not None and registered.mission is not mission:
-                raise MissionRegistrationError(
-                    f"Mission {mission.id} is already registered"
-                )
-            if registered is None:
-                try:
-                    self.engine.register(mission)
-                except MissionRegistrationError:
-                    with self.engine._condition:
-                        runtime = self.engine._runtimes.get(mission.id)
-                        if runtime is None or runtime.mission is not mission:
-                            raise
-        mission_id = self.engine._mission_id(mission)
+        if not isinstance(mission, Mission):
+            raise TypeError("run() requires a Mission instance")
+        with self.engine._condition:
+            registered = self.engine._runtimes.get(mission.id)
+        if registered is not None and registered.mission is not mission:
+            raise MissionRegistrationError(f"Mission {mission.id} is already registered")
+        if registered is None:
+            try:
+                self.engine.register(mission)
+            except MissionRegistrationError:
+                with self.engine._condition:
+                    runtime = self.engine._runtimes.get(mission.id)
+                    if runtime is None or runtime.mission is not mission:
+                        raise
+        return self._run_registered(
+            mission.id,
+            requester_id=requester_id,
+            reason=reason,
+        )
+
+    def _run_registered(
+        self,
+        mission_id: int,
+        *,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        """Start or queue an already registered mission by its internal ID."""
+
+        self.engine._ensure_launchable()
         self.engine.start()
         runtime = self.engine._runtime(mission_id)
-        with runtime.launch_lock:
+        with runtime.run_lock:
             return self._launch_serialized(
                 mission_id,
                 requester_id=requester_id,
@@ -129,7 +141,7 @@ class MissionScheduler:
         requester_id: int | None,
         reason: str,
     ) -> MissionSnapshot:
-        """Perform one launch while holding the mission's launch lock."""
+        """Perform one admission/start pass while holding the mission lock."""
 
         preempt_ids: tuple[int, ...] = ()
         queued: tuple[MissionSnapshot, MissionTransition | None] | None = None
@@ -138,51 +150,7 @@ class MissionScheduler:
             self.engine._authorize_locked(requester_id, runtime)
             if runtime.snapshot.phase.active:
                 return runtime.snapshot
-            missing = self._missing_prerequisites_locked(runtime.mission)
-            conflicts = self._conflicts_locked(runtime.mission)
-            at_capacity = self._at_active_capacity_locked()
-            if missing:
-                if (
-                    runtime.mission.prerequisite_policy
-                    is MissionPrerequisitePolicy.QUEUE
-                ):
-                    queued = self.engine.lifecycle._queue_locked(
-                        runtime,
-                        reason or "Waiting for prerequisites",
-                    )
-                else:
-                    names = ", ".join(item.__name__ for item in missing)
-                    raise MissionConflictError(
-                        f"Missing mission prerequisites: {names}"
-                    )
-            elif conflicts:
-                policy = runtime.mission.conflict_policy
-                if policy is MissionConflictPolicy.QUEUE:
-                    queued = self.engine.lifecycle._queue_locked(
-                        runtime,
-                        reason or "Waiting for resources",
-                    )
-                elif policy is MissionConflictPolicy.PREEMPT_LOWER:
-                    lower = tuple(
-                        item
-                        for item in conflicts
-                        if runtime.mission.priority < item.mission.priority
-                    )
-                    if len(lower) != len(conflicts):
-                        raise MissionConflictError(
-                            "Mission cannot preempt an equal or "
-                            "higher-priority conflict"
-                        )
-                    preempt_ids = tuple(item.mission.id for item in lower)
-                else:
-                    raise MissionConflictError(
-                        self.engine._conflict_message(runtime, conflicts)
-                    )
-            elif at_capacity:
-                queued = self.engine.lifecycle._queue_locked(
-                    runtime,
-                    reason or "Waiting for mission capacity",
-                )
+            queued, preempt_ids = self._admit_locked(runtime, reason)
 
         if queued is not None:
             snapshot, transition = queued
@@ -202,46 +170,12 @@ class MissionScheduler:
         snapshot = runtime.snapshot
         with self.engine._condition:
             runtime = self.engine._runtime_locked(mission_id)
-            missing = self._missing_prerequisites_locked(runtime.mission)
-            conflicts = self._conflicts_locked(runtime.mission)
-            if missing:
-                if runtime.mission.prerequisite_policy is MissionPrerequisitePolicy.QUEUE:
-                    queued = self.engine.lifecycle._queue_locked(
-                        runtime, reason or "Waiting for prerequisites"
-                    )
-                else:
-                    names = ", ".join(item.__name__ for item in missing)
-                    raise MissionConflictError(
-                        f"Missing mission prerequisites: {names}"
-                    )
-            elif self._at_active_capacity_locked():
-                queued = self.engine.lifecycle._queue_locked(
-                    runtime,
-                    reason or "Waiting for mission capacity",
-                )
-            elif conflicts:
-                policy = runtime.mission.conflict_policy
-                if policy is MissionConflictPolicy.QUEUE:
-                    queued = self.engine.lifecycle._queue_locked(
-                        runtime, reason or "Waiting for resources"
-                    )
-                elif policy is MissionConflictPolicy.PREEMPT_LOWER:
-                    lower = tuple(
-                        item
-                        for item in conflicts
-                        if runtime.mission.priority < item.mission.priority
-                    )
-                    if len(lower) != len(conflicts):
-                        raise MissionConflictError(
-                            "Mission cannot preempt an equal or "
-                            "higher-priority conflict"
-                        )
-                    retry_preempt_ids = tuple(item.mission.id for item in lower)
-                else:
-                    raise MissionConflictError(
-                        self.engine._conflict_message(runtime, conflicts)
-                    )
-            else:
+            queued, retry_preempt_ids = self._admit_locked(
+                runtime,
+                reason,
+                capacity_first=True,
+            )
+            if queued is None and not retry_preempt_ids:
                 if runtime.pending_terminal is not None:
                     raise RuntimeError(
                         "Mission cannot start with a stale terminal intent"
@@ -271,7 +205,7 @@ class MissionScheduler:
         self.engine.lifecycle._publish_transition(transition)
         if queued is None:
             if generation is None:
-                raise RuntimeError("Mission launch admission did not produce a generation")
+                raise RuntimeError("Mission run admission did not produce a generation")
             with self.engine._condition:
                 runtime = self.engine._runtime_locked(mission_id)
                 if (
@@ -289,29 +223,80 @@ class MissionScheduler:
                 snapshot = runtime.snapshot
         return snapshot
 
-    def run(
+    def _admit_locked(
         self,
-        mission: MissionReference,
+        runtime: MissionRuntime,
+        reason: str,
         *,
-        requester_id: int | None = None,
-        reason: str = "",
-    ) -> MissionSnapshot:
-        return self.launch(
-            mission,
-            requester_id=requester_id,
-            reason=reason,
-        )
+        capacity_first: bool = False,
+    ) -> tuple[
+        tuple[MissionSnapshot, MissionTransition | None] | None,
+        tuple[int, ...],
+    ]:
+        """Evaluate one admission pass while the engine condition is held.
 
-    def launch_many(self, *missions: MissionReference) -> tuple[MissionSnapshot, ...]:
-        """Launch independent missions; non-conflicting work runs in parallel."""
+        The post-preemption pass checks capacity before resource conflicts to
+        preserve the established queue-selection semantics.
+        """
 
-        return tuple(self.launch(mission) for mission in missions)
+        missing = self._missing_prerequisites_locked(runtime.mission)
+        if missing:
+            if runtime.mission.prerequisite_policy is MissionPrerequisitePolicy.QUEUE:
+                return (
+                    self.engine.lifecycle._queue_locked(
+                        runtime,
+                        reason or "Waiting for prerequisites",
+                    ),
+                    (),
+                )
+            names = ", ".join(item.__name__ for item in missing)
+            raise MissionConflictError(f"Missing mission prerequisites: {names}")
 
-    def run_parallel(
-        self,
-        *missions: MissionReference,
-    ) -> tuple[MissionSnapshot, ...]:
-        return self.launch_many(*missions)
+        at_capacity = self._at_active_capacity_locked()
+        if capacity_first and at_capacity:
+            return (
+                self.engine.lifecycle._queue_locked(
+                    runtime,
+                    reason or "Waiting for mission capacity",
+                ),
+                (),
+            )
+
+        conflicts = self._conflicts_locked(runtime.mission)
+        if conflicts:
+            policy = runtime.mission.conflict_policy
+            if policy is MissionConflictPolicy.QUEUE:
+                return (
+                    self.engine.lifecycle._queue_locked(
+                        runtime,
+                        reason or "Waiting for resources",
+                    ),
+                    (),
+                )
+            if policy is MissionConflictPolicy.PREEMPT_LOWER:
+                lower = tuple(
+                    item
+                    for item in conflicts
+                    if runtime.mission.priority < item.mission.priority
+                )
+                if len(lower) != len(conflicts):
+                    raise MissionConflictError(
+                        "Mission cannot preempt an equal or higher-priority conflict"
+                    )
+                return None, tuple(item.mission.id for item in lower)
+            raise MissionConflictError(
+                self.engine._conflict_message(runtime, conflicts)
+            )
+
+        if at_capacity:
+            return (
+                self.engine.lifecycle._queue_locked(
+                    runtime,
+                    reason or "Waiting for mission capacity",
+                ),
+                (),
+            )
+        return None, ()
 
     def _scheduler_loop(self) -> None:
         generation = self.engine._scheduler_wake.generation
@@ -409,7 +394,7 @@ class MissionScheduler:
                     )
             if transition is not None:
                 self.engine.lifecycle._publish_transition(transition)
-                self._after_terminal(mission_id, succeeded=False)
+                self._after_terminal(mission_id)
                 continue
             if (
                 runtime.next_retry_monotonic is not None
@@ -417,12 +402,11 @@ class MissionScheduler:
             ):
                 continue
             try:
-                self.launch(mission_id, reason="Queued mission released")
+                self._run_registered(mission_id, reason="Queued mission released")
             except MissionConflictError:
                 continue
 
-    def _after_terminal(self, mission_id: int, *, succeeded: bool) -> None:
-        del succeeded
+    def _after_terminal(self, mission_id: int) -> None:
         self.engine._orchestrator.after_terminal(mission_id)
 
     def _missing_prerequisites_locked(

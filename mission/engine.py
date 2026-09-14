@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 import threading
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, overload
 
 from ..abstracts import Service
 from ..compatibility import ExceptionGroup
@@ -43,12 +43,9 @@ from .models import (
 )
 from .lifecycle import MissionLifecycle
 from .orchestration import MissionOrchestrator
+from .references import MissionOwner, MissionReference
 from .runtime import BoundMissionController, MissionRuntime
 from .scheduler import MissionScheduler, SchedulerWake
-
-
-MissionReference = Mission | int
-MissionFactory = Callable[[type[Mission]], Mission]
 
 
 class MissionEngine(Service):
@@ -69,7 +66,6 @@ class MissionEngine(Service):
         execution_history: int = 256,
         max_active_missions: int | None = None,
         max_queued_missions: int | None = None,
-        mission_factory: MissionFactory | None = None,
         lifecycle: MissionLifecycle | None = None,
         scheduler: MissionScheduler | None = None,
     ) -> None:
@@ -97,7 +93,6 @@ class MissionEngine(Service):
             raise TypeError("Mission engine scheduler must be MissionScheduler")
         self._scheduler_interval = scheduler_interval
         self._stop_timeout = stop_timeout
-        self._mission_factory = mission_factory or (lambda mission_type: mission_type())
         self._execution_history_limit = int(execution_history)
         self._max_active_missions = max_active_missions
         self._max_queued_missions = max_queued_missions
@@ -254,45 +249,52 @@ class MissionEngine(Service):
         for runtime in runtimes:
             runtime.mission.unbind_control(runtime.control)
 
-    def launch(
+    @overload
+    def run(
         self,
-        mission: MissionReference,
+        mission: Mission,
         *,
         requester_id: int | None = None,
         reason: str = "",
     ) -> MissionSnapshot:
-        return self.scheduler.launch(
-            mission,
-            requester_id=requester_id,
-            reason=reason,
-        )
+
+        ...
+
+    @overload
+    def run(
+        self,
+        mission: Mission,
+        second: Mission,
+        *missions: Mission,
+        requester_id: int | None = None,
+        reason: str = "",
+    ) -> tuple[MissionSnapshot, ...]:
+
+        ...
 
     def run(
         self,
-        mission: MissionReference,
-        *,
+        mission: Mission,
+        *missions: Mission,
         requester_id: int | None = None,
         reason: str = "",
-    ) -> MissionSnapshot:
-        return self.launch(
-            mission,
-            requester_id=requester_id,
-            reason=reason,
+    ) -> MissionSnapshot | tuple[MissionSnapshot, ...]:
+        """Run one or more configured mission instances independently."""
+
+        pending = (mission, *missions)
+        if any(not isinstance(item, Mission) for item in pending):
+            raise TypeError("run() requires Mission instances")
+        snapshots = tuple(
+            self.scheduler.run(
+                item,
+                requester_id=requester_id,
+                reason=reason,
+            )
+            for item in pending
         )
+        return snapshots[0] if len(snapshots) == 1 else snapshots
 
-    def launch_many(
-        self,
-        *missions: MissionReference,
-    ) -> tuple[MissionSnapshot, ...]:
-        return self.scheduler.launch_many(*missions)
-
-    def run_parallel(
-        self,
-        *missions: MissionReference,
-    ) -> tuple[MissionSnapshot, ...]:
-        return self.launch_many(*missions)
-
-    def start_chain(
+    def run_chain(
         self,
         chain: MissionChain,
         *,
@@ -336,8 +338,8 @@ class MissionEngine(Service):
 
         return self._orchestrator.chains.forget(chain_id)
 
-    def start_parallel(self, group: MissionParallelGroup) -> MissionParallelSnapshot:
-        """Start a named, policy-controlled parallel mission group."""
+    def run_parallel(self, group: MissionParallelGroup) -> MissionParallelSnapshot:
+        """Run a named, policy-controlled parallel mission group."""
 
         return self._orchestrator.parallel.start(group)
 
@@ -370,17 +372,17 @@ class MissionEngine(Service):
 
         return self._orchestrator.parallel.forget(group_id)
 
-    def launch_background(
+    def run_background(
         self,
         mission: Mission,
         *,
-        owner: Mission | int | MissionChainSnapshot | MissionParallelSnapshot,
+        owner: MissionOwner,
         termination_policy: OwnerTerminationPolicy = OwnerTerminationPolicy.STOP_WITH_OWNER,
         failure_policy: BackgroundFailurePolicy = BackgroundFailurePolicy.IGNORE,
     ) -> MissionBackgroundSnapshot:
-        """Launch a normal mission whose lifecycle is associated with an owner."""
+        """Run a mission whose lifecycle is associated with an owner."""
 
-        return self._orchestrator.background.launch(
+        return self._orchestrator.background.start(
             mission,
             owner=owner,
             termination_policy=termination_policy,

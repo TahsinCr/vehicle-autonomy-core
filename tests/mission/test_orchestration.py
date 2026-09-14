@@ -187,8 +187,8 @@ class MissionOrchestrationTests(unittest.TestCase):
 
     def test_chain_transfers_input_results_and_immutable_context(self) -> None:
         with MissionEngine(scheduler_interval=0.001) as engine:
-            snapshot = engine.start_chain(
-                MissionChain("transfer", (ProducerMission, ConsumerMission)),
+            snapshot = engine.run_chain(
+                MissionChain("transfer", (ProducerMission(), ConsumerMission())),
                 input={"value": 7},
                 metadata={"source": "test"},
             )
@@ -203,12 +203,24 @@ class MissionOrchestrationTests(unittest.TestCase):
 
     def test_chain_runs_are_isolated_and_repeated_nodes_are_unique(self) -> None:
         with MissionEngine(scheduler_interval=0.001) as engine:
-            first = engine.start_chain(
-                MissionChain("repeat", (ProducerMission, ProducerMission)),
+            first = engine.run_chain(
+                MissionChain(
+                    "repeat",
+                    (
+                        MissionNode("ProducerMission", ProducerMission()),
+                        MissionNode("ProducerMission#2", ProducerMission()),
+                    ),
+                ),
                 input={"value": 1},
             )
-            second = engine.start_chain(
-                MissionChain("repeat", (ProducerMission, ProducerMission)),
+            second = engine.run_chain(
+                MissionChain(
+                    "repeat",
+                    (
+                        MissionNode("ProducerMission", ProducerMission()),
+                        MissionNode("ProducerMission#2", ProducerMission()),
+                    ),
+                ),
                 input={"value": 2},
             )
             wait_until(lambda: not engine.chain_snapshot(first.execution_id).active)
@@ -223,10 +235,10 @@ class MissionOrchestrationTests(unittest.TestCase):
 
     def test_failure_can_continue_with_terminal_context(self) -> None:
         with MissionEngine(scheduler_interval=0.001) as engine:
-            run = engine.start_chain(
+            run = engine.run_chain(
                 MissionChain(
                     "continue",
-                    (FailingMission, ContextAfterFailureMission),
+                    (FailingMission(), ContextAfterFailureMission()),
                     stop_on_failure=False,
                 )
             )
@@ -239,22 +251,22 @@ class MissionOrchestrationTests(unittest.TestCase):
 
     def test_retry_preserves_execution_context(self) -> None:
         with MissionEngine(scheduler_interval=0.001) as engine:
-            run = engine.start_chain(MissionChain("retry", (RetryingMission,)))
+            run = engine.run_chain(MissionChain("retry", (RetryingMission(),)))
             wait_until(lambda: not engine.chain_snapshot(run.execution_id).active)
 
         self.assertEqual(RetryingMission.execution_ids, [run.execution_id] * 2)
 
     def test_timeout_and_cancel_end_a_chain_without_advancing(self) -> None:
         with MissionEngine(scheduler_interval=0.001) as engine:
-            timed = engine.start_chain(
-                MissionChain("timeout", (TimedOutMission, NeverStartedMission))
+            timed = engine.run_chain(
+                MissionChain("timeout", (TimedOutMission(), NeverStartedMission()))
             )
             wait_until(lambda: not engine.chain_snapshot(timed.execution_id).active)
             self.assertTrue(engine.chain_snapshot(timed.execution_id).failed)
             self.assertFalse(NeverStartedMission.started.is_set())
 
-            cancelled = engine.start_chain(
-                MissionChain("cancel", (IdleMission, NeverStartedMission))
+            cancelled = engine.run_chain(
+                MissionChain("cancel", (IdleMission(), NeverStartedMission()))
             )
             engine.cancel_chain(cancelled.execution_id)
             self.assertTrue(engine.chain_snapshot(cancelled.execution_id).cancelled)
@@ -263,10 +275,10 @@ class MissionOrchestrationTests(unittest.TestCase):
     def test_parallel_group_runs_concurrently_and_collects_results(self) -> None:
         group = MissionParallelGroup(
             "parallel",
-            (ParallelA, ParallelB),
+            (ParallelA(), ParallelB()),
         )
         with MissionEngine(scheduler_interval=0.001) as engine:
-            run = engine.start_parallel(group)
+            run = engine.run_parallel(group)
             wait_until(lambda: not engine.parallel_snapshot(run.execution_id).active)
             finished = engine.parallel_snapshot(run.execution_id)
 
@@ -275,21 +287,24 @@ class MissionOrchestrationTests(unittest.TestCase):
         self.assertEqual(finished.results["ParallelB"]["b"], 2)
 
         with self.assertRaisesRegex(ValueError, "unique"):
-            MissionParallelGroup("duplicate", (ParallelA, ParallelA))
+            duplicate = ParallelA()
+            MissionParallelGroup("duplicate", (duplicate, duplicate))
+        with self.assertRaisesRegex(ValueError, "Mission instances"):
+            MissionParallelGroup("class-entry", (ParallelA,))  # type: ignore[arg-type]
 
     def test_parallel_failure_cancels_remaining_children(self) -> None:
         blocker = IdleMission()
 
-        def factory(mission_type: type[Mission]) -> Mission:
-            return blocker if mission_type is IdleMission else mission_type()
-
         group = MissionParallelGroup(
             "cancel-siblings",
-            (MissionNode("blocker", IdleMission), MissionNode("failure", FailingMission)),
+            (
+                MissionNode("blocker", blocker),
+                MissionNode("failure", FailingMission()),
+            ),
             ParallelFailurePolicy.CANCEL_REMAINING,
         )
-        with MissionEngine(mission_factory=factory, scheduler_interval=0.001) as engine:
-            run = engine.start_parallel(group)
+        with MissionEngine(scheduler_interval=0.001) as engine:
+            run = engine.run_parallel(group)
             wait_until(lambda: not engine.parallel_snapshot(run.execution_id).active)
             finished = engine.parallel_snapshot(run.execution_id)
 
@@ -298,8 +313,8 @@ class MissionOrchestrationTests(unittest.TestCase):
 
     def test_early_parallel_failure_cancels_registered_sibling(self) -> None:
         class OrderedScheduler(MissionScheduler):
-            def launch(self, mission: object, **options: object):
-                snapshot = super().launch(mission, **options)  # type: ignore[arg-type]
+            def run(self, mission: object, **options: object):
+                snapshot = super().run(mission, **options)  # type: ignore[arg-type]
                 if isinstance(mission, FailingMission):
                     self.engine._runtime(mission).worker.join(1.0)
                 return snapshot
@@ -308,10 +323,10 @@ class MissionOrchestrationTests(unittest.TestCase):
             scheduler=OrderedScheduler(),
             scheduler_interval=0.001,
         ) as engine:
-            run = engine.start_parallel(
+            run = engine.run_parallel(
                 MissionParallelGroup(
                     "early-failure",
-                    (FailingMission, NeverStartedMission),
+                    (FailingMission(), NeverStartedMission()),
                     ParallelFailurePolicy.CANCEL_REMAINING,
                 )
             )
@@ -327,16 +342,16 @@ class MissionOrchestrationTests(unittest.TestCase):
     def test_wait_all_keeps_siblings_running_until_each_is_terminal(self) -> None:
         blocker = IdleMission()
 
-        def factory(mission_type: type[Mission]) -> Mission:
-            return blocker if mission_type is IdleMission else mission_type()
-
         group = MissionParallelGroup(
             "wait-all",
-            (MissionNode("blocker", IdleMission), MissionNode("failure", FailingMission)),
+            (
+                MissionNode("blocker", blocker),
+                MissionNode("failure", FailingMission()),
+            ),
             ParallelFailurePolicy.WAIT_ALL,
         )
-        with MissionEngine(mission_factory=factory, scheduler_interval=0.001) as engine:
-            run = engine.start_parallel(group)
+        with MissionEngine(scheduler_interval=0.001) as engine:
+            run = engine.run_parallel(group)
             wait_until(lambda: engine.snapshot(blocker).phase is MissionPhase.RUNNING)
             self.assertTrue(engine.parallel_snapshot(run.execution_id).active)
             engine.complete(blocker, {"finished": True})
@@ -349,17 +364,23 @@ class MissionOrchestrationTests(unittest.TestCase):
     def test_parallel_group_stop_propagates_and_conflicts_are_rejected(self) -> None:
         with MissionEngine(scheduler_interval=0.001) as engine:
             with self.assertRaises(MissionConflictError):
-                engine.start_parallel(
+                engine.run_parallel(
                     MissionParallelGroup(
                         "conflict",
-                        (MissionNode("a", ExclusiveA), MissionNode("b", ExclusiveB)),
+                        (
+                            MissionNode("a", ExclusiveA()),
+                            MissionNode("b", ExclusiveB()),
+                        ),
                     )
                 )
 
-            run = engine.start_parallel(
+            run = engine.run_parallel(
                 MissionParallelGroup(
                     "stoppable",
-                    (MissionNode("a", IdleMission), MissionNode("b", IdleMission)),
+                    (
+                        MissionNode("a", IdleMission()),
+                        MissionNode("b", IdleMission()),
+                    ),
                 )
             )
             engine.stop_parallel(run.execution_id)
@@ -381,17 +402,13 @@ class MissionOrchestrationTests(unittest.TestCase):
         stuck = StuckMission()
         sibling = IdleMission()
 
-        def factory(mission_type: type[Mission]) -> Mission:
-            return stuck if mission_type is StuckMission else sibling
-
         engine = MissionEngine(
-            mission_factory=factory,
             scheduler_interval=0.001,
             stop_timeout=0.01,
         )
         try:
-            run = engine.start_parallel(
-                MissionParallelGroup("retry-stop", (StuckMission, IdleMission))
+            run = engine.run_parallel(
+                MissionParallelGroup("retry-stop", (stuck, sibling))
             )
             self.assertTrue(stuck.started.wait(1.0))
             self.assertTrue(sibling.started.wait(1.0))
@@ -415,9 +432,12 @@ class MissionOrchestrationTests(unittest.TestCase):
         ) as engine:
             group = MissionParallelGroup(
                 "live",
-                (MissionNode("left", IdleMission), MissionNode("right", IdleMission)),
+                (
+                    MissionNode("left", IdleMission()),
+                    MissionNode("right", IdleMission()),
+                ),
             )
-            run = engine.start_parallel(group)
+            run = engine.run_parallel(group)
             wait_until(
                 lambda: all(
                     engine.snapshot(mission_id).phase is MissionPhase.RUNNING
@@ -443,8 +463,8 @@ class MissionOrchestrationTests(unittest.TestCase):
 
             chain_runs = []
             for index in range(3):
-                chain_run = engine.start_chain(
-                    MissionChain(f"bounded-{index}", (ProducerMission,)),
+                chain_run = engine.run_chain(
+                    MissionChain(f"bounded-{index}", (ProducerMission(),)),
                     input={"value": index},
                 )
                 self.assertIsNotNone(engine.wait_chain(chain_run.execution_id, 1.0))
@@ -466,11 +486,11 @@ class MissionOrchestrationTests(unittest.TestCase):
     def test_parallel_launch_failure_keeps_failed_group_snapshot(self) -> None:
         owner = ExclusiveA()
         with MissionEngine(scheduler_interval=0.001) as engine:
-            engine.launch(owner)
+            engine.run(owner)
             owner.started.wait(1.0)
             with self.assertRaises(MissionConflictError):
-                engine.start_parallel(
-                    MissionParallelGroup("blocked-group", (ExclusiveB,))
+                engine.run_parallel(
+                    MissionParallelGroup("blocked-group", (ExclusiveB(),))
                 )
             finished = engine.parallel_snapshot("blocked-group")
 
@@ -479,26 +499,20 @@ class MissionOrchestrationTests(unittest.TestCase):
         self.assertIs(finished.phases["ExclusiveB"], MissionPhase.STOPPED)
 
     def test_parallel_start_event_can_stop_group_before_children_launch(self) -> None:
-        children: list[IdleMission] = []
-
-        def factory(_mission_type: type[Mission]) -> Mission:
-            mission = IdleMission()
-            children.append(mission)
-            return mission
-
-        with MissionEngine(mission_factory=factory, scheduler_interval=0.001) as engine:
+        children = [IdleMission(), IdleMission()]
+        with MissionEngine(scheduler_interval=0.001) as engine:
             engine.events.subscribe(
                 lambda event: engine.stop_parallel(event.fields["execution_id"]),
                 predicate=lambda event: event.event_type is MissionEventType.PARALLEL
                 and event.message.startswith("Parallel execution started"),
                 times=1,
             )
-            run = engine.start_parallel(
+            run = engine.run_parallel(
                 MissionParallelGroup(
                     "reentrant-stop",
                     (
-                        MissionNode("first", IdleMission),
-                        MissionNode("second", IdleMission),
+                        MissionNode("first", children[0]),
+                        MissionNode("second", children[1]),
                     ),
                 )
             )
@@ -524,11 +538,14 @@ class MissionOrchestrationTests(unittest.TestCase):
     def test_chain_parallel_stage_passes_combined_result(self) -> None:
         stage = MissionParallelStage(
             "work",
-            (MissionNode("left", ParallelA), MissionNode("right", ParallelB)),
+            (
+                MissionNode("left", ParallelA()),
+                MissionNode("right", ParallelB()),
+            ),
         )
         with MissionEngine(scheduler_interval=0.001) as engine:
-            run = engine.start_chain(
-                MissionChain("mixed", (ProducerMission, stage, ParallelConsumer)),
+            run = engine.run_chain(
+                MissionChain("mixed", (ProducerMission(), stage, ParallelConsumer())),
                 input={"value": 5},
             )
             wait_until(lambda: not engine.chain_snapshot(run.execution_id).active)
@@ -542,13 +559,13 @@ class MissionOrchestrationTests(unittest.TestCase):
         stage = MissionParallelStage(
             "failed-work",
             (
-                MissionNode("failure", FailingMission),
-                MissionNode("success", ProducerMission),
+                MissionNode("failure", FailingMission()),
+                MissionNode("success", ProducerMission()),
             ),
         )
         with MissionEngine(scheduler_interval=0.001) as engine:
-            run = engine.start_chain(
-                MissionChain("failed-stage", (stage, NeverStartedMission)),
+            run = engine.run_chain(
+                MissionChain("failed-stage", (stage, NeverStartedMission())),
                 input={"value": 1},
             )
             wait_until(lambda: not engine.chain_snapshot(run.execution_id).active)
@@ -561,9 +578,9 @@ class MissionOrchestrationTests(unittest.TestCase):
         owner = IdleMission()
         background = IdleMission()
         with MissionEngine(scheduler_interval=0.001) as engine:
-            engine.launch(owner)
+            engine.run(owner)
             owner.started.wait(1.0)
-            engine.launch_background(background, owner=owner)
+            engine.run_background(background, owner=owner)
             background.started.wait(1.0)
             engine.complete(owner, {"done": True})
             wait_until(lambda: engine.snapshot(background).phase.terminal)
@@ -572,9 +589,9 @@ class MissionOrchestrationTests(unittest.TestCase):
         owner = IdleMission()
         background = IdleMission()
         with MissionEngine(scheduler_interval=0.001) as engine:
-            engine.launch(owner)
+            engine.run(owner)
             owner.started.wait(1.0)
-            engine.launch_background(
+            engine.run_background(
                 background,
                 owner=owner,
                 termination_policy=OwnerTerminationPolicy.KEEP_RUNNING,
@@ -585,10 +602,10 @@ class MissionOrchestrationTests(unittest.TestCase):
 
         owner = IdleMission()
         with MissionEngine(scheduler_interval=0.001) as engine:
-            engine.launch(owner)
+            engine.run(owner)
             owner.started.wait(1.0)
             failing = FailingMission()
-            engine.launch_background(
+            engine.run_background(
                 failing,
                 owner=owner,
                 failure_policy=BackgroundFailurePolicy.FAIL_OWNER,
@@ -600,7 +617,7 @@ class MissionOrchestrationTests(unittest.TestCase):
         owner = IdleMission()
         background = IdleMission()
         with MissionEngine(scheduler_interval=0.001) as engine:
-            engine.launch(owner)
+            engine.run(owner)
             self.assertTrue(owner.started.wait(1.0))
             engine.events.subscribe(
                 lambda _event: engine.stop_mission(owner),
@@ -610,7 +627,7 @@ class MissionOrchestrationTests(unittest.TestCase):
             )
 
             with self.assertRaises(MissionConflictError):
-                engine.launch_background(background, owner=owner)
+                engine.run_background(background, owner=owner)
 
             self.assertIs(engine.snapshot(owner).phase, MissionPhase.STOPPED)
             self.assertNotIn(
@@ -622,9 +639,9 @@ class MissionOrchestrationTests(unittest.TestCase):
         owner = IdleMission()
         background = IdleMission()
         with MissionEngine(scheduler_interval=0.001) as engine:
-            engine.launch(owner)
+            engine.run(owner)
             owner.started.wait(1.0)
-            engine.launch_background(
+            engine.run_background(
                 background,
                 owner=owner,
                 termination_policy=OwnerTerminationPolicy.CANCEL_WITH_OWNER,
@@ -638,9 +655,9 @@ class MissionOrchestrationTests(unittest.TestCase):
         background = IdleMission()
         engine = MissionEngine(scheduler_interval=0.001)
         engine.start()
-        engine.launch(owner)
+        engine.run(owner)
         owner.started.wait(1.0)
-        engine.launch_background(
+        engine.run_background(
             background,
             owner=owner,
             termination_policy=OwnerTerminationPolicy.KEEP_RUNNING,

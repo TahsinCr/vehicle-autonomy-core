@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from .base import Mission
 from .enums import MissionEventType, MissionPhase, ParallelFailurePolicy
-from .errors import MissionConflictError, MissionNotFoundError, MissionRegistrationError
+from .errors import MissionConflictError, MissionNotFoundError
 from .execution import (
     MissionExecutionContext,
     MissionExecutionResult,
@@ -49,13 +49,9 @@ class MissionParallelExecutor:
             raise TypeError("Parallel execution requires MissionParallelGroup")
         execution_id = uuid4().hex
         missions = tuple(
-            (node, self.orchestrator.create_mission(node))
+            (node, self.orchestrator.mission_for(node))
             for node in group.nodes
         )
-        if len({mission.id for _node, mission in missions}) != len(missions):
-            raise MissionRegistrationError(
-                "Mission factory returned the same instance for multiple nodes"
-            )
         self._validate_conflicts(missions)
         registered: list[Mission] = []
         try:
@@ -92,9 +88,9 @@ class MissionParallelExecutor:
                 with self.engine._condition:
                     if not self._runs[execution_id].active:
                         break
-                self.engine.launch(mission)
+                self.engine.run(mission)
         except Exception as exc:
-            self.fail(execution_id, f"Parallel launch failed: {exc}")
+            self.fail(execution_id, f"Parallel start failed: {exc}")
             raise
         return self.snapshot(execution_id)
 
@@ -405,18 +401,15 @@ class MissionParallelExecutor:
         return self.snapshot(snapshot.execution_id)
 
     def _is_pending(self, mission_id: int) -> bool:
-        with self.engine._condition:
-            phase = self.engine._runtime_locked(mission_id).snapshot.phase
-            return phase.active or phase in {
-                MissionPhase.REGISTERED,
-                MissionPhase.QUEUED,
-            }
+        return self.orchestrator.is_pending(mission_id)
 
     def _retain_terminal_locked(self, execution_id: str) -> None:
-        if execution_id not in self._completed:
-            self._completed.append(execution_id)
-        while len(self._completed) > self.engine._execution_history_limit:
-            self._remove_run_locked(self._completed.popleft())
+        self.orchestrator.retain_bounded_execution(
+            self._completed,
+            execution_id,
+            self.engine._execution_history_limit,
+            self._remove_run_locked,
+        )
 
     def _remove_run_locked(self, execution_id: str) -> None:
         snapshot = self._runs.pop(execution_id, None)

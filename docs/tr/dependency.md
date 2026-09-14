@@ -5,6 +5,68 @@
 Dependency paketi açık kayıt, constructor injection, sync/async resolution,
 nested scope ve deterministik cleanup sağlar.
 
+## Bu sayfada
+
+- [Zihinsel model](#zihinsel-model)
+- [Araç servisi örneği](#araç-servisi-örneği)
+- [Lifetime'lar](#lifetimelar)
+- [`DependencyContainer`](#dependencycontainer)
+- [Injection](#injection)
+- [Composition root](#composition-root)
+- [Public hata ve alias'lar](#public-hata-ve-aliaslar)
+
+## Zihinsel model
+
+**Token** “ne istendi?”, **provider** “nasıl oluşturulur?”, **lifetime** ise
+oluşan nesnenin sahibinin kim olduğu sorusunu cevaplar. `resolve()` constructor
+annotation'larını takip ederek nesne grafiğinin tamamını kurar.
+
+```text
+VehicleStatusService
+    ├── TelemetryStore   singleton: owner container başına bir tane
+    └── OperationLog    scoped: child scope başına bir tane
+```
+
+Cache'lenen nesneler container'a aittir ve ters oluşturulma sırasıyla
+temizlenir. Transient nesnenin sahibi caller'dır.
+
+## Araç servisi örneği
+
+```python
+from dataclasses import dataclass
+from src.core import DependencyContainer
+
+@dataclass(frozen=True)
+class VehicleSettings:
+    stale_after: float = 3.0
+
+class TelemetryStore:
+    def __init__(self) -> None:
+        self.latest: dict[str, object] = {}
+
+    def close(self) -> None:
+        self.latest.clear()
+
+class VehicleStatusService:
+    def __init__(self, store: TelemetryStore,
+                 settings: VehicleSettings) -> None:
+        self.store = store
+        self.settings = settings
+
+with DependencyContainer() as container:
+    container.instance(VehicleSettings, VehicleSettings())
+    container.singleton(TelemetryStore)
+    container.transient(VehicleStatusService)
+
+    first = container.resolve(VehicleStatusService)
+    second = container.resolve(VehicleStatusService)
+    assert first is not second
+    assert first.store is second.store
+```
+
+Status servisi her istekte yeniden oluşur; iki instance container-owned store'u
+paylaşır. Context bittiğinde store'un `close()` metodu çalışır.
+
 ## Lifetime'lar
 
 | Lifetime | Davranış | Cleanup sahibi |

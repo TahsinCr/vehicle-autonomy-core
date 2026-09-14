@@ -6,9 +6,9 @@
 if __package__ == "dependency":
     __all__: list[str] = []
 else:
-    from .container import (
-        BaseDependencyContainer,
-        DependencyContainer,
+    from .container import DependencyContainer
+    from .facade import BaseDependencyContainer
+    from .context import (
         get_current_container,
         get_default_container,
         set_default_container,

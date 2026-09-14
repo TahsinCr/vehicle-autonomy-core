@@ -13,7 +13,7 @@ from typing import Generic, TypeVar
 from ..compatibility import ExceptionGroup
 
 from .actions import AsyncEventBusActions, EventErrorContext, EventTimeoutContext
-from .base import BaseEventBus
+from .base import BaseEventBus, normalize_replay_capacity, validate_positive_capacity
 from .contracts import DeliveryMode, ErrorPolicy, EventBusStats, PublishResult
 from .errors import EventBusError, InvalidEventHandlerError
 from .filtering import EventFilter, EventType, coerce_event_filter
@@ -80,14 +80,11 @@ class AsyncEventBus(BaseEventBus[T]):
         on_timeout: Callable[[EventTimeoutContext[T]], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(history=history, error_policy=error_policy)
-        if replay_buffer_limit <= 0:
-            raise ValueError("Replay buffer limit must be positive")
-        if (
-            isinstance(max_schedules, bool)
-            or not isinstance(max_schedules, int)
-            or max_schedules <= 0
-        ):
-            raise ValueError("Maximum periodic schedules must be a positive integer")
+        replay_buffer_limit = normalize_replay_capacity(replay_buffer_limit)
+        max_schedules = validate_positive_capacity(
+            max_schedules,
+            name="Maximum periodic schedules",
+        )
         direct_actions = (on_before, on_after, on_error, on_timeout)
         if actions is not None and any(action is not None for action in direct_actions):
             raise ValueError("Use actions or direct on_* callbacks, not both")
@@ -108,7 +105,7 @@ class AsyncEventBus(BaseEventBus[T]):
                     "AsyncEventBus actions must be async"
                 )
         self._delivery_mode = DeliveryMode(delivery_mode)
-        self._replay_buffer_limit = int(replay_buffer_limit)
+        self._replay_buffer_limit = replay_buffer_limit
         self._max_schedules = max_schedules
         self._subscribers: dict[int, _AsyncSubscriber[T]] = {}
         self._next_id = 0

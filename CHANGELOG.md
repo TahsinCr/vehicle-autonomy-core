@@ -2,6 +2,55 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.8] - 2026-09-14
+
+### Changed
+
+- Simplified mission execution to one instance-based `run()` entry point.
+  Removed `launch()` and class-based execution so mission construction and
+  configuration remain explicit at the call site.
+- `run()` now accepts one or more independent mission instances, while
+  `run_parallel()` exclusively runs a managed `MissionParallelGroup` and
+  `run_chain()` names the managed chain entry point consistently.
+- Mission nodes, chains and parallel groups now own configured mission
+  instances instead of mission classes. Removed the engine-level
+  `mission_factory`; duplicate instance ownership is rejected when execution
+  graphs are constructed.
+- Mission default names now match their concrete class names exactly. A
+  `MissionNode(name, mission)` supplies only an execution result key and does
+  not mutate the mission's identity or configuration.
+- Centralized mission and background-owner reference types so engine,
+  lifecycle, scheduler and orchestration components share one contract.
+- Simplified MAVLink callback registration state and routed async runtime
+  coordination through a narrow runtime-owned internal interface.
+- Consolidated mission admission evaluation and shared chain/parallel retention
+  helpers while preserving the existing concurrency and queue semantics.
+- Centralized common event-bus capacity and timeout validation.
+- Split ambient dependency context and the application-facing container facade
+  from lifecycle coordination without changing the public dependency imports.
+- Isolated sync/async MAVLink coordination behind a small runtime-support
+  boundary instead of exposing owned registry and handler implementation state.
+- Reduced both README files to focused project, installation and quick-start
+  guides; detailed behavior remains in the English and Turkish documentation.
+- Expanded the English and Turkish documentation with a task-oriented map,
+  callable API contracts and progressive real-world examples for dependency
+  ownership, event delivery, mission execution and multi-vehicle telemetry.
+
+### Fixed
+
+- Removed an unused mission terminal-success argument that no longer affected
+  orchestration behavior.
+- Aligned mission quick-start examples and API references with the instance-only
+  `run()` contract.
+- Documented and tested that multi-mission `run()` admission is ordered and
+  non-transactional: an independently started mission is not rolled back when
+  a later mission is rejected.
+
+### Tests
+
+- Added syntax validation for every Python code block in both README files and
+  the complete bilingual documentation tree.
+
 ## [v1.7.3] - 2026-09-12
 
 ### Changed

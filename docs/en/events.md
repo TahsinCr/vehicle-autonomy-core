@@ -5,6 +5,53 @@
 The event package offers matching synchronous and asyncio-native APIs. Choose
 the bus that matches the caller; callback mode is validated at registration.
 
+## On this page
+
+- [A practical event flow](#a-practical-event-flow)
+- [Synchronous `EventBus`](#synchronous-eventbus)
+- [`AsyncEventBus`](#asynceventbus)
+- [Filtering and replay](#filtering-and-replay)
+- [Callback policies](#callback-policies)
+- [Named engines](#named-engines)
+- [History, results and errors](#history-and-subscriptions)
+
+## A practical event flow
+
+An event describes something that already happened. The publisher should not
+know which logger, health monitor or UI consumes it.
+
+```python
+from dataclasses import dataclass
+from src.core import EventBus
+
+@dataclass(frozen=True)
+class VehicleStateChanged:
+    system_id: int
+    state: str
+    battery_percent: float
+
+with EventBus[VehicleStateChanged](history=100) as states:
+    audit: list[VehicleStateChanged] = []
+
+    @states.subscribe
+    def record(event: VehicleStateChanged) -> None:
+        audit.append(event)
+
+    low_battery = states.subscribe(
+        lambda event: request_safe_return(event.system_id),
+        predicate=lambda event: event.battery_percent < 20.0,
+        once=True,
+    )
+
+    states.publish(VehicleStateChanged(7, "connected", 74.0))
+    states.publish(VehicleStateChanged(7, "flying", 18.0))
+    assert not low_battery.active
+```
+
+The audit handler receives both events. The safety subscriber accepts one
+matching event and cancels itself atomically. `publish()` returns a
+`PublishResult`, making isolated handler failures visible to the caller.
+
 ## Synchronous `EventBus`
 
 ```text
@@ -146,6 +193,29 @@ Methods/properties:
 Hooks receive `CallbackContext(event, result, error, elapsed)`. Sync timeout is
 observational: the callback finishes, then `CallbackTimeoutError` is reported.
 Async timeout cancels the awaited callback within its execution budget.
+
+Hooks may be attached after registration, which keeps the subscription call
+readable when several observations are needed:
+
+```python
+subscription = vehicle.subscribe("ATTITUDE", update_attitude,
+                                 frequency_hz=20.0)
+
+@subscription.on_success
+def mark_delivered(context) -> None:
+    metrics.delivered += 1
+
+@subscription.on_error
+def report_failure(context) -> None:
+    error_log.append(context.error)
+
+@subscription.on_after
+def record_latency(context) -> None:
+    metrics.observe(context.elapsed)
+```
+
+`on_after` runs after success, failure or framework timeout. `disable()` keeps
+the registration but skips admission; `cancel()` removes it permanently.
 
 ## Named engines
 

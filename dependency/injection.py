@@ -73,7 +73,7 @@ def injection(
 def _resolver(container: DependencyContainer | None) -> DependencyContainer:
     if container is not None:
         return container
-    from .container import get_current_container
+    from .context import get_current_container
 
     return get_current_container()
 

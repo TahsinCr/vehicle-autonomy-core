@@ -5,6 +5,53 @@
 Event paketi eş özellikli sync ve asyncio-native API sunar. Çağıran yapıya uygun
 bus seçilir; callback modu kayıt sırasında doğrulanır.
 
+## Bu sayfada
+
+- [Gerçekçi bir event akışı](#gerçekçi-bir-event-akışı)
+- [`EventBus`](#eventbus)
+- [`AsyncEventBus`](#asynceventbus)
+- [Filter ve replay](#filter-ve-replay)
+- [Callback policy'leri](#callback-policyleri)
+- [Named engine'ler](#named-engineler)
+- [History, subscription ve hatalar](#history-subscription-ve-hatalar)
+
+## Gerçekçi bir event akışı
+
+Event daha önce gerçekleşmiş bir durumu anlatır. Publisher; logger, sağlık
+izleyici veya UI'dan hangisinin bunu tükettiğini bilmemelidir.
+
+```python
+from dataclasses import dataclass
+from src.core import EventBus
+
+@dataclass(frozen=True)
+class VehicleStateChanged:
+    system_id: int
+    state: str
+    battery_percent: float
+
+with EventBus[VehicleStateChanged](history=100) as states:
+    audit: list[VehicleStateChanged] = []
+
+    @states.subscribe
+    def record(event: VehicleStateChanged) -> None:
+        audit.append(event)
+
+    low_battery = states.subscribe(
+        lambda event: request_safe_return(event.system_id),
+        predicate=lambda event: event.battery_percent < 20.0,
+        once=True,
+    )
+
+    states.publish(VehicleStateChanged(7, "connected", 74.0))
+    states.publish(VehicleStateChanged(7, "flying", 18.0))
+    assert not low_battery.active
+```
+
+Audit handler iki event'i de alır. Güvenlik subscriber'ı bir eşleşen event
+alıp atomik olarak kendini iptal eder. `publish()` bir `PublishResult` döndürür;
+izole handler hataları caller tarafından görülebilir.
+
 ## `EventBus`
 
 ```text

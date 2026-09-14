@@ -14,6 +14,7 @@ from src.core.mission import (
     MissionEventLevel,
     MissionEventQuery,
     MissionEventType,
+    MissionNode,
     MissionPhase,
     MissionRetryPolicy,
     MissionSnapshot,
@@ -52,7 +53,7 @@ class MissionContractTests(unittest.TestCase):
         self.assertIsInstance(first.id, int)
         self.assertGreater(first.id, 0)
         self.assertNotEqual(first.id, second.id)
-        self.assertEqual(first.name, "Primary Mission")
+        self.assertEqual(first.name, "PrimaryMission")
         self.assertEqual(second.name, "Primary Target")
         self.assertEqual(first.resources, frozenset({"camera", "flight-control"}))
         self.assertFalse(hasattr(first, "debug"))
@@ -72,7 +73,7 @@ class MissionContractTests(unittest.TestCase):
         self.assertIsInstance(snapshot, Model)
         serialized = snapshot.to_dict()
         self.assertEqual(serialized["mission_id"], mission.id)
-        self.assertEqual(serialized["name"], "Primary Mission")
+        self.assertEqual(serialized["name"], "PrimaryMission")
         self.assertEqual(serialized["phase"], MissionPhase.RUNNING)
 
     def test_retry_policy_validates_attempts_and_delay(self) -> None:
@@ -169,26 +170,36 @@ class MissionContractTests(unittest.TestCase):
                 with self.assertRaises(MissionTransitionError):
                     ensure_mission_transition(previous, current)
 
-    def test_mission_chain_accepts_repeated_types_and_rejects_invalid_entries(self) -> None:
-        chain = MissionChain("survey.chain", (PrimaryMission, SurveyMission))
-        self.assertEqual(chain.stages, (PrimaryMission, SurveyMission))
+    def test_mission_chain_accepts_instances_and_rejects_invalid_entries(self) -> None:
+        primary = PrimaryMission()
+        survey = SurveyMission()
+        chain = MissionChain("survey.chain", (primary, survey))
+        self.assertEqual(chain.stages, (primary, survey))
         self.assertIs(
             MissionChainSnapshot(chain, active=True).current_stage,
-            PrimaryMission,
+            primary,
         )
         with self.assertRaises(ValueError):
             MissionChain("survey.chain", ())
         repeated = MissionChain(
             "repeated.chain",
-            (PrimaryMission, PrimaryMission),
+            (
+                MissionNode("first", PrimaryMission()),
+                MissionNode("second", PrimaryMission()),
+            ),
         )
         self.assertEqual(len(repeated.stages), 2)
-        mutable_stages = [PrimaryMission]
+        detached_mission = PrimaryMission()
+        mutable_stages = [detached_mission]
         detached = MissionChain("detached.chain", mutable_stages)  # type: ignore[arg-type]
         mutable_stages.clear()
-        self.assertEqual(detached.stages, (PrimaryMission,))
+        self.assertEqual(detached.stages, (detached_mission,))
+        with self.assertRaisesRegex(ValueError, "instances must be unique"):
+            MissionChain("duplicate.chain", (primary, primary))
         with self.assertRaises(ValueError):
             MissionChain("survey.chain", (str,))  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "Mission instances"):
+            MissionChain("class.chain", (PrimaryMission,))  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
             MissionChainSnapshot(chain, current_index=-1, active=True)
 

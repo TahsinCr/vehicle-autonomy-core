@@ -74,7 +74,7 @@ class ArmMission(Mission):
         pass
 
 with MissionEngine() as engine:
-    snapshot = engine.run(ArmMission)
+    snapshot = engine.run(ArmMission())
     finished = engine.wait(snapshot.mission_id, timeout=2.0)
     assert finished is not None and finished.phase.terminal
 ```

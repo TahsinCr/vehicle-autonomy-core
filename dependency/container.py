@@ -18,6 +18,7 @@ from .annotations import (
     normalize_dependencies,
     normalize_priority,
 )
+from .context import enter_container, exit_container
 from .registration import (
     DEFAULT_PRIORITY,
     DependencyMap,
@@ -52,12 +53,6 @@ from .resolution import (
     enter_resolution,
     exit_resolution,
     format_token,
-)
-
-
-_default_container: DependencyContainer | None = None
-_current_container: contextvars.ContextVar[DependencyContainer | None] = (
-    contextvars.ContextVar("current_dependency_container", default=None)
 )
 
 
@@ -256,7 +251,7 @@ class DependencyContainer:
 
     def __enter__(self) -> DependencyContainer:
         self._ensure_open()
-        self._context_tokens.append(_current_container.set(self))
+        self._context_tokens.append(enter_container(self))
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -267,7 +262,7 @@ class DependencyContainer:
 
     async def __aenter__(self) -> DependencyContainer:
         self._ensure_open()
-        self._context_tokens.append(_current_container.set(self))
+        self._context_tokens.append(enter_container(self))
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -805,7 +800,7 @@ class DependencyContainer:
 
     def _reset_current_container(self) -> None:
         if self._context_tokens:
-            _current_container.reset(self._context_tokens.pop())
+            exit_container(self._context_tokens.pop())
 
     def _find_provider(self, token: Token) -> Provider | None:
         with self._registration_lock:
@@ -1135,175 +1130,3 @@ class DependencyContainer:
             provider.singleton = MISSING
         ordered = self._tracker.ordered(candidates)
         return self._tracker.claim(ordered)
-
-
-class BaseDependencyContainer:
-    """Base class for application-specific dependency registrations."""
-
-    __slots__ = ("container",)
-
-    def __init__(
-        self,
-        *,
-        container: DependencyContainer | None = None,
-        parent: DependencyContainer | None = None,
-        set_as_default: bool = True,
-        auto_wire: bool = True,
-    ) -> None:
-        self.container = container or DependencyContainer(
-            parent=parent, auto_wire=auto_wire
-        )
-        self.configure()
-        if set_as_default:
-            set_default_container(self.container)
-
-    def configure(self) -> None:
-        """Override in a subclass to register application services."""
-
-    def singleton(
-        self,
-        token: Token | None = None,
-        provider: Any = MISSING,
-        *,
-        abstract: Token | None = None,
-        concrete: Any = MISSING,
-        factory: Any = MISSING,
-        instance: Any = MISSING,
-        dependencies: DependencyMap | None = None,
-        priority: int = DEFAULT_PRIORITY,
-    ) -> DependencyContainer:
-        return self.container.singleton(
-            token,
-            provider,
-            abstract=abstract,
-            concrete=concrete,
-            factory=factory,
-            instance=instance,
-            dependencies=dependencies,
-            priority=priority,
-        )
-
-    def transient(
-        self,
-        token: Token | None = None,
-        provider: Any = MISSING,
-        *,
-        abstract: Token | None = None,
-        concrete: Any = MISSING,
-        factory: Any = MISSING,
-        dependencies: DependencyMap | None = None,
-        priority: int = DEFAULT_PRIORITY,
-    ) -> DependencyContainer:
-        return self.container.transient(
-            token,
-            provider,
-            abstract=abstract,
-            concrete=concrete,
-            factory=factory,
-            dependencies=dependencies,
-            priority=priority,
-        )
-
-    def scoped(
-        self,
-        token: Token | None = None,
-        provider: Any = MISSING,
-        *,
-        abstract: Token | None = None,
-        concrete: Any = MISSING,
-        factory: Any = MISSING,
-        dependencies: DependencyMap | None = None,
-        priority: int = DEFAULT_PRIORITY,
-    ) -> DependencyContainer:
-        return self.container.scoped(
-            token,
-            provider,
-            abstract=abstract,
-            concrete=concrete,
-            factory=factory,
-            dependencies=dependencies,
-            priority=priority,
-        )
-
-    def instance(
-        self,
-        token: Token | None = None,
-        instance: Any = MISSING,
-        *,
-        abstract: Token | None = None,
-        priority: int = DEFAULT_PRIORITY,
-    ) -> DependencyContainer:
-        return self.container.instance(
-            token,
-            instance,
-            abstract=abstract,
-            priority=priority,
-        )
-
-    def inject(
-        self,
-        target: Callable[..., T] | type[T] | None = None,
-        *,
-        dependencies: DependencyMap | None = None,
-        strict: bool = False,
-        **named_dependencies: Token,
-    ) -> Callable[..., T] | type[T] | Callable[[Callable[..., T] | type[T]], Any]:
-        return self.container.inject(
-            target,
-            dependencies=dependencies,
-            strict=strict,
-            **named_dependencies,
-        )
-
-    def resolve(self, token: Token) -> Any:
-        return self.container.resolve(token)
-
-    async def resolve_async(self, token: Token) -> Any:
-        return await self.container.resolve_async(token)
-
-    def warmup(
-        self,
-        tokens: Iterable[Token] | None = None,
-        *,
-        lifetimes: Iterable[Lifetime | str] = (Lifetime.SINGLETON,),
-    ) -> None:
-        self.container.warmup(tokens=tokens, lifetimes=lifetimes)
-
-    async def warmup_async(
-        self,
-        tokens: Iterable[Token] | None = None,
-        *,
-        lifetimes: Iterable[Lifetime | str] = (Lifetime.SINGLETON,),
-    ) -> None:
-        await self.container.warmup_async(tokens=tokens, lifetimes=lifetimes)
-
-    def create_scope(self) -> DependencyContainer:
-        return self.container.create_scope()
-
-    def unregister(self, token: Token) -> None:
-        self.container.unregister(token)
-
-    async def unregister_async(self, token: Token) -> None:
-        await self.container.unregister_async(token)
-
-    def shutdown(self) -> None:
-        self.container.shutdown()
-
-    async def shutdown_async(self) -> None:
-        await self.container.shutdown_async()
-
-
-def set_default_container(container: DependencyContainer) -> None:
-    global _default_container
-    _default_container = container
-
-
-def get_default_container() -> DependencyContainer:
-    global _default_container
-    if _default_container is None:
-        _default_container = DependencyContainer()
-    return _default_container
-
-
-def get_current_container() -> DependencyContainer:
-    return _current_container.get() or get_default_container()

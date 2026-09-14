@@ -7,6 +7,52 @@ MAVLink paketi dört seviyelidir: `MavlinkConnection` pymavlink bağlantısını
 API'sini, `MavlinkRuntime` callback/araç/history/application katmanını yönetir.
 Çoğu uygulama runtime ile başlamalıdır.
 
+## Okuma akışı
+
+```text
+Endpoint → Runtime → Vehicle → Component → subscribe/latest/wait_for
+                                      → opsiyonel history/application protocol
+```
+
+Her fiziksel bağlantı için tek runtime kullanılır. Router tek okuyucudur;
+vehicle ve component view'ları ortak stream'i source ID ile filtreler.
+
+## Gerçekçi çoklu araç telemetrisi
+
+```python
+from src.core.mavlink import MavlinkEndpoint, MavlinkRuntime
+
+positions: dict[int, object] = {}
+
+with MavlinkRuntime(
+    MavlinkEndpoint.udp("0.0.0.0", 14550),
+    vehicle_state_retention=60.0,
+) as link:
+    @link.vehicles.on_added
+    def configure_vehicle(action) -> None:
+        vehicle = action.vehicle
+
+        @vehicle.subscribe("GLOBAL_POSITION_INT", frequency_hz=10.0)
+        def update_position(message) -> None:
+            positions[vehicle.system_id] = message
+
+        @vehicle.on_disconnected
+        def mark_disconnected(_action) -> None:
+            positions.pop(vehicle.system_id, None)
+
+    first = link.vehicles.wait_for(timeout=5.0)
+    if first is None:
+        raise RuntimeError("Araç heartbeat'i alınamadı")
+
+    autopilot = first.get_component(1)
+    last_heartbeat = first.latest("HEARTBEAT")
+```
+
+`on_added` keşfedilen her araç için çalışır; sabit system ID gerekmez.
+Nested subscription source-scoped olur. `latest()` cache'i beklemeden okur,
+`wait_for()` gelecekteki observation'ı bekler. Component lookup, component
+gözlenene kadar `None` döndürür.
+
 ## Endpoint
 
 ```text
