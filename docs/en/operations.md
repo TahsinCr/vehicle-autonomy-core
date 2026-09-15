@@ -98,15 +98,29 @@ python run_stress_tests.py --repeats 25
 ```
 
 Coverage includes branch decisions and enforces an 82% project baseline.
-Pyright starts with definite name and control-flow failures on production
-modules; this gradual baseline avoids hiding dynamic provider/callback behavior
-behind broad casts. The stress runner repeats selected concurrency regressions
-with a fresh suite on every pass.
+Pyright checks definite name and control-flow failures, unused production
+symbols and invalid return contracts. The distributed `py.typed` marker lets
+downstream type checkers consume the same annotations. The stress runner repeats
+selected concurrency regressions with a fresh suite on every pass.
 
 The CI matrix runs supported Python versions and builds the wheel. Native ARM64
 also installs optional `pymavlink`, so the real UDP loopback contract runs on
 both architectures. Tests cover standalone checkout loading and the intended
 `src/core` submodule layout.
+
+CI also compares the callable contract with the nearest release tag. Existing
+exports and signatures must remain intact on a patch line, while additive APIs
+are allowed. Minor versions may intentionally establish a new contract.
+`pip-audit` checks the optional MAVLink dependency set in an isolated job,
+Dependabot checks Python and GitHub Actions dependencies weekly, and CodeQL runs
+extended Python security queries on changes and on a weekly schedule.
+
+Run the same dependency audit locally with:
+
+```bash
+python -m pip install -e ".[mavlink,security]"
+pip-audit --local --skip-editable
+```
 
 ## Benchmarks
 
@@ -126,15 +140,18 @@ Benchmark values are comparative, not hard real-time guarantees. Compare the
 same interpreter, CPU governor and load. Prefer ratios and distribution trends
 over a fixed microsecond threshold from another machine.
 
-`--compare` matches stable operation names, calibrates for the suite-wide host
-speed shift and rejects an operation-specific cost increase over 40% unless
-`--max-regression-percent` changes that budget. The default is 35%. A regression must appear in
+`--compare` matches stable operation names, calibrates against the dedicated
+no-op anchor and rejects an operation-specific cost increase over 35% unless
+`--max-regression-percent` changes that budget. At least 80% of operations must
+match the reference so missing coverage cannot silently weaken the comparison. A regression must appear in
 both wall and CPU time, which filters out
 runner scheduling noise without accepting a consistent code-path slowdown.
 CI uses the same calibrated 35% budget. Every run is appended atomically to
 `benchmark-logs.json` with UTC time, package version, commit, dirty-tree state,
 platform and result data. Use `--no-log` only for disposable probes. Combined
 load runs fail when SQLite loses records or leaves worker threads behind.
+`--compare-load previous-load.json` also checks throughput, p99 latency and CPU
+cost per message against a same-host run.
 
 ## Compatibility and versioning
 
@@ -143,6 +160,18 @@ fixes, performance work and documentation updates. Minor releases (`1.x.0`)
 may deliberately refine the public API; each such change is listed in the
 changelog without keeping obsolete compatibility aliases. A new major version
 is reserved for a foundational redesign of the core contracts.
+
+Sign a release tag only after verifying its release commit:
+
+```bash
+git tag -s v1.8.2 -m "Vehicle Autonomy Core v1.8.2"
+git tag -v v1.8.2
+git push origin v1.8.2
+```
+
+With `gpg.format=ssh`, Git uses the configured SSH signing key; otherwise it
+uses the configured GPG key. Never move a published release tag—publish a new
+patch version instead.
 Combined profiles (`normal`, `medium`, `heavy`, `stress`) exercise routing, multi-vehicle state,
 multiple callbacks and background memory/SQLite recording together. They report
 throughput, p50/p95/p99 latency, CPU and memory per message, writer pressure,

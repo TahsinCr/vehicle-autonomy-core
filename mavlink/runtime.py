@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, overload
+from typing import Any, cast, overload
 
 from ..abstracts import Service
 from ..compatibility import ExceptionGroup
@@ -502,7 +502,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         registration._cancel = cancel
         if not registration.active:
             source.cancel()
-        return registration
+        return cast(Subscription, registration)
 
     def on_start(self, callback=None, *, once=False, **options):
         return self.on("start", callback, once=once, **options)
@@ -519,7 +519,10 @@ class MavlinkRuntime(MavlinkActions, Service):
     ) -> Subscription:
         """Handle the first matching MAVLink message and then unsubscribe."""
 
-        return self.subscribe(message_types, callback, predicate=predicate, once=True)
+        return cast(
+            Subscription,
+            self.subscribe(message_types, callback, predicate=predicate, once=True),
+        )
 
     def wait_for(
         self,
@@ -560,7 +563,10 @@ class MavlinkRuntime(MavlinkActions, Service):
         *,
         replace: bool = False,
     ) -> Subscription:
-        return self._application_handlers.register(packet_type, handler, replace=replace)
+        return cast(
+            Subscription,
+            self._application_handlers.register(packet_type, handler, replace=replace),
+        )
 
     def notify(
         self,

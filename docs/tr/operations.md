@@ -99,15 +99,30 @@ python run_stress_tests.py --repeats 25
 ```
 
 Coverage branch kararlarını da ölçer ve proje genelinde %82 taban sınırı
-uygular. Pyright ilk aşamada production modüllerindeki kesin isim ve kontrol
-akışı hatalarını denetler; bu kademeli başlangıç dinamik provider/callback
-yapılarını geniş cast'lerle gizlemez. Stress runner seçilen concurrency
-regresyonlarını her turda yeni suite ile tekrarlar.
+uygular. Pyright kesin isim ve kontrol akışı hatalarını, kullanılmayan production
+sembollerini ve hatalı dönüş sözleşmelerini denetler. Dağıtılan `py.typed`
+işareti sayesinde tüketici projelerin type checker'ları aynı annotation'ları
+kullanır. Stress runner seçilen concurrency regresyonlarını her turda yeni
+suite ile tekrarlar.
 
 CI matrisi desteklenen Python sürümlerini çalıştırır ve wheel üretir. Native
 ARM64 işi de opsiyonel `pymavlink` paketini kurduğu için gerçek UDP loopback
 kontratı iki mimaride çalışır. Testler hem bağımsız checkout'u hem amaçlanan
 `src/core` submodule yerleşimini kapsar.
+
+CI callable API sözleşmesini en yakın yayın tag'iyle de karşılaştırır. Patch
+serisinde mevcut export ve imzalar korunurken yeni API eklenebilir; minor sürüm
+bilinçli olarak yeni bir sözleşme oluşturabilir. İzole bir job opsiyonel MAVLink
+bağımlılıklarını `pip-audit` ile tarar. Dependabot Python ve GitHub Actions
+bağımlılıklarını haftalık kontrol eder; CodeQL genişletilmiş Python güvenlik
+sorgularını değişikliklerde ve haftalık zamanlamada çalıştırır.
+
+Aynı dependency audit'i yerelde çalıştırmak için:
+
+```bash
+python -m pip install -e ".[mavlink,security]"
+pip-audit --local --skip-editable
+```
 
 ## Benchmark
 
@@ -127,16 +142,19 @@ Bu değerler karşılaştırma içindir; hard real-time garantisi değildir. Ayn
 interpreter, CPU governor ve sistem yüküyle karşılaştırma yapın. Başka bir
 makinenin sabit mikrosaniye eşiği yerine oranlara ve dağılım eğilimine bakın.
 
-`--compare`, sabit işlem adlarını eşleştirir ve
-`--max-regression-percent` değiştirilmezse (%35) önce suite genelindeki sistem hızı
-farkını kalibre eder, sonra işleme özel maliyetteki %40 üzeri artışı
-reddeder. Regresyonun hem wall hem CPU zamanında görülmesi gerekir; bu,
+`--compare`, sabit işlem adlarını eşleştirir, sistem hızı farkını özel no-op
+ölçümüyle kalibre eder ve `--max-regression-percent` değiştirilmezse işleme özel
+maliyetteki %35 üzeri artışı reddeder. Karşılaştırmanın sessizce zayıflamaması
+için işlemlerin en az %80'i referansla eşleşmelidir. Regresyonun hem wall hem CPU
+zamanında görülmesi gerekir; bu,
 tutarlı kod yolu yavaşlamasını saklamadan runner scheduling gürültüsünü
 süzer. CI da aynı kalibre edilmiş %35 sınırını kullanır. Her çalışma; UTC zaman,
 paket sürümü, commit, kirli çalışma ağacı bilgisi, platform ve sonuçlarla birlikte
 atomik olarak `benchmark-logs.json` dosyasına eklenir. Geçici ölçümlerde
 `--no-log` kullanılabilir. Birleşik yük testi SQLite kayıt kaybı veya kalan worker
-thread tespit ederse başarısız olur.
+thread tespit ederse başarısız olur. `--compare-load previous-load.json`, aynı
+makinedeki önceki çalışmaya göre throughput, p99 gecikme ve mesaj başına CPU
+maliyetini de denetler.
 
 ## Uyumluluk ve sürümleme
 
@@ -145,6 +163,18 @@ dokümantasyon düzeltmeleri taşır. Minor sürümler (`1.x.0`) public API'yi b
 olarak geliştirebilir; bu değişiklikler eski uyumluluk takma adları bırakılmadan
 changelog'da açıklanır. Major sürüm yalnız çekirdek sözleşmelerin temel bir
 yeniden tasarımı için artırılır.
+
+Release commit'i doğrulandıktan sonra yayın tag'ini imzalayın:
+
+```bash
+git tag -s v1.8.2 -m "Vehicle Autonomy Core v1.8.2"
+git tag -v v1.8.2
+git push origin v1.8.2
+```
+
+`gpg.format=ssh` ayarlıysa Git tanımlı SSH imzalama anahtarını, aksi halde GPG
+anahtarını kullanır. Yayınlanmış tag'i taşımak yerine yeni bir patch sürümü
+yayınlayın.
 Birleşik profiller (`normal`, `medium`, `heavy`, `stress`); routing,
 çoklu araç state'i, birden fazla callback ve background memory/SQLite kaydını
 aynı anda çalıştırır. Throughput, p50/p95/p99 gecikme, mesaj başına CPU ve

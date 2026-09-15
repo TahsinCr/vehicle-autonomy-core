@@ -6,7 +6,7 @@ import functools
 import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 from .annotations import (
     dependency_items,
@@ -131,7 +131,7 @@ def decorate_callable(
 
         async_wrapper.__dependency_original__ = original  # type: ignore[attr-defined]
         async_wrapper.__dependency_injected__ = True  # type: ignore[attr-defined]
-        return async_wrapper
+        return cast(Callable[..., T], async_wrapper)
 
     @functools.wraps(original)
     def sync_wrapper(*args: Any, **kwargs: Any) -> T:

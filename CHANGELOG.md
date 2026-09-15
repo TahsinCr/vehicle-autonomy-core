@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v1.8.2] - 2026-09-15
+
+### Added
+
+- Added same-host throughput, p99 latency and CPU regression checks for the
+  combined MAVLink load profile, plus persistent CI benchmark artifacts.
+- Added CodeQL security analysis, isolated Python dependency auditing, weekly
+  Dependabot updates and a PEP 561 `py.typed` package marker.
+
+### Changed
+
+- Calibrate microbenchmarks with the dedicated no-op anchor and require at
+  least 80% operation coverage when comparing results.
+- Enforce return-type diagnostics and compare patch-series public API contracts
+  with the nearest release tag while still allowing additive APIs.
+
+### Fixed
+
+- Prevent mission cleanup hooks from re-entering terminal finalization; the
+  first terminal intent remains authoritative through cleanup and retry.
+- Reject cross-operation async dependency cleanup reentrancy before token
+  disposal and container shutdown can wait on each other.
+- Include inherited public methods in the generated callable API contract.
+- Bound every CI job with an explicit timeout.
+
+### Tests
+
+- Added regressions for matching mission terminal calls during cleanup, async
+  token-disposal/shutdown cycles, suite-wide benchmark slowdowns and combined
+  load comparisons.
+- Added patch-contract compatibility and MAVLink client composition/lifecycle
+  coverage.
+
 ## [v1.8.1] - 2026-09-14
 
 ### Added

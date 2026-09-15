@@ -662,6 +662,44 @@ class MissionEngineLifecycleTests(unittest.TestCase):
             mission.cleanup_fails = False
             engine.close()
 
+    def test_cleanup_hook_cannot_reenter_matching_failure_finalization(self) -> None:
+        class ReentrantFailureMission(BlockingMission):
+            def stop(self) -> None:
+                self.fail("cleanup repeated failure")
+
+        mission = ReentrantFailureMission()
+        self.engine.run(mission)
+        self.assertTrue(mission.started.wait(1.0))
+
+        snapshot = self.engine.fail(mission, "original failure")
+
+        self.assertEqual(snapshot.phase, MissionPhase.FAILED)
+        self.assertEqual(snapshot.reason, "original failure")
+
+    def test_cleanup_retry_cannot_reenter_matching_completion(self) -> None:
+        class ReentrantCompletionMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_attempts = 0
+
+            def stop(self) -> None:
+                self.cleanup_attempts += 1
+                self.complete({"source": "cleanup"})
+                if self.cleanup_attempts == 1:
+                    raise RuntimeError("cleanup blocked")
+
+        mission = ReentrantCompletionMission()
+        self.engine.run(mission)
+        self.assertTrue(mission.started.wait(1.0))
+
+        with self.assertRaises(MissionCleanupError):
+            self.engine.complete(mission, {"source": "caller"})
+        snapshot = self.engine.retry_cleanup(mission)
+
+        self.assertEqual(snapshot.phase, MissionPhase.SUCCEEDED)
+        self.assertEqual(snapshot.result, {"source": "caller"})
+        self.assertEqual(mission.cleanup_attempts, 2)
+
     def test_callback_completion_intent_survives_cleanup_failure(self) -> None:
         class CompletingWithBrokenCleanup(Mission):
             def __init__(self) -> None:

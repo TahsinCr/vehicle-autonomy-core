@@ -28,6 +28,9 @@ class BenchmarkToolTests(unittest.TestCase):
         reference_two = run_benchmarks.BenchmarkResult(
             "events", "reference two", 100, 100.0, 100.0, 1.0, 0.0, 64
         )
+        anchor = run_benchmarks.BenchmarkResult(
+            "baseline", "function call", 100, 100.0, 100.0, 1.0, 0.0, 64
+        )
         current = run_benchmarks.BenchmarkResult(
             "events", "publish", 100, 151.0, 151.0, 1.51, 0.0, 64
         )
@@ -40,6 +43,7 @@ class BenchmarkToolTests(unittest.TestCase):
                             asdict(baseline),
                             asdict(reference),
                             asdict(reference_two),
+                            asdict(anchor),
                         ]
                     }
                 ),
@@ -47,9 +51,76 @@ class BenchmarkToolTests(unittest.TestCase):
             )
             self.assertEqual(
                 run_benchmarks._regressions(
-                    [current, reference, reference_two], path, 50.0
+                    [current, reference, reference_two, anchor], path, 50.0
                 ),
                 ["events/publish: +51.0%"],
+            )
+
+    def test_regression_comparison_detects_suite_wide_library_slowdown(self) -> None:
+        anchor = run_benchmarks.BenchmarkResult(
+            "baseline", "function call", 100, 100.0, 100.0, 1.0, 0.0, 1
+        )
+        previous = run_benchmarks.BenchmarkResult(
+            "events", "publish", 100, 100.0, 100.0, 1.0, 0.0, 1
+        )
+        current = run_benchmarks.BenchmarkResult(
+            "events", "publish", 100, 150.0, 150.0, 1.5, 0.0, 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            path.write_text(
+                json.dumps({"results": [asdict(anchor), asdict(previous)]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                run_benchmarks._regressions([anchor, current], path, 35.0),
+                ["events/publish: +50.0%"],
+            )
+
+    def test_regression_comparison_rejects_insufficient_operation_coverage(self) -> None:
+        anchor = run_benchmarks.BenchmarkResult(
+            "baseline", "function call", 100, 100.0, 100.0, 1.0, 0.0, 1
+        )
+        current = run_benchmarks.BenchmarkResult(
+            "events", "publish", 100, 100.0, 100.0, 1.0, 0.0, 1
+        )
+        baseline_results = [asdict(anchor), asdict(current)]
+        baseline_results.extend(
+            {
+                **asdict(current),
+                "name": f"removed operation {index}",
+            }
+            for index in range(4)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            path.write_text(
+                json.dumps({"results": baseline_results}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "fewer than 80%"):
+                run_benchmarks._regressions([anchor, current], path, 35.0)
+
+    def test_load_regression_compares_portable_costs(self) -> None:
+        current = run_benchmarks.LoadBenchmarkResult(
+            "test", 1, 1, 1, "sqlite", 70.0, 1.0, 1.0, 140.0,
+            140.0, 1.0, 1.0, 0, 0, 0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "load.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "throughput_per_second": 100.0,
+                        "latency_p99_ns": 100.0,
+                        "cpu_ns_per_message": 100.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                run_benchmarks._load_regressions(current, path, 35.0),
+                ["throughput: +42.9%", "latency p99: +40.0%", "CPU per message: +40.0%"],
             )
 
     def test_log_appends_versioned_run_metadata(self) -> None:

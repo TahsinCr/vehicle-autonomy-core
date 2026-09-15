@@ -7,7 +7,7 @@ import contextvars
 import inspect
 import threading
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 from .annotations import (
     choose_factory,
@@ -53,6 +53,11 @@ from .resolution import (
     enter_resolution,
     exit_resolution,
     format_token,
+)
+
+
+_cleanup_operations: contextvars.ContextVar[tuple[tuple[int, str], ...]] = (
+    contextvars.ContextVar("dependency_cleanup_operations", default=())
 )
 
 
@@ -527,6 +532,10 @@ class DependencyContainer:
                 self._pending_disposals.pop(token, None)
 
     async def unregister_async(self, token: Token) -> None:
+        if (id(self), "shutdown") in _cleanup_operations.get():
+            raise DependencyResolutionError(
+                "Dependency cleanup cannot unregister during container shutdown"
+            )
         self._ensure_open()
         attempt, owner = self._claim_token_disposal(token, async_owner=True)
         if not owner:
@@ -660,6 +669,10 @@ class DependencyContainer:
             )
 
     async def shutdown_async(self) -> None:
+        if (id(self), "token") in _cleanup_operations.get():
+            raise DependencyResolutionError(
+                "Dependency cleanup cannot start container shutdown during token disposal"
+            )
         attempt, owner = self._claim_shutdown(async_owner=True)
         if attempt is None:
             return
@@ -677,6 +690,9 @@ class DependencyContainer:
         token: Token,
         attempt: _TokenDisposalAttempt,
     ) -> None:
+        marker = _cleanup_operations.set(
+            (*_cleanup_operations.get(), (id(self), "token"))
+        )
         error: BaseException | None = None
         try:
             await self._unregister_async_owned(token)
@@ -684,6 +700,7 @@ class DependencyContainer:
             error = failure
             raise
         finally:
+            _cleanup_operations.reset(marker)
             self._finish_token_disposal(token, attempt, error)
 
     async def _unregister_async_owned(self, token: Token) -> None:
@@ -721,6 +738,9 @@ class DependencyContainer:
             raise asyncio.CancelledError
 
     async def _shutdown_async(self, attempt: _ShutdownAttempt) -> None:
+        marker = _cleanup_operations.set(
+            (*_cleanup_operations.get(), (id(self), "shutdown"))
+        )
         cancelled = False
         failure: BaseException | None = None
         cleanup_started = False
@@ -750,6 +770,7 @@ class DependencyContainer:
             failure = error
             raise
         finally:
+            _cleanup_operations.reset(marker)
             self._finish_shutdown(
                 attempt,
                 failure,
@@ -940,7 +961,7 @@ class DependencyContainer:
                 f"{format_token(factory)} awaitable döndürdü; "
                 "resolve_async/build_async kullan."
             )
-        return result
+        return cast(T, result)
 
     async def _call_factory_async(
         self,
@@ -956,7 +977,7 @@ class DependencyContainer:
             strict=True,
         )
         result = factory(**kwargs)
-        return await result if inspect.isawaitable(result) else result
+        return cast(T, await result if inspect.isawaitable(result) else result)
 
     def _provider_owner(self, provider: Provider) -> DependencyContainer:
         container: DependencyContainer | None = self

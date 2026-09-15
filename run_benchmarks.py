@@ -919,20 +919,34 @@ def _regressions(
         )
         for item in document["results"]
     }
+    current_operations = [result for result in results if result.category != "baseline"]
+    baseline_operations = {
+        key for key in baseline if key[0] != "baseline"
+    }
     matched = [
         (result, baseline[(result.category, result.name)])
-        for result in results
+        for result in current_operations
         if result.category != "baseline"
         and (result.category, result.name) in baseline
     ]
     if not matched:
         raise ValueError("Benchmark baseline has no matching operations")
-    calibration = statistics.median(
-        result.wall_ns_per_op / previous[0] for result, previous in matched
+    expected_matches = max(len(current_operations), len(baseline_operations))
+    if len(matched) / expected_matches < 0.8:
+        raise ValueError(
+            "Benchmark baseline matches fewer than 80% of operations "
+            f"({len(matched)}/{expected_matches})"
+        )
+    current_anchor = next(
+        (result for result in results if result.category == "baseline"), None
     )
-    cpu_calibration = statistics.median(
-        result.cpu_ns_per_op / previous[1] for result, previous in matched
+    baseline_anchor = next(
+        (value for key, value in baseline.items() if key[0] == "baseline"), None
     )
+    if current_anchor is None or baseline_anchor is None:
+        raise ValueError("Benchmark comparison requires a baseline calibration operation")
+    calibration = current_anchor.wall_ns_per_op / baseline_anchor[0]
+    cpu_calibration = current_anchor.cpu_ns_per_op / baseline_anchor[1]
     failures: list[str] = []
     factor = 1.0 + maximum_percent / 100.0
     for result, previous in matched:
@@ -945,6 +959,29 @@ def _regressions(
             change = (normalized_ratio - 1.0) * 100.0
             failures.append(f"{result.category}/{result.name}: +{change:.1f}%")
     return failures
+
+
+def _load_regressions(
+    result: LoadBenchmarkResult,
+    baseline_path: Path,
+    maximum_percent: float,
+) -> list[str]:
+    """Compare portable combined-load costs with a previous same-host run."""
+
+    previous = json.loads(baseline_path.read_text(encoding="utf-8"))
+    factor = 1.0 + maximum_percent / 100.0
+    ratios = {
+        "throughput": float(previous["throughput_per_second"])
+        / result.throughput_per_second,
+        "latency p99": result.latency_p99_ns / float(previous["latency_p99_ns"]),
+        "CPU per message": result.cpu_ns_per_message
+        / float(previous["cpu_ns_per_message"]),
+    }
+    return [
+        f"{name}: +{(ratio - 1.0) * 100.0:.1f}%"
+        for name, ratio in ratios.items()
+        if ratio > factor
+    ]
 
 
 def _print_table(results: list[BenchmarkResult]) -> None:
@@ -999,6 +1036,11 @@ def main() -> int:
         default="sqlite",
     )
     parser.add_argument(
+        "--compare-load",
+        type=Path,
+        help="Compare a combined load run with a previous same-host JSON result",
+    )
+    parser.add_argument(
         "--compare",
         type=Path,
         help="Fail on operation-specific regression after suite-wide calibration",
@@ -1017,6 +1059,14 @@ def main() -> int:
     if args.load_profile is not None:
         result = run_load_profile(args.load_profile, storage=args.load_storage)
         failures = _load_failures(result)
+        if args.compare_load is not None:
+            failures.extend(
+                _load_regressions(
+                    result,
+                    args.compare_load,
+                    args.max_regression_percent,
+                )
+            )
         if args.json:
             print(json.dumps(asdict(result), indent=2))
         else:

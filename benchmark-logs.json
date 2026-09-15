@@ -337,6 +337,343 @@
         ],
         "regressions": []
       }
+    },
+    {
+      "timestamp": "2026-09-15T11:41:52.352714+00:00",
+      "version": "1.8.1",
+      "commit": "f499fb9756e4a2a0b83e3f7b5a77c09a8f995571",
+      "dirty": true,
+      "python": "3.14.7",
+      "platform": "Linux-7.2.4-arch1-2-x86_64-with-glibc2.44",
+      "mode": "suite",
+      "status": "passed",
+      "result": {
+        "base_iterations": 20000,
+        "repeats": 5,
+        "results": [
+          {
+            "category": "baseline",
+            "name": "function call",
+            "iterations": 20000,
+            "wall_ns_per_op": 74.24125,
+            "cpu_ns_per_op": 73.59845,
+            "relative_to_noop": 1.0,
+            "retained_bytes_per_op": 0.264,
+            "peak_bytes_per_op": 144
+          },
+          {
+            "category": "abstracts",
+            "name": "automatic nested model serialization",
+            "iterations": 10000,
+            "wall_ns_per_op": 12163.5988,
+            "cpu_ns_per_op": 12124.1174,
+            "relative_to_noop": 163.8388200629704,
+            "retained_bytes_per_op": 1.392,
+            "peak_bytes_per_op": 1744
+          },
+          {
+            "category": "core models",
+            "name": "snapshot evolve",
+            "iterations": 20000,
+            "wall_ns_per_op": 4125.17735,
+            "cpu_ns_per_op": 4114.0923,
+            "relative_to_noop": 55.564492111865036,
+            "retained_bytes_per_op": 10.408,
+            "peak_bytes_per_op": 2360
+          },
+          {
+            "category": "core models",
+            "name": "nested model serialization",
+            "iterations": 10000,
+            "wall_ns_per_op": 21805.005,
+            "cpu_ns_per_op": 21749.1925,
+            "relative_to_noop": 293.7047126765781,
+            "retained_bytes_per_op": 1.344,
+            "peak_bytes_per_op": 2424
+          },
+          {
+            "category": "events",
+            "name": "callback policy delivery",
+            "iterations": 20000,
+            "wall_ns_per_op": 5959.87955,
+            "cpu_ns_per_op": 5722.3856,
+            "relative_to_noop": 80.2771983230347,
+            "retained_bytes_per_op": 0.528,
+            "peak_bytes_per_op": 472
+          },
+          {
+            "category": "events",
+            "name": "callback filter and 3 hooks",
+            "iterations": 20000,
+            "wall_ns_per_op": 2287.75245,
+            "cpu_ns_per_op": 2281.15765,
+            "relative_to_noop": 30.815112218611624,
+            "retained_bytes_per_op": 0.584,
+            "peak_bytes_per_op": 528
+          },
+          {
+            "category": "events",
+            "name": "disabled callback skip",
+            "iterations": 20000,
+            "wall_ns_per_op": 369.019,
+            "cpu_ns_per_op": 366.7382,
+            "relative_to_noop": 4.970538615661779,
+            "retained_bytes_per_op": 0.312,
+            "peak_bytes_per_op": 256
+          },
+          {
+            "category": "events",
+            "name": "publish without subscribers",
+            "iterations": 20000,
+            "wall_ns_per_op": 1283.54645,
+            "cpu_ns_per_op": 1279.76545,
+            "relative_to_noop": 17.28885828296264,
+            "retained_bytes_per_op": 0.888,
+            "peak_bytes_per_op": 832
+          },
+          {
+            "category": "events",
+            "name": "publish to one subscriber",
+            "iterations": 20000,
+            "wall_ns_per_op": 1829.4721,
+            "cpu_ns_per_op": 1825.82375,
+            "relative_to_noop": 24.642258852053274,
+            "retained_bytes_per_op": 0.944,
+            "peak_bytes_per_op": 920
+          },
+          {
+            "category": "events",
+            "name": "latest from 1,000-item history",
+            "iterations": 20000,
+            "wall_ns_per_op": 137.1627,
+            "cpu_ns_per_op": 136.8056,
+            "relative_to_noop": 1.847526812924082,
+            "retained_bytes_per_op": 0.288,
+            "peak_bytes_per_op": 208
+          },
+          {
+            "category": "events",
+            "name": "filtered tail query from history",
+            "iterations": 10000,
+            "wall_ns_per_op": 8984.975,
+            "cpu_ns_per_op": 8969.803,
+            "relative_to_noop": 121.02402640041757,
+            "retained_bytes_per_op": 0.472,
+            "peak_bytes_per_op": 17040
+          },
+          {
+            "category": "events async",
+            "name": "publish without subscribers",
+            "iterations": 20000,
+            "wall_ns_per_op": 1424.5097,
+            "cpu_ns_per_op": 1421.31305,
+            "relative_to_noop": 19.187576987187043,
+            "retained_bytes_per_op": 1.304,
+            "peak_bytes_per_op": 1264
+          },
+          {
+            "category": "events async",
+            "name": "publish to one subscriber",
+            "iterations": 20000,
+            "wall_ns_per_op": 1931.78725,
+            "cpu_ns_per_op": 1926.49565,
+            "relative_to_noop": 26.020403077803785,
+            "retained_bytes_per_op": 0.872,
+            "peak_bytes_per_op": 1320
+          },
+          {
+            "category": "dependency",
+            "name": "cached singleton resolve",
+            "iterations": 20000,
+            "wall_ns_per_op": 1546.07435,
+            "cpu_ns_per_op": 1543.4295,
+            "relative_to_noop": 20.825004293435256,
+            "retained_bytes_per_op": 0.584,
+            "peak_bytes_per_op": 1328
+          },
+          {
+            "category": "dependency",
+            "name": "transient resolve",
+            "iterations": 10000,
+            "wall_ns_per_op": 3807.2484,
+            "cpu_ns_per_op": 3801.13,
+            "relative_to_noop": 51.28211607428485,
+            "retained_bytes_per_op": 5.864,
+            "peak_bytes_per_op": 1896
+          },
+          {
+            "category": "dependency",
+            "name": "scoped resolve and shutdown",
+            "iterations": 1000,
+            "wall_ns_per_op": 23993.764,
+            "cpu_ns_per_op": 23954.082,
+            "relative_to_noop": 323.18642264239895,
+            "retained_bytes_per_op": 11.768,
+            "peak_bytes_per_op": 6912
+          },
+          {
+            "category": "dependency async",
+            "name": "cached singleton resolve",
+            "iterations": 20000,
+            "wall_ns_per_op": 3239.14585,
+            "cpu_ns_per_op": 3222.41685,
+            "relative_to_noop": 43.63000151533009,
+            "retained_bytes_per_op": 0.4,
+            "peak_bytes_per_op": 2064
+          },
+          {
+            "category": "dependency async",
+            "name": "transient provider resolve",
+            "iterations": 10000,
+            "wall_ns_per_op": 2983.5383,
+            "cpu_ns_per_op": 2971.1125,
+            "relative_to_noop": 40.18706985671713,
+            "retained_bytes_per_op": 5.864,
+            "peak_bytes_per_op": 2936
+          },
+          {
+            "category": "MAVLink",
+            "name": "endpoint validation",
+            "iterations": 4000,
+            "wall_ns_per_op": 1756.15,
+            "cpu_ns_per_op": 1752.6755,
+            "relative_to_noop": 23.65463943562373,
+            "retained_bytes_per_op": 0.708,
+            "peak_bytes_per_op": 924
+          },
+          {
+            "category": "MAVLink",
+            "name": "metadata filter match",
+            "iterations": 20000,
+            "wall_ns_per_op": 535.2764,
+            "cpu_ns_per_op": 532.7326,
+            "relative_to_noop": 7.209959422827606,
+            "retained_bytes_per_op": 0.28,
+            "peak_bytes_per_op": 210
+          },
+          {
+            "category": "MAVLink",
+            "name": "bounded cache add and latest",
+            "iterations": 20000,
+            "wall_ns_per_op": 366.1413,
+            "cpu_ns_per_op": 361.9745,
+            "relative_to_noop": 4.931777145454852,
+            "retained_bytes_per_op": 0.288,
+            "peak_bytes_per_op": 168
+          },
+          {
+            "category": "MAVLink",
+            "name": "router dispatch to one route",
+            "iterations": 4000,
+            "wall_ns_per_op": 3716.0065,
+            "cpu_ns_per_op": 3705.95825,
+            "relative_to_noop": 50.05312410553432,
+            "retained_bytes_per_op": 1.0,
+            "peak_bytes_per_op": 1492
+          },
+          {
+            "category": "MAVLink",
+            "name": "source routing with 1 vehicles",
+            "iterations": 4000,
+            "wall_ns_per_op": 6114.3725,
+            "cpu_ns_per_op": 6102.008,
+            "relative_to_noop": 82.35815668513126,
+            "retained_bytes_per_op": 1.464,
+            "peak_bytes_per_op": 1330
+          },
+          {
+            "category": "MAVLink",
+            "name": "source routing with 10 vehicles",
+            "iterations": 4000,
+            "wall_ns_per_op": 6163.5935,
+            "cpu_ns_per_op": 6162.61425,
+            "relative_to_noop": 83.0211439058475,
+            "retained_bytes_per_op": 1.464,
+            "peak_bytes_per_op": 1330
+          },
+          {
+            "category": "MAVLink",
+            "name": "source routing with 100 vehicles",
+            "iterations": 4000,
+            "wall_ns_per_op": 7375.4075,
+            "cpu_ns_per_op": 7355.1995,
+            "relative_to_noop": 99.3437947232839,
+            "retained_bytes_per_op": 1.128,
+            "peak_bytes_per_op": 954
+          },
+          {
+            "category": "MAVLink application",
+            "name": "packet encode",
+            "iterations": 2000,
+            "wall_ns_per_op": 7784.629,
+            "cpu_ns_per_op": 7753.606,
+            "relative_to_noop": 104.85584496489486,
+            "retained_bytes_per_op": 5.952,
+            "peak_bytes_per_op": 2215
+          },
+          {
+            "category": "MAVLink application",
+            "name": "fragment decode",
+            "iterations": 4000,
+            "wall_ns_per_op": 771.89525,
+            "cpu_ns_per_op": 769.375,
+            "relative_to_noop": 10.397120872830133,
+            "retained_bytes_per_op": 0.648,
+            "peak_bytes_per_op": 827
+          },
+          {
+            "category": "MAVLink application",
+            "name": "assemble 10 fragments",
+            "iterations": 500,
+            "wall_ns_per_op": 31879.124,
+            "cpu_ns_per_op": 31813.358,
+            "relative_to_noop": 429.3990739649454,
+            "retained_bytes_per_op": 34.192,
+            "peak_bytes_per_op": 15882
+          },
+          {
+            "category": "MAVLink application",
+            "name": "serialize eight remote log records",
+            "iterations": 1000,
+            "wall_ns_per_op": 13624.449,
+            "cpu_ns_per_op": 13592.415,
+            "relative_to_noop": 183.51588907783747,
+            "retained_bytes_per_op": 2.608,
+            "peak_bytes_per_op": 4216
+          },
+          {
+            "category": "mission",
+            "name": "register and unregister",
+            "iterations": 1000,
+            "wall_ns_per_op": 20674.395,
+            "cpu_ns_per_op": 20627.095,
+            "relative_to_noop": 278.475847322075,
+            "retained_bytes_per_op": 25.712,
+            "peak_bytes_per_op": 4660
+          },
+          {
+            "category": "mission",
+            "name": "complete mission lifecycle",
+            "iterations": 200,
+            "wall_ns_per_op": 1160015.5,
+            "cpu_ns_per_op": 1201961.805,
+            "relative_to_noop": 15624.945700671798,
+            "retained_bytes_per_op": 203.72,
+            "peak_bytes_per_op": 14233
+          },
+          {
+            "category": "mission",
+            "name": "manager snapshot with 100 registrations",
+            "iterations": 1000,
+            "wall_ns_per_op": 46075.656,
+            "cpu_ns_per_op": 45050.309,
+            "relative_to_noop": 620.620692674221,
+            "retained_bytes_per_op": 1.44,
+            "peak_bytes_per_op": 3232
+          }
+        ],
+        "regressions": []
+      }
     }
   ]
 }

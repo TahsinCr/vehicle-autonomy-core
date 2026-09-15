@@ -190,6 +190,8 @@ class MissionLifecycle:
                 return runtime.snapshot
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
+            if self._is_cleanup_reentry(runtime):
+                return runtime.snapshot
             if (
                 runtime.snapshot.phase is MissionPhase.STOPPING
                 and runtime.cleanup_error is not None
@@ -276,6 +278,8 @@ class MissionLifecycle:
         stopping_transition: MissionTransition | None = None
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
+                return runtime.snapshot
+            if self._is_cleanup_reentry(runtime):
                 return runtime.snapshot
             if runtime.snapshot.phase is MissionPhase.STOPPING and runtime.pending_terminal is not None:
                 if runtime.pending_terminal.phase is not MissionPhase.FAILED:
@@ -701,6 +705,8 @@ class MissionLifecycle:
                 return runtime.snapshot
             if current.terminal:
                 return runtime.snapshot
+            if self._is_cleanup_reentry(runtime):
+                return runtime.snapshot
             if runtime.pending_terminal is not None:
                 intent = runtime.pending_terminal
                 if intent.phase is not terminal:
@@ -733,11 +739,6 @@ class MissionLifecycle:
                 )
                 transition = None
             if (
-                runtime.cleanup_owner_thread_id == threading.get_ident()
-                and intent is not None
-            ):
-                return runtime.snapshot
-            if (
                 intent is not None
                 and (
                     runtime.worker is threading.current_thread()
@@ -757,6 +758,15 @@ class MissionLifecycle:
         self.engine.scheduler._after_terminal(runtime.mission.id)
         self.engine._scheduler_wake.set()
         return snapshot
+
+    @staticmethod
+    def _is_cleanup_reentry(runtime: MissionRuntime) -> bool:
+        """Return whether terminal cleanup re-entered lifecycle control."""
+
+        return (
+            runtime.pending_terminal is not None
+            and runtime.cleanup_owner_thread_id == threading.get_ident()
+        )
 
     def _join_worker(self, runtime: MissionRuntime) -> None:
         worker = runtime.worker

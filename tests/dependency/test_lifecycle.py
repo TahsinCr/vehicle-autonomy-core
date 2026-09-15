@@ -657,6 +657,24 @@ class DependencyLifecycleTests(unittest.TestCase):
 
 
 class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_token_disposal_cannot_start_container_shutdown(self) -> None:
+        container = DependencyContainer()
+        errors: list[BaseException] = []
+
+        class Resource:
+            async def aclose(self) -> None:
+                try:
+                    await container.shutdown_async()
+                except BaseException as error:
+                    errors.append(error)
+
+        container.instance("resource", Resource())
+        await asyncio.wait_for(container.unregister_async("resource"), timeout=1.0)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], DependencyResolutionError)
+        await container.shutdown_async()
+
     async def test_async_cleanup_reentrancy_fails_instead_of_deadlocking(self) -> None:
         for operation in ("unregister", "shutdown"):
             with self.subTest(operation=operation):

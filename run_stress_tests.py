@@ -34,6 +34,8 @@ STRESS_TESTS = (
     "test_sync_and_async_unregister_share_one_disposal_attempt",
     "tests.dependency.test_lifecycle.AsyncDependencyLifecycleTests."
     "test_async_cleanup_reentrancy_fails_instead_of_deadlocking",
+    "tests.dependency.test_lifecycle.AsyncDependencyLifecycleTests."
+    "test_token_disposal_cannot_start_container_shutdown",
     "tests.events.test_bus.EventBusTests."
     "test_close_reports_a_stuck_periodic_schedule",
     "tests.events.test_bus.EventBusTests."
@@ -58,6 +60,10 @@ STRESS_TESTS = (
     "test_terminal_commit_rejects_competing_commands_during_cleanup",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_cleanup_terminal_commands_do_not_reenter_finalization",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_cleanup_hook_cannot_reenter_matching_failure_finalization",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_cleanup_retry_cannot_reenter_matching_completion",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_pause_and_resume_can_request_terminal_commands",
     "tests.mission.test_engine.MissionEngineLifecycleTests."

@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 import importlib
 import json
+import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -23,7 +25,7 @@ CONTRACT_PATH = Path(__file__).with_name("public-api.json")
 
 
 def build_public_api() -> dict[str, str]:
-    """Return stable signatures for exported callables and their declared methods."""
+    """Return stable signatures for exported callables and reachable methods."""
 
     modules = (
         core,
@@ -50,7 +52,11 @@ def build_public_api() -> dict[str, str]:
                     pass
             if not is_project_class:
                 continue
-            for member_name, member in vars(value).items():
+            members: dict[str, object] = {}
+            for base in reversed(value.__mro__):
+                if getattr(base, "__module__", "").startswith("src.core"):
+                    members.update(vars(base))
+            for member_name, member in members.items():
                 if member_name.startswith("_"):
                     continue
                 if isinstance(member, (classmethod, staticmethod)):
@@ -66,7 +72,79 @@ def build_public_api() -> dict[str, str]:
     return dict(sorted(signatures.items()))
 
 
+def incompatible_api_changes(
+    previous: dict[str, str],
+    current: dict[str, str],
+) -> tuple[str, ...]:
+    """Return removed or signature-changed entries from a prior contract."""
+
+    changes: list[str] = []
+    for name, signature in previous.items():
+        if name not in current:
+            changes.append(f"removed: {name}")
+        elif current[name] != signature:
+            changes.append(
+                f"changed: {name}: {signature} -> {current[name]}"
+            )
+    return tuple(changes)
+
+
+def _project_version(document: str) -> tuple[int, int, int]:
+    match = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', document, re.MULTILINE)
+    if match is None:
+        raise ValueError("Project version must use major.minor.patch format")
+    return tuple(int(part) for part in match.groups())
+
+
+def check_patch_compatibility(tag: str) -> tuple[str, ...]:
+    """Compare the current contract with a release tag when it is a patch line."""
+
+    current_version = _project_version(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    previous_project = subprocess.run(
+        ["git", "show", f"{tag}:pyproject.toml"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    previous_version = _project_version(previous_project)
+    if current_version[:2] != previous_version[:2]:
+        return ()
+    previous_contract = json.loads(
+        subprocess.run(
+            ["git", "show", f"{tag}:tests/public-api.json"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    return incompatible_api_changes(previous_contract, build_public_api())
+
+
 class PublicApiContractTests(unittest.TestCase):
+    def test_patch_compatibility_allows_additions_but_rejects_breakage(self) -> None:
+        previous = {"module.call": "(value: int) -> str"}
+        self.assertEqual(
+            incompatible_api_changes(
+                previous,
+                {**previous, "module.new_call": "() -> None"},
+            ),
+            (),
+        )
+        self.assertEqual(
+            incompatible_api_changes(
+                previous,
+                {"module.call": "(value: str) -> str"},
+            ),
+            (
+                "changed: module.call: (value: int) -> str -> "
+                "(value: str) -> str",
+            ),
+        )
+
     def test_exported_callable_signatures_are_intentional(self) -> None:
         expected = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -83,5 +161,12 @@ if __name__ == "__main__":
             json.dumps(build_public_api(), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+    elif len(sys.argv) == 3 and sys.argv[1] == "--check-patch-compatible":
+        changes = check_patch_compatibility(sys.argv[2])
+        if changes:
+            print("Patch release contains incompatible public API changes:", file=sys.stderr)
+            for change in changes:
+                print(f"- {change}", file=sys.stderr)
+            raise SystemExit(1)
     else:
         unittest.main()

@@ -6,7 +6,9 @@ import threading
 import time
 import unittest
 from typing import Any
+from unittest.mock import Mock
 
+from src.core.mavlink.client import MavlinkClient
 from src.core.mavlink.connection import MavlinkConnection
 from src.core.mavlink.cache import MessageCache
 from src.core.mavlink.endpoint import MavlinkEndpoint
@@ -278,6 +280,48 @@ class ConnectionTests(unittest.TestCase):
 
         self.assertIsInstance(errors[-1], ValueError)
         connection.stop()
+
+
+class ClientTests(unittest.TestCase):
+    def test_client_rejects_ambiguous_or_mismatched_composition(self) -> None:
+        endpoint = MavlinkEndpoint("udp:127.0.0.1:14550")
+        connection = Mock()
+        connection.endpoint = endpoint
+        connection.is_connected = False
+        router = Mock()
+        router.connection = connection
+
+        with self.assertRaisesRegex(ValueError, "router_options"):
+            MavlinkClient(connection=connection, router=router, router_options={"history": 1})
+        with self.assertRaisesRegex(ValueError, "endpoint"):
+            MavlinkClient(MavlinkEndpoint("udp:127.0.0.1:14551"), connection=connection)
+        mismatched_router = Mock()
+        mismatched_router.connection = Mock()
+        with self.assertRaisesRegex(ValueError, "connection"):
+            MavlinkClient(connection=connection, router=mismatched_router)
+
+    def test_client_lifecycle_and_closed_endpoint_configuration_delegate(self) -> None:
+        endpoint = MavlinkEndpoint("udp:127.0.0.1:14550")
+        replacement = MavlinkEndpoint("udp:127.0.0.1:14551")
+        connection = Mock()
+        connection.endpoint = endpoint
+        connection.is_connected = False
+        router = Mock()
+        router.connection = connection
+        router.running = False
+        client = MavlinkClient(connection=connection, router=router)
+
+        client.start()
+        client.stop()
+        client.configure_endpoint(replacement)
+
+        router.start.assert_called_once_with()
+        router.stop.assert_called_once_with()
+        self.assertIs(connection.endpoint, replacement)
+
+        router.running = True
+        with self.assertRaisesRegex(RuntimeError, "yeniden"):
+            client.configure_endpoint(endpoint)
 
 
 class _RouterConnection:
