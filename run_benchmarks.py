@@ -915,6 +915,29 @@ def run_load_profiles(
     if repeats < 1:
         raise ValueError("Load repetitions must be positive")
     results = [run_load_profile(profile, storage=storage) for _ in range(repeats)]
+    return _summarize_load_results(results)
+
+
+def _summarize_load_results(
+    results: list[LoadBenchmarkResult],
+) -> LoadBenchmarkResult:
+    """Combine compatible load runs without hiding acceptance failures."""
+
+    if not results:
+        raise ValueError("At least one load result is required")
+    identity = (
+        results[0].profile,
+        results[0].messages,
+        results[0].vehicles,
+        results[0].callbacks,
+        results[0].storage,
+    )
+    if any(
+        (result.profile, result.messages, result.vehicles, result.callbacks, result.storage)
+        != identity
+        for result in results[1:]
+    ):
+        raise ValueError("Load results must describe the same profile")
     representative = results[len(results) // 2]
 
     def median(field: str) -> float:
@@ -1082,6 +1105,12 @@ def main() -> int:
         help="Compare a combined load run with a previous same-host JSON result",
     )
     parser.add_argument(
+        "--aggregate-load",
+        type=Path,
+        nargs="+",
+        help="Combine load-result JSON files and print their median costs",
+    )
+    parser.add_argument(
         "--compare",
         type=Path,
         help="Fail on operation-specific regression after suite-wide calibration",
@@ -1099,6 +1128,15 @@ def main() -> int:
         parser.error("--max-regression-percent must be non-negative")
     if args.load_repeats < 1:
         parser.error("--load-repeats must be positive")
+    if args.aggregate_load is not None:
+        if args.load_profile is not None:
+            parser.error("--aggregate-load cannot be combined with --load-profile")
+        results = [
+            LoadBenchmarkResult(**json.loads(path.read_text(encoding="utf-8")))
+            for path in args.aggregate_load
+        ]
+        print(json.dumps(asdict(_summarize_load_results(results)), indent=2))
+        return 0
     if args.load_profile is not None:
         result = run_load_profiles(
             args.load_profile,

@@ -172,6 +172,18 @@ class BenchmarkToolTests(unittest.TestCase):
         self.assertEqual(result.writer_failed_records, 1)
         self.assertEqual(result.thread_delta, 1)
 
+    def test_load_summary_rejects_incompatible_profiles(self) -> None:
+        first = run_benchmarks.LoadBenchmarkResult(
+            "normal", 1, 1, 1, "sqlite", 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 0, 0, 0,
+        )
+        second = run_benchmarks.LoadBenchmarkResult(
+            "heavy", 1, 1, 1, "sqlite", 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 0, 0, 0,
+        )
+        with self.assertRaisesRegex(ValueError, "same profile"):
+            run_benchmarks._summarize_load_results([first, second])
+
     def test_log_appends_versioned_run_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "benchmark-logs.json"

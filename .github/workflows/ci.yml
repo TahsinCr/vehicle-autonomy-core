@@ -81,7 +81,10 @@ jobs:
         run: |
           git worktree add ../vehicle-core-baseline HEAD^
           python ../vehicle-core-baseline/run_benchmarks.py --quick --json > /tmp/vehicle-core-baseline.json
-          python ../vehicle-core-baseline/run_benchmarks.py --load-profile normal --load-storage sqlite --load-repeats 3 --json --no-log > /tmp/vehicle-core-load-baseline.json
+          for repetition in 1 2 3; do
+            python ../vehicle-core-baseline/run_benchmarks.py --load-profile normal --load-storage sqlite --json --no-log > "/tmp/vehicle-core-load-baseline-${repetition}.json"
+          done
+          python run_benchmarks.py --aggregate-load /tmp/vehicle-core-load-baseline-{1,2,3}.json > /tmp/vehicle-core-load-baseline.json
       - name: Reject large microbenchmark regressions
         run: >-
           python run_benchmarks.py --quick
