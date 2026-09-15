@@ -99,6 +99,9 @@ Resource cleanup must not recursively wait for the same token disposal or
 container shutdown that invoked it. Such re-entry raises
 `DependencyResolutionError` immediately instead of deadlocking; unrelated
 concurrent callers continue to share and wait for the original cleanup attempt.
+Async child tasks inherit their parent's context, but completed cleanup markers
+are ignored. A task created during cleanup can therefore use the container later
+without being mistaken for an active recursive cleanup operation.
 Process-default container creation and replacement are synchronized across
 threads.
 

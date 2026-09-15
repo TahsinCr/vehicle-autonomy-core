@@ -190,7 +190,7 @@ class MissionLifecycle:
                 return runtime.snapshot
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
-            if self._is_cleanup_reentry(runtime):
+            if self._is_cleanup_reentry(runtime, MissionPhase.SUCCEEDED):
                 return runtime.snapshot
             if (
                 runtime.snapshot.phase is MissionPhase.STOPPING
@@ -279,7 +279,7 @@ class MissionLifecycle:
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
-            if self._is_cleanup_reentry(runtime):
+            if self._is_cleanup_reentry(runtime, MissionPhase.FAILED):
                 return runtime.snapshot
             if runtime.snapshot.phase is MissionPhase.STOPPING and runtime.pending_terminal is not None:
                 if runtime.pending_terminal.phase is not MissionPhase.FAILED:
@@ -626,12 +626,15 @@ class MissionLifecycle:
             # user callback frames have left regardless.
             intent = runtime.pending_terminal
             if intent is not None:
-                runtime.worker = None
                 self._publish_intent_transition(intent)
                 try:
                     self._finalize_pending_terminal(runtime, intent)
                 except MissionCleanupError:
                     pass
+            with self.engine._condition:
+                if runtime.worker is threading.current_thread():
+                    runtime.worker = None
+                self.engine._condition.notify_all()
 
     def _finalize_pending_terminal(
         self,
@@ -705,7 +708,7 @@ class MissionLifecycle:
                 return runtime.snapshot
             if current.terminal:
                 return runtime.snapshot
-            if self._is_cleanup_reentry(runtime):
+            if self._is_cleanup_reentry(runtime, terminal):
                 return runtime.snapshot
             if runtime.pending_terminal is not None:
                 intent = runtime.pending_terminal
@@ -760,12 +763,16 @@ class MissionLifecycle:
         return snapshot
 
     @staticmethod
-    def _is_cleanup_reentry(runtime: MissionRuntime) -> bool:
+    def _is_cleanup_reentry(
+        runtime: MissionRuntime,
+        terminal: MissionPhase,
+    ) -> bool:
         """Return whether terminal cleanup re-entered lifecycle control."""
 
         return (
             runtime.pending_terminal is not None
-            and runtime.cleanup_owner_thread_id == threading.get_ident()
+            and runtime.cleanup_owner_thread_id is not None
+            and runtime.pending_terminal.phase is terminal
         )
 
     def _join_worker(self, runtime: MissionRuntime) -> None:

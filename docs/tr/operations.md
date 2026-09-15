@@ -157,6 +157,11 @@ makinedeki önceki çalışmaya göre throughput, p99 gecikme ve mesaj başına 
 maliyetini de denetler. Throughput ile CPU bağımsız kapılardır; p99 yalnız bir
 toplam maliyet de gerilediğinde hata üretir. Böylece tek bir kısa scheduling
 sıçraması kararlı bir çalışmayı reddetmez.
+CI hem bir önceki commit'i hem de farklıysa en yakın önceki sürüm etiketini
+karşılaştırır. Böylece tek commit'teki ve sürüm boyunca biriken yavaşlamalar ayrı
+ayrı yakalanır. Yük sonucu karşılaştırması profil, storage ve topology
+bilgilerinin de eşleşmesini zorunlu tutar. CI microbenchmark'ları etkileşimli
+`--quick` kontrolünden daha uzun dokuz örnekli medyan ölçümleri kullanır.
 
 ## Uyumluluk ve sürümleme
 

@@ -101,23 +101,31 @@ def _load_standalone_checkout() -> None:
     """Expose a standalone checkout under its intended ``src.core`` name."""
 
     try:
-        import src.core
+        import src.core as loaded_core
     except ModuleNotFoundError:
-        src = sys.modules.get("src")
-        if src is None:
-            src = types.ModuleType("src")
-            src.__path__ = []  # type: ignore[attr-defined]
-            sys.modules["src"] = src
-        spec = importlib.util.spec_from_file_location(
-            "src.core",
-            ROOT / "__init__.py",
-            submodule_search_locations=[str(ROOT)],
-        )
-        if spec is None or spec.loader is None:
-            raise RuntimeError("Could not load the core package") from None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["src.core"] = module
-        spec.loader.exec_module(module)
+        loaded_core = None
+    if loaded_core is not None:
+        loaded_path = Path(loaded_core.__file__).resolve().parent
+        if loaded_path == ROOT:
+            return
+        for module_name in tuple(sys.modules):
+            if module_name == "src.core" or module_name.startswith("src.core."):
+                del sys.modules[module_name]
+    src = sys.modules.get("src")
+    if src is None:
+        src = types.ModuleType("src")
+        src.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["src"] = src
+    spec = importlib.util.spec_from_file_location(
+        "src.core",
+        ROOT / "__init__.py",
+        submodule_search_locations=[str(ROOT)],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Could not load the core package") from None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["src.core"] = module
+    spec.loader.exec_module(module)
 
 
 _load_standalone_checkout()
@@ -1023,6 +1031,17 @@ def _load_regressions(
     """Compare portable combined-load costs with a previous same-host run."""
 
     previous = json.loads(baseline_path.read_text(encoding="utf-8"))
+    identity_fields = ("profile", "messages", "vehicles", "callbacks", "storage")
+    mismatches = [
+        field
+        for field in identity_fields
+        if previous.get(field) != getattr(result, field)
+    ]
+    if mismatches:
+        raise ValueError(
+            "Load baseline does not match the current profile: "
+            + ", ".join(mismatches)
+        )
     factor = 1.0 + maximum_percent / 100.0
     ratios = {
         "throughput": float(previous["throughput_per_second"])

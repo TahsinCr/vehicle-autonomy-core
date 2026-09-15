@@ -95,7 +95,9 @@ Kaynak cleanup kodu kendisini çağıran aynı token disposal veya container
 shutdown işlemini tekrar bekleyemez. Bu re-entry, deadlock yerine hemen
 `DependencyResolutionError` üretir; ilgisiz eşzamanlı çağrılar ilk cleanup
 girişimini paylaşmaya devam eder. Process-default container oluşturma ve
-değiştirme işlemleri thread'ler arasında senkronize edilir.
+değiştirme işlemleri thread'ler arasında senkronize edilir. Async child task'lar
+parent context'ini devralsa da tamamlanmış cleanup marker'ları yok sayılır; cleanup
+sırasında oluşturulan bir task daha sonra yanlışlıkla aktif re-entry sayılmaz.
 
 ## `DependencyContainer`
 

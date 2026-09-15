@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import unittest
+from functools import cached_property
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,16 @@ def build_public_api() -> dict[str, str]:
                     members.update(vars(base))
             for member_name, member in members.items():
                 if member_name.startswith("_"):
+                    continue
+                if isinstance(member, (property, cached_property)):
+                    getter = member.fget if isinstance(member, property) else member.func
+                    try:
+                        signature = str(inspect.signature(getter))
+                    except (TypeError, ValueError):
+                        signature = "<?>"
+                    signatures[f"{qualified_name}.{member_name}"] = (
+                        f"<{type(member).__name__}> {signature}"
+                    )
                     continue
                 if isinstance(member, (classmethod, staticmethod)):
                     member = member.__func__
@@ -152,6 +163,14 @@ class PublicApiContractTests(unittest.TestCase):
             expected,
             "Public API changed; inspect the readable contract diff and run "
             "`python tests/test_public_api.py --update` only for an intentional change",
+        )
+
+    def test_public_properties_are_part_of_the_contract(self) -> None:
+        contract = build_public_api()
+        self.assertTrue(
+            contract["src.core.mavlink.MavlinkVehicle.state"].startswith(
+                "<property>"
+            )
         )
 
 

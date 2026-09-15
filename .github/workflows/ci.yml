@@ -28,7 +28,7 @@ jobs:
       - name: Enforce patch API compatibility
         shell: bash
         run: |
-          release_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          release_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
           if [[ -n "$release_tag" ]]; then
             python tests/test_public_api.py --check-patch-compatible "$release_tag"
           fi
@@ -73,21 +73,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Benchmark previous revision
         run: |
           git worktree add ../vehicle-core-baseline HEAD^
-          python ../vehicle-core-baseline/run_benchmarks.py --quick --json > /tmp/vehicle-core-baseline.json
+          (cd ../vehicle-core-baseline && python run_benchmarks.py --iterations 10000 --repeats 9 --json) > /tmp/vehicle-core-baseline.json
           for repetition in 1 2 3; do
-            python ../vehicle-core-baseline/run_benchmarks.py --load-profile normal --load-storage sqlite --json --no-log > "/tmp/vehicle-core-load-baseline-${repetition}.json"
+            (cd ../vehicle-core-baseline && python run_benchmarks.py --load-profile normal --load-storage sqlite --json --no-log) > "/tmp/vehicle-core-load-baseline-${repetition}.json"
           done
           python run_benchmarks.py --aggregate-load /tmp/vehicle-core-load-baseline-{1,2,3}.json > /tmp/vehicle-core-load-baseline.json
+          release_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          if [[ -n "$release_tag" && "$(git rev-parse "$release_tag^{commit}")" != "$(git rev-parse HEAD^)" ]]; then
+            git worktree add ../vehicle-core-release-baseline "$release_tag"
+            (cd ../vehicle-core-release-baseline && python run_benchmarks.py --iterations 10000 --repeats 9 --json) > /tmp/vehicle-core-release-baseline.json
+            for repetition in 1 2 3; do
+              (cd ../vehicle-core-release-baseline && python run_benchmarks.py --load-profile normal --load-storage sqlite --json --no-log) > "/tmp/vehicle-core-release-load-baseline-${repetition}.json"
+            done
+            python run_benchmarks.py --aggregate-load /tmp/vehicle-core-release-load-baseline-{1,2,3}.json > /tmp/vehicle-core-release-load-baseline.json
+            echo "release_baseline=true" >> "$GITHUB_ENV"
+          fi
       - name: Reject large microbenchmark regressions
         run: >-
-          python run_benchmarks.py --quick
+          python run_benchmarks.py --iterations 10000 --repeats 9
           --compare /tmp/vehicle-core-baseline.json
           --max-regression-percent 35
       - name: Exercise the combined SQLite load path
@@ -96,6 +106,11 @@ jobs:
           --load-repeats 3
           --compare-load /tmp/vehicle-core-load-baseline.json
           --max-regression-percent 35
+      - name: Reject cumulative release regressions
+        if: env.release_baseline == 'true'
+        run: |
+          python run_benchmarks.py --iterations 10000 --repeats 9 --compare /tmp/vehicle-core-release-baseline.json --max-regression-percent 35
+          python run_benchmarks.py --load-profile normal --load-storage sqlite --load-repeats 3 --compare-load /tmp/vehicle-core-release-load-baseline.json --max-regression-percent 35
       - name: Upload benchmark evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -104,6 +119,8 @@ jobs:
           path: |
             /tmp/vehicle-core-baseline.json
             /tmp/vehicle-core-load-baseline.json
+            /tmp/vehicle-core-release-baseline.json
+            /tmp/vehicle-core-release-load-baseline.json
             benchmark-logs.json
 
   arm64:

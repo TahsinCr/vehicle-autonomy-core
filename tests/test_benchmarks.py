@@ -112,6 +112,11 @@ class BenchmarkToolTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
+                        "profile": "test",
+                        "messages": 1,
+                        "vehicles": 1,
+                        "callbacks": 1,
+                        "storage": "sqlite",
                         "throughput_per_second": 100.0,
                         "latency_p99_ns": 100.0,
                         "cpu_ns_per_message": 100.0,
@@ -134,6 +139,11 @@ class BenchmarkToolTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
+                        "profile": "test",
+                        "messages": 1,
+                        "vehicles": 1,
+                        "callbacks": 1,
+                        "storage": "sqlite",
                         "throughput_per_second": 100.0,
                         "latency_p99_ns": 100.0,
                         "cpu_ns_per_message": 100.0,
@@ -145,6 +155,20 @@ class BenchmarkToolTests(unittest.TestCase):
                 run_benchmarks._load_regressions(current, path, 35.0),
                 [],
             )
+
+    def test_load_regression_rejects_mismatched_profile_identity(self) -> None:
+        current = run_benchmarks.LoadBenchmarkResult(
+            "normal", 2_000, 1, 2, "sqlite", 100.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 0, 0, 0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "load.json"
+            baseline = asdict(current)
+            baseline["storage"] = "memory"
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "storage"):
+                run_benchmarks._load_regressions(current, path, 35.0)
 
     def test_repeated_load_profile_reports_median_costs(self) -> None:
         samples = [

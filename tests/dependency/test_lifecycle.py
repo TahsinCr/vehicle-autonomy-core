@@ -675,6 +675,27 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(errors[0], DependencyResolutionError)
         await container.shutdown_async()
 
+    async def test_completed_cleanup_marker_does_not_reject_child_task(self) -> None:
+        container = DependencyContainer()
+        proceed = asyncio.Event()
+        child: asyncio.Task[None] | None = None
+
+        class Resource:
+            async def aclose(self) -> None:
+                nonlocal child
+
+                async def shutdown_later() -> None:
+                    await proceed.wait()
+                    await container.shutdown_async()
+
+                child = asyncio.create_task(shutdown_later())
+
+        container.instance("resource", Resource())
+        await container.unregister_async("resource")
+        proceed.set()
+        assert child is not None
+        await asyncio.wait_for(child, timeout=1.0)
+
     async def test_async_cleanup_reentrancy_fails_instead_of_deadlocking(self) -> None:
         for operation in ("unregister", "shutdown"):
             with self.subTest(operation=operation):

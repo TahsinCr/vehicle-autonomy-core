@@ -2,7 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v1.8.3] - 2026-09-15
+
+### Added
+
+- Added cumulative performance comparisons against the previous release and
+  extended the public API contract to cover properties and cached properties.
+
+### Fixed
+
+- Select the prior release rather than the current tag for patch API checks,
+  validate combined-load baseline identity and reject cross-thread mission
+  cleanup reentry without deadlocking.
+- Run benchmark references from their own worktrees so Python cannot resolve
+  the current checkout while measuring an earlier commit or release.
+- Make the benchmark runner prefer the checkout containing the script over an
+  unrelated editable installation of the package.
+- Use longer nine-sample CI microbenchmarks to keep commit and release gates
+  stable enough for hosted runners.
+- Ignore inherited dependency cleanup markers after their originating async
+  operation has completed.
+- Retain terminal mission worker ownership through scheduler finalization so
+  immediate unregister calls cannot remove state still used by that worker.
+
+### Tests
+
+- Added deterministic and repeated stress coverage for cross-thread mission
+  cleanup, post-cleanup async task context and terminal unregister ordering.
 
 ## [v1.8.2] - 2026-09-15
 
@@ -813,7 +839,9 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.3...HEAD
+[v1.8.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.2...v1.8.3
+[v1.8.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.1...v1.8.2
 [v1.8.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8...v1.8.1
 [v1.8]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.3...v1.8
 [v1.7.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.7.2...v1.7.3

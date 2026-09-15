@@ -154,6 +154,11 @@ load runs fail when SQLite loses records or leaves worker threads behind.
 cost per message against a same-host run. Throughput and CPU are independent
 gates; p99 fails only when an aggregate cost also regresses, preventing one
 short scheduling spike from rejecting an otherwise stable run.
+CI compares both the immediately preceding commit and, when different, the
+nearest prior release tag. This catches local regressions as well as smaller
+slowdowns accumulated across a release. Load-result comparison also requires
+matching profile, storage and topology metadata. CI microbenchmarks use longer
+nine-sample medians than the interactive `--quick` health check.
 
 ## Compatibility and versioning
 

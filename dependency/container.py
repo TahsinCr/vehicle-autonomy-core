@@ -56,7 +56,9 @@ from .resolution import (
 )
 
 
-_cleanup_operations: contextvars.ContextVar[tuple[tuple[int, str], ...]] = (
+_cleanup_operations: contextvars.ContextVar[
+    tuple[tuple[int, str, threading.Event], ...]
+] = (
     contextvars.ContextVar("dependency_cleanup_operations", default=())
 )
 
@@ -532,7 +534,10 @@ class DependencyContainer:
                 self._pending_disposals.pop(token, None)
 
     async def unregister_async(self, token: Token) -> None:
-        if (id(self), "shutdown") in _cleanup_operations.get():
+        if any(
+            container_id == id(self) and operation == "shutdown" and not done.is_set()
+            for container_id, operation, done in _cleanup_operations.get()
+        ):
             raise DependencyResolutionError(
                 "Dependency cleanup cannot unregister during container shutdown"
             )
@@ -669,7 +674,10 @@ class DependencyContainer:
             )
 
     async def shutdown_async(self) -> None:
-        if (id(self), "token") in _cleanup_operations.get():
+        if any(
+            container_id == id(self) and operation == "token" and not done.is_set()
+            for container_id, operation, done in _cleanup_operations.get()
+        ):
             raise DependencyResolutionError(
                 "Dependency cleanup cannot start container shutdown during token disposal"
             )
@@ -691,7 +699,7 @@ class DependencyContainer:
         attempt: _TokenDisposalAttempt,
     ) -> None:
         marker = _cleanup_operations.set(
-            (*_cleanup_operations.get(), (id(self), "token"))
+            (*_cleanup_operations.get(), (id(self), "token", attempt.done))
         )
         error: BaseException | None = None
         try:
@@ -739,7 +747,7 @@ class DependencyContainer:
 
     async def _shutdown_async(self, attempt: _ShutdownAttempt) -> None:
         marker = _cleanup_operations.set(
-            (*_cleanup_operations.get(), (id(self), "shutdown"))
+            (*_cleanup_operations.get(), (id(self), "shutdown", attempt.done))
         )
         cancelled = False
         failure: BaseException | None = None

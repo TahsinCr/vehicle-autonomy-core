@@ -676,6 +676,56 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(snapshot.phase, MissionPhase.FAILED)
         self.assertEqual(snapshot.reason, "original failure")
 
+    def test_cleanup_child_thread_cannot_reenter_terminalization(self) -> None:
+        class ThreadedCleanupMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.child_finished = False
+
+            def stop(self) -> None:
+                child = threading.Thread(target=lambda: self.fail("child failure"))
+                child.start()
+                child.join(0.5)
+                self.child_finished = not child.is_alive()
+
+        mission = ThreadedCleanupMission()
+        self.engine.run(mission)
+        self.assertTrue(mission.started.wait(1.0))
+
+        snapshot = self.engine.fail(mission, "original failure")
+
+        self.assertTrue(mission.child_finished)
+        self.assertEqual(snapshot.phase, MissionPhase.FAILED)
+        self.assertEqual(snapshot.reason, "original failure")
+
+    def test_unregister_waits_for_terminal_worker_finalization(self) -> None:
+        mission = CompletingMission()
+        finalization_entered = threading.Event()
+        release_finalization = threading.Event()
+        original = self.engine._orchestrator.after_terminal
+
+        def block_after_terminal(mission_id: int) -> None:
+            finalization_entered.set()
+            release_finalization.wait(1.0)
+            original(mission_id)
+
+        self.engine._orchestrator.after_terminal = block_after_terminal
+        self.engine.run(mission)
+        self.assertTrue(finalization_entered.wait(1.0))
+
+        result: list[bool] = []
+        unregister = threading.Thread(
+            target=lambda: result.append(self.engine.unregister(mission))
+        )
+        unregister.start()
+        time.sleep(0.02)
+        self.assertTrue(unregister.is_alive())
+
+        release_finalization.set()
+        unregister.join(1.0)
+        self.assertFalse(unregister.is_alive())
+        self.assertEqual(result, [True])
+
     def test_cleanup_retry_cannot_reenter_matching_completion(self) -> None:
         class ReentrantCompletionMission(BlockingMission):
             def __init__(self) -> None:

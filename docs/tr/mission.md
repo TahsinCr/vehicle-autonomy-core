@@ -153,6 +153,11 @@ mission reddedilirse öncekiler çalışmaya devam eder, daha sonraki girdiler
 denenmez. Reddedilen mission gözlem veya sonraki bir deneme için kayıtlı kalır.
 İşlem bilinçli olarak transactional değildir.
 
+Terminal cleanup sırasında ilk kabul edilen sonuç thread'ler arasında da
+belirleyicidir. Cleanup callback'i aynı terminal komutu doğrudan veya beklediği
+bir yardımcı thread üzerinden verebilir; finalization yeniden başlatılmaz.
+Çelişen terminal komutlar reddedilmeye devam eder.
+
 Lifecycle: `pause`, `resume`, `stop_mission`, `cancel` requester/reason alır;
 `complete`, `fail`, `progress`, `checkpoint` seçilen mission'ı günceller.
 `stop_matching(requester_id, tags=(), resources=())`, aktif requester'ın somut

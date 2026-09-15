@@ -170,6 +170,11 @@ returns one snapshot; multiple inputs return a snapshot tuple. The same instance
 cannot appear twice in one call; duplicate inputs raise `ValueError` before any
 mission is admitted.
 
+Terminal cleanup keeps the first accepted outcome authoritative across threads.
+A cleanup callback may issue the matching terminal command directly or through
+a joined helper thread without re-entering finalization; a competing terminal
+command is still rejected.
+
 Multiple inputs are independent and admitted in argument order. If a later
 mission is rejected, earlier missions keep running and later inputs are not
 attempted. The rejected mission remains registered for observation or a later
