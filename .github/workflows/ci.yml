@@ -81,7 +81,7 @@ jobs:
         run: |
           git worktree add ../vehicle-core-baseline HEAD^
           python ../vehicle-core-baseline/run_benchmarks.py --quick --json > /tmp/vehicle-core-baseline.json
-          python ../vehicle-core-baseline/run_benchmarks.py --load-profile normal --load-storage sqlite --json --no-log > /tmp/vehicle-core-load-baseline.json
+          python ../vehicle-core-baseline/run_benchmarks.py --load-profile normal --load-storage sqlite --load-repeats 3 --json --no-log > /tmp/vehicle-core-load-baseline.json
       - name: Reject large microbenchmark regressions
         run: >-
           python run_benchmarks.py --quick
@@ -90,6 +90,7 @@ jobs:
       - name: Exercise the combined SQLite load path
         run: >-
           python run_benchmarks.py --load-profile normal --load-storage sqlite
+          --load-repeats 3
           --compare-load /tmp/vehicle-core-load-baseline.json
           --max-regression-percent 35
       - name: Upload benchmark evidence

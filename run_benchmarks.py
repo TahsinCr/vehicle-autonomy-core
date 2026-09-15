@@ -904,6 +904,37 @@ def run_load_profile(
     )
 
 
+def run_load_profiles(
+    profile: str,
+    *,
+    storage: str = "sqlite",
+    repeats: int = 1,
+) -> LoadBenchmarkResult:
+    """Run a load profile repeatedly and report representative median costs."""
+
+    if repeats < 1:
+        raise ValueError("Load repetitions must be positive")
+    results = [run_load_profile(profile, storage=storage) for _ in range(repeats)]
+    representative = results[len(results) // 2]
+
+    def median(field: str) -> float:
+        return float(statistics.median(getattr(result, field) for result in results))
+
+    return replace(
+        representative,
+        throughput_per_second=median("throughput_per_second"),
+        latency_p50_ns=median("latency_p50_ns"),
+        latency_p95_ns=median("latency_p95_ns"),
+        latency_p99_ns=median("latency_p99_ns"),
+        cpu_ns_per_message=median("cpu_ns_per_message"),
+        retained_bytes_per_message=median("retained_bytes_per_message"),
+        peak_bytes_per_message=median("peak_bytes_per_message"),
+        writer_max_queued=max(result.writer_max_queued for result in results),
+        writer_failed_records=sum(result.writer_failed_records for result in results),
+        thread_delta=max(result.thread_delta for result in results),
+    )
+
+
 def _regressions(
     results: list[BenchmarkResult],
     baseline_path: Path,
@@ -1040,6 +1071,12 @@ def main() -> int:
         default="sqlite",
     )
     parser.add_argument(
+        "--load-repeats",
+        type=int,
+        default=1,
+        help="Load-profile repetitions; median costs are reported (default: 1)",
+    )
+    parser.add_argument(
         "--compare-load",
         type=Path,
         help="Compare a combined load run with a previous same-host JSON result",
@@ -1060,8 +1097,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_regression_percent < 0:
         parser.error("--max-regression-percent must be non-negative")
+    if args.load_repeats < 1:
+        parser.error("--load-repeats must be positive")
     if args.load_profile is not None:
-        result = run_load_profile(args.load_profile, storage=args.load_storage)
+        result = run_load_profiles(
+            args.load_profile,
+            storage=args.load_storage,
+            repeats=args.load_repeats,
+        )
         failures = _load_failures(result)
         if args.compare_load is not None:
             failures.extend(

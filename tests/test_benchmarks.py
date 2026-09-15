@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from unittest import mock
 
 import run_benchmarks
 
@@ -144,6 +145,32 @@ class BenchmarkToolTests(unittest.TestCase):
                 run_benchmarks._load_regressions(current, path, 35.0),
                 [],
             )
+
+    def test_repeated_load_profile_reports_median_costs(self) -> None:
+        samples = [
+            run_benchmarks.LoadBenchmarkResult(
+                "test", 1, 1, 1, "sqlite", throughput, 1.0, 2.0, latency,
+                cpu, 4.0, 5.0, queued, failed, threads,
+            )
+            for throughput, latency, cpu, queued, failed, threads in (
+                (100.0, 30.0, 300.0, 2, 0, 0),
+                (300.0, 10.0, 100.0, 8, 1, 0),
+                (200.0, 20.0, 200.0, 4, 0, 1),
+            )
+        ]
+        with mock.patch.object(
+            run_benchmarks,
+            "run_load_profile",
+            side_effect=samples,
+        ):
+            result = run_benchmarks.run_load_profiles("test", repeats=3)
+
+        self.assertEqual(result.throughput_per_second, 200.0)
+        self.assertEqual(result.latency_p99_ns, 20.0)
+        self.assertEqual(result.cpu_ns_per_message, 200.0)
+        self.assertEqual(result.writer_max_queued, 8)
+        self.assertEqual(result.writer_failed_records, 1)
+        self.assertEqual(result.thread_delta, 1)
 
     def test_log_appends_versioned_run_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

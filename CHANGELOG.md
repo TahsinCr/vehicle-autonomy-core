@@ -31,6 +31,8 @@ All notable changes to this project are documented in this file.
 - Bound every CI job with an explicit timeout.
 - Require an aggregate throughput or CPU regression to corroborate combined
   load p99 latency, avoiding failures caused by an isolated scheduler spike.
+- Compare repeated combined-load measurements by their median costs so a
+  transient SQLite or runner scheduling spike cannot fail a release-tag build.
 
 ### Tests
 
