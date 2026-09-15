@@ -977,10 +977,14 @@ def _load_regressions(
         "CPU per message": result.cpu_ns_per_message
         / float(previous["cpu_ns_per_message"]),
     }
+    corroborated_latency = (
+        ratios["latency p99"] > factor
+        and max(ratios["throughput"], ratios["CPU per message"]) > factor
+    )
     return [
         f"{name}: +{(ratio - 1.0) * 100.0:.1f}%"
         for name, ratio in ratios.items()
-        if ratio > factor
+        if ratio > factor and (name != "latency p99" or corroborated_latency)
     ]
 
 

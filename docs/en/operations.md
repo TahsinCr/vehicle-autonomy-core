@@ -151,7 +151,9 @@ CI uses the same calibrated 35% budget. Every run is appended atomically to
 platform and result data. Use `--no-log` only for disposable probes. Combined
 load runs fail when SQLite loses records or leaves worker threads behind.
 `--compare-load previous-load.json` also checks throughput, p99 latency and CPU
-cost per message against a same-host run.
+cost per message against a same-host run. Throughput and CPU are independent
+gates; p99 fails only when an aggregate cost also regresses, preventing one
+short scheduling spike from rejecting an otherwise stable run.
 
 ## Compatibility and versioning
 

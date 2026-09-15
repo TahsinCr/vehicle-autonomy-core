@@ -28,6 +28,8 @@ All notable changes to this project are documented in this file.
   disposal and container shutdown can wait on each other.
 - Include inherited public methods in the generated callable API contract.
 - Bound every CI job with an explicit timeout.
+- Require an aggregate throughput or CPU regression to corroborate combined
+  load p99 latency, avoiding failures caused by an isolated scheduler spike.
 
 ### Tests
 

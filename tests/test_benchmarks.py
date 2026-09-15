@@ -123,6 +123,28 @@ class BenchmarkToolTests(unittest.TestCase):
                 ["throughput: +42.9%", "latency p99: +40.0%", "CPU per message: +40.0%"],
             )
 
+    def test_load_regression_does_not_fail_on_isolated_p99_jitter(self) -> None:
+        current = run_benchmarks.LoadBenchmarkResult(
+            "test", 1, 1, 1, "sqlite", 100.0, 1.0, 1.0, 160.0,
+            100.0, 1.0, 1.0, 0, 0, 0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "load.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "throughput_per_second": 100.0,
+                        "latency_p99_ns": 100.0,
+                        "cpu_ns_per_message": 100.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                run_benchmarks._load_regressions(current, path, 35.0),
+                [],
+            )
+
     def test_log_appends_versioned_run_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "benchmark-logs.json"
