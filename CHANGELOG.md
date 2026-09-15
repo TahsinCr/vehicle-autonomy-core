@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Updated the GitHub Actions runtime dependencies to the current v7 releases.
 - Calibrate microbenchmarks with the dedicated no-op anchor and require at
   least 80% operation coverage when comparing results.
 - Enforce return-type diagnostics and compare patch-series public API contracts
