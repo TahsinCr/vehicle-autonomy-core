@@ -87,16 +87,24 @@ Syntax/import derlemesini doğrulayın:
 python -m compileall -q .
 ```
 
-Geliştirme kalite kapılarını kurup çalıştırın:
+Desteklenen Python 3.10 tip hedefiyle geliştirme kalite kapılarını kurup
+çalıştırın:
 
 ```bash
-python -m pip install -e ".[quality]"
-ruff check .
-pyright
-coverage run run_tests.py
-coverage report
+python3.10 -m pip install -e ".[quality]"
+python run_quality.py
+python run_quality.py --tests
+python run_quality.py --coverage
 python run_stress_tests.py --repeats 25
 ```
+
+`run_quality.py` tam olarak Python 3.10 yorumlayıcısı ister ve varsayılan olarak
+`python3.10` kullanır; shim aktif değilse kurulu pyenv Python 3.10 sürümünü de
+bulur. Yorumlayıcının adı farklıysa `--python /path/to/python3.10` verin.
+Varsayılan akış Ruff, bu yorumlayıcıya
+bağlı Pyright, kaynak derlemesi ve public API sözleşmesini çalıştırır.
+`--tests` tüm suite'i ekler; `--coverage` aynı suite'i yapılandırılmış
+branch-coverage kapısından geçirir.
 
 Coverage branch kararlarını da ölçer ve proje genelinde %82 taban sınırı
 uygular. Pyright kesin isim ve kontrol akışı hatalarını, kullanılmayan production

@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v1.9.1] - 2026-09-16
+
+### Changed
+
+- Added `run_quality.py` as the standard local Python 3.10 quality gate. It
+  runs linting, Python 3.10-targeted type checks, compilation and public API
+  verification, with optional full-test and coverage modes.
+- Narrowed the public MAVLink runtime type surface: asynchronous lifecycle,
+  telemetry, application and callback APIs now declare their concrete inputs
+  and results, while dynamic callback options remain explicitly `object`-typed.
+- Replaced internal MAVLink metadata `Any` values with `object` at external
+  pymavlink boundaries, retaining the existing structural message protocols.
+- Enabled focused Ruff quality checks for safe comprehension simplification and
+  redundant condition patterns (`C4`, `PIE`, `SIM102`, `SIM103`). Broad
+  simplification rules remain disabled where callback isolation and cleanup
+  semantics need explicit exception handling.
+
 ### Fixed
 
 - Require process CPU-cost regression to corroborate SQLite load throughput or
@@ -903,7 +920,8 @@ All notable changes to this project are documented in this file.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.9...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.9.1...HEAD
+[v1.9.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.9...v1.9.1
 [v1.9]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.3...v1.9
 [v1.8.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.2...v1.8.3
 [v1.8.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.1...v1.8.2

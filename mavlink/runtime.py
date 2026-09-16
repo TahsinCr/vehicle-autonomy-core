@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast, overload
+from typing import Protocol, cast, overload
 
 from ..abstracts import Service
 from ..compatibility import ExceptionGroup
@@ -447,7 +447,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
-        **options: Any,
+        **options: object,
     ) -> Callable[[Callable[[MavlinkMessage], None]], Subscription]: ...
 
     @overload
@@ -458,7 +458,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
-        **options: Any,
+        **options: object,
     ) -> Subscription: ...
 
     def subscribe(
@@ -468,7 +468,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
-        **options: Any,
+        **options: object,
     ) -> Subscription | Callable[
         [Callable[[MavlinkMessage], None]], Subscription
     ]:
@@ -495,7 +495,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
-        **options: Any,
+        **options: object,
     ) -> Subscription:
         message_filter = (
             message_types

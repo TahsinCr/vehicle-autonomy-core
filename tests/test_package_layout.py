@@ -117,6 +117,7 @@ class ProjectMetadataTests(unittest.TestCase):
 
     def test_development_runners_live_at_repository_root(self) -> None:
         self.assertTrue((ROOT / "run_tests.py").is_file())
+        self.assertTrue((ROOT / "run_quality.py").is_file())
         self.assertTrue((ROOT / "run_benchmarks.py").is_file())
         self.assertTrue((ROOT / "run_stress_tests.py").is_file())
         self.assertFalse((ROOT / "tests" / "run.py").exists())

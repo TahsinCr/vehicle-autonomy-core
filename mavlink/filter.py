@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from .protocols import MavlinkMessage, MavlinkMessageMetadata
 
@@ -30,20 +30,20 @@ def mavlink_message_type(message: MavlinkMessage) -> str:
 def mavlink_source_system(message: MavlinkMessage) -> int | None:
     getter = getattr(message, "get_srcSystem", None)
     if callable(getter):
-        value: Any = getter()
+        value: object = getter()
         return int(value) if value is not None else None
     header = getattr(message, "_header", None)
-    value: Any = getattr(header, "srcSystem", None)
+    value: object = getattr(header, "srcSystem", None)
     return int(value) if value is not None else None
 
 
 def mavlink_source_component(message: MavlinkMessage) -> int | None:
     getter = getattr(message, "get_srcComponent", None)
     if callable(getter):
-        value: Any = getter()
+        value: object = getter()
         return int(value) if value is not None else None
     header = getattr(message, "_header", None)
-    value: Any = getattr(header, "srcComponent", None)
+    value: object = getattr(header, "srcComponent", None)
     return int(value) if value is not None else None
 
 
@@ -51,7 +51,7 @@ def mavlink_message_id(message: MavlinkMessage) -> int | None:
     getter = getattr(message, "get_msgId", None)
     if not callable(getter):
         return None
-    value: Any = getter()
+    value: object = getter()
     return int(value) if value is not None else None
 
 

@@ -86,16 +86,23 @@ Verify syntax/import compilation:
 python -m compileall -q .
 ```
 
-Install and run the development quality gates:
+Install and run the development quality gates against the supported Python 3.10
+type target:
 
 ```bash
-python -m pip install -e ".[quality]"
-ruff check .
-pyright
-coverage run run_tests.py
-coverage report
+python3.10 -m pip install -e ".[quality]"
+python run_quality.py
+python run_quality.py --tests
+python run_quality.py --coverage
 python run_stress_tests.py --repeats 25
 ```
+
+`run_quality.py` requires an exact Python 3.10 interpreter, using `python3.10`
+by default and discovering an installed pyenv Python 3.10 when that shim is not
+active. Pass `--python /path/to/python3.10` when the executable has a different
+name. Its default path runs Ruff, Pyright against that interpreter,
+source compilation and the public API contract. `--tests` adds the full suite;
+`--coverage` runs that suite through the configured branch-coverage gate.
 
 Coverage includes branch decisions and enforces an 82% project baseline.
 Pyright checks definite name and control-flow failures, unused production

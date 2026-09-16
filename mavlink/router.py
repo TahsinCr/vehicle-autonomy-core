@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 
 from ..abstracts import Service
 from ..events import EventBus, Subscription
@@ -495,7 +495,7 @@ class MavlinkMessageRouter(Service):
         getter = getattr(message, "get_seq", None)
         if callable(getter):
             try:
-                value: Any = getter()
+                value: object = getter()
                 return int(value) & 0xFF
             except (TypeError, ValueError):
                 return None

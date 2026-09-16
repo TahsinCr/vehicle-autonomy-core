@@ -305,13 +305,16 @@ class MissionLifecycle:
                 MissionPhase.FAILED,
             ):
                 return runtime.snapshot
-            if runtime.snapshot.phase is MissionPhase.STOPPING and runtime.pending_terminal is not None:
-                if runtime.pending_terminal.phase is not MissionPhase.FAILED:
-                    if runtime.cleanup_owner_thread_id == threading.get_ident():
-                        return runtime.snapshot
-                    raise MissionTransitionError(
-                        "Mission already has a different terminal intent"
-                    )
+            if (
+                runtime.snapshot.phase is MissionPhase.STOPPING
+                and runtime.pending_terminal is not None
+                and runtime.pending_terminal.phase is not MissionPhase.FAILED
+            ):
+                if runtime.cleanup_owner_thread_id == threading.get_ident():
+                    return runtime.snapshot
+                raise MissionTransitionError(
+                    "Mission already has a different terminal intent"
+                )
             runtime.stop_event.set()
             if (
                 runtime.snapshot.phase.active

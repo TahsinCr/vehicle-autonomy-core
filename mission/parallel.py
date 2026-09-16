@@ -69,7 +69,7 @@ class MissionParallelExecutor:
             group,
             execution_id,
             children=children,
-            phases={name: MissionPhase.REGISTERED for name in children},
+            phases=dict.fromkeys(children, MissionPhase.REGISTERED),
         )
         with self.engine._condition:
             self._runs[execution_id] = snapshot

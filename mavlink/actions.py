@@ -250,9 +250,7 @@ class MavlinkActions:
 
     def _claim(self, subscription: CallbackSubscription) -> bool:
         with self._topics_lock:
-            if self._actions_closed or not subscription.active:
-                return False
-            return True
+            return not self._actions_closed and subscription.active
 
     async def _deliver_async(
         self,

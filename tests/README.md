@@ -21,15 +21,19 @@ Concurrency lifecycle regressions can be repeated independently:
 python run_stress_tests.py --repeats 25
 ```
 
-The optional `quality` dependencies provide Ruff, Pyright and branch coverage:
+The optional `quality` dependencies provide Ruff, Python 3.10-targeted Pyright
+and branch coverage:
 
 ```bash
-python -m pip install -e ".[quality]"
-ruff check .
-pyright
-coverage run run_tests.py
-coverage report
+python3.10 -m pip install -e ".[quality]"
+python run_quality.py
+python run_quality.py --tests
+python run_quality.py --coverage
 ```
+
+`run_quality.py` requires an exact Python 3.10 interpreter and uses it for
+Pyright, compilation, the public API contract and optional test/coverage work.
+Pass `--python /path/to/python3.10` when it is not available as `python3.10`.
 
 The runner discovers every `test*.py` file under `tests` and exits with a
 non-zero status when a test fails. The equivalent standard-library command is:
