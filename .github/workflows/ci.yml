@@ -72,6 +72,8 @@ jobs:
     name: Performance regression
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      release_baseline: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -109,7 +111,7 @@ jobs:
           --compare-load /tmp/vehicle-core-load-baseline.json
           --max-regression-percent 35
       - name: Reject cumulative release regressions
-        if: env.release_baseline == 'true'
+        if: ${{ env.release_baseline == 'true' }}
         run: |
           python run_benchmarks.py --iterations 10000 --repeats 9 --compare /tmp/vehicle-core-release-baseline.json --max-regression-percent 35
           python run_benchmarks.py --load-profile normal --load-storage sqlite --load-repeats 3 --compare-load /tmp/vehicle-core-release-load-baseline.json --max-regression-percent 35

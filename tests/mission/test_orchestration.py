@@ -596,6 +596,7 @@ class MissionOrchestrationTests(unittest.TestCase):
                 owner=owner,
                 termination_policy=OwnerTerminationPolicy.KEEP_RUNNING,
             )
+            background.started.wait(1.0)
             engine.complete(owner)
             self.assertTrue(engine.snapshot(background).phase.active)
             engine.stop_mission(background)
