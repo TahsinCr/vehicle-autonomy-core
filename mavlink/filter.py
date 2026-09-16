@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
+
+from .protocols import MavlinkMessage, MavlinkMessageMetadata
 
 
 MessageType: TypeAlias = str
@@ -10,11 +12,11 @@ MessageId: TypeAlias = int
 # Backwards-compatible aliases used by the public client and router APIs.
 MessageTypeInput: TypeAlias = MessageType | Iterable[MessageType]
 MessageIdInput: TypeAlias = MessageId | Iterable[MessageId]
-MessagePredicate: TypeAlias = Callable[[Any], bool]
+MessagePredicate: TypeAlias = Callable[[MavlinkMessage], bool]
 ConditionEvaluator: TypeAlias = Callable[[str], bool]
 
 
-def mavlink_message_type(message: Any) -> str:
+def mavlink_message_type(message: MavlinkMessage) -> str:
     """Return a pymavlink message type in one normalized form."""
     getter = getattr(message, "get_type", None)
     if not callable(getter):
@@ -25,31 +27,31 @@ def mavlink_message_type(message: Any) -> str:
     return value
 
 
-def mavlink_source_system(message: Any) -> int | None:
+def mavlink_source_system(message: MavlinkMessage) -> int | None:
     getter = getattr(message, "get_srcSystem", None)
     if callable(getter):
-        value = getter()
+        value: Any = getter()
         return int(value) if value is not None else None
     header = getattr(message, "_header", None)
-    value = getattr(header, "srcSystem", None)
+    value: Any = getattr(header, "srcSystem", None)
     return int(value) if value is not None else None
 
 
-def mavlink_source_component(message: Any) -> int | None:
+def mavlink_source_component(message: MavlinkMessage) -> int | None:
     getter = getattr(message, "get_srcComponent", None)
     if callable(getter):
-        value = getter()
+        value: Any = getter()
         return int(value) if value is not None else None
     header = getattr(message, "_header", None)
-    value = getattr(header, "srcComponent", None)
+    value: Any = getattr(header, "srcComponent", None)
     return int(value) if value is not None else None
 
 
-def mavlink_message_id(message: Any) -> int | None:
+def mavlink_message_id(message: MavlinkMessage) -> int | None:
     getter = getattr(message, "get_msgId", None)
     if not callable(getter):
         return None
-    value = getter()
+    value: Any = getter()
     return int(value) if value is not None else None
 
 
@@ -106,16 +108,35 @@ class MavlinkMessageFilter:
             raise TypeError("MAVLink predicate callable olmalı")
 
     @classmethod
-    def for_types(cls, *message_types: str, **criteria: Any) -> "MavlinkMessageFilter":
-        return cls(message_types=message_types, **criteria)
+    def for_types(
+        cls,
+        *message_types: str,
+        source_systems: int | Iterable[int] | None = None,
+        source_components: int | Iterable[int] | None = None,
+        message_ids: MessageIdInput | None = None,
+        condition: str | None = None,
+        predicate: MessagePredicate | None = None,
+    ) -> "MavlinkMessageFilter":
+        return cls(
+            message_types=message_types,
+            source_systems=source_systems,
+            source_components=source_components,
+            message_ids=message_ids,
+            condition=condition,
+            predicate=predicate,
+        )
 
     def matches(
         self,
-        message: Any,
+        message: MavlinkMessage,
         *,
         condition_evaluator: ConditionEvaluator | None = None,
-        metadata: Any | None = None,
+        metadata: MavlinkMessageMetadata | None = None,
     ) -> bool:
+        message_types = cast(frozenset[str] | None, self.message_types)
+        source_systems = cast(frozenset[int] | None, self.source_systems)
+        source_components = cast(frozenset[int] | None, self.source_components)
+        message_ids = cast(frozenset[int] | None, self.message_ids)
         message_type = (
             metadata.message_type if metadata is not None else mavlink_message_type(message)
         )
@@ -128,13 +149,13 @@ class MavlinkMessageFilter:
             else mavlink_source_component(message)
         )
         message_id = metadata.message_id if metadata is not None else mavlink_message_id(message)
-        if self.message_types is not None and message_type not in self.message_types:
+        if message_types is not None and message_type not in message_types:
             return False
-        if self.source_systems is not None and source_system not in self.source_systems:
+        if source_systems is not None and source_system not in source_systems:
             return False
-        if self.source_components is not None and source_component not in self.source_components:
+        if source_components is not None and source_component not in source_components:
             return False
-        if self.message_ids is not None and message_id not in self.message_ids:
+        if message_ids is not None and message_id not in message_ids:
             return False
         if self.condition is not None:
             if condition_evaluator is None:

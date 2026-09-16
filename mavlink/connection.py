@@ -3,15 +3,21 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import cast
 
 from ..abstracts import Service
 from ..events import EventBus
 from .endpoint import MavlinkEndpoint
 from .filter import MessageTypeInput, normalize_message_types
+from .protocols import (
+    MavlinkConnectionBackend,
+    MavlinkDialect,
+    MavlinkMessage,
+    MavutilModule,
+)
 
 
-ConnectionFactory = Callable[[MavlinkEndpoint], Any]
+ConnectionFactory = Callable[[MavlinkEndpoint], MavlinkConnectionBackend]
 
 
 class MavlinkUnavailableError(RuntimeError):
@@ -28,12 +34,12 @@ class MavlinkConnection(Service):
         endpoint: MavlinkEndpoint,
         *,
         connection_factory: ConnectionFactory | None = None,
-        mavutil_module: Any | None = None,
+        mavutil_module: MavutilModule | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.connection_changed = EventBus[bool]()
         self.errors = EventBus[Exception]()
-        self._connection: Any | None = None
+        self._connection: MavlinkConnectionBackend | None = None
         self._connection_factory = connection_factory
         self._mavutil_module = mavutil_module
         self._lifecycle_lock = threading.RLock()
@@ -47,7 +53,7 @@ class MavlinkConnection(Service):
             return self._connection is not None
 
     @property
-    def raw(self) -> Any:
+    def raw(self) -> MavlinkConnectionBackend:
         with self._lifecycle_lock:
             if self._connection is None:
                 raise ConnectionError("MAVLink bağlantısı açık değil")
@@ -62,11 +68,11 @@ class MavlinkConnection(Service):
         return int(getattr(self.raw, "target_component", 0) or 1)
 
     @property
-    def message_state(self) -> dict[str, Any]:
-        return getattr(self.raw, "messages", {})
+    def message_state(self) -> dict[str, MavlinkMessage]:
+        return dict(self.raw.messages)
 
     @property
-    def mavlink(self) -> Any:
+    def mavlink(self) -> MavlinkDialect:
         """MAVLink constants and base message classes from the loaded dialect."""
         return self._load_mavutil().mavlink
 
@@ -82,7 +88,7 @@ class MavlinkConnection(Service):
         with self._lifecycle_lock:
             if self._connection is not None:
                 return
-            connection: Any | None = None
+            connection: MavlinkConnectionBackend | None = None
             try:
                 connection = self._create_connection()
                 heartbeat = self._wait_vehicle_heartbeat(connection)
@@ -100,7 +106,9 @@ class MavlinkConnection(Service):
             self.initial_heartbeat = heartbeat
         self.connection_changed.publish(True)
 
-    def _wait_vehicle_heartbeat(self, connection: Any) -> Any:
+    def _wait_vehicle_heartbeat(
+        self, connection: MavlinkConnectionBackend
+    ) -> MavlinkMessage:
         """Wait for the autopilot without accepting companion or GCS heartbeats."""
         deadline = time.monotonic() + self.endpoint.heartbeat_timeout
         classifier = getattr(connection, "probably_vehicle_heartbeat", None)
@@ -130,7 +138,7 @@ class MavlinkConnection(Service):
             if not callable(classifier) or classifier(heartbeat):
                 return heartbeat
 
-    def _send_discovery_heartbeat(self, connection: Any) -> None:
+    def _send_discovery_heartbeat(self, connection: MavlinkConnectionBackend) -> None:
         """Advertise the GCS endpoint so a UDP server can route telemetry back."""
 
         mavlink = self._load_mavutil().mavlink
@@ -154,7 +162,7 @@ class MavlinkConnection(Service):
         condition: str | None = None,
         blocking: bool = False,
         timeout: float | None = None,
-    ) -> Any | None:
+    ) -> MavlinkMessage | None:
         """Expose pymavlink ``recv_match`` type and condition filters directly.
 
         Do not call this directly while the router is running; the router must
@@ -169,7 +177,7 @@ class MavlinkConnection(Service):
         else:
             native_types = sorted(normalized_types)
         normalized_condition = condition.strip() if condition else None
-        kwargs: dict[str, Any] = {"blocking": blocking, "timeout": timeout}
+        kwargs: dict[str, object] = {"blocking": blocking, "timeout": timeout}
         if native_types is not None:
             kwargs["type"] = native_types
         if normalized_condition:
@@ -187,7 +195,7 @@ class MavlinkConnection(Service):
     def evaluate_condition_for_state(
         self,
         condition: str,
-        message_state: dict[str, Any],
+        message_state: dict[str, MavlinkMessage],
     ) -> bool:
         normalized = condition.strip()
         if not normalized:
@@ -200,10 +208,10 @@ class MavlinkConnection(Service):
             )
         )
 
-    def send(self, message: Any) -> None:
+    def send(self, message: MavlinkMessage) -> None:
         self.call_mav("send", message)
 
-    def send_named(self, message_name: str, **parameters: Any) -> None:
+    def send_named(self, message_name: str, **parameters: object) -> None:
         self.call_mav(f"{message_name.strip().lower()}_send", **parameters)
 
     def request_message_rate(
@@ -262,7 +270,7 @@ class MavlinkConnection(Service):
         )
         return interval_us
 
-    def call_mav(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    def call_mav(self, method_name: str, *args: object, **kwargs: object) -> object:
         """Serialize every pymavlink ``raw.mav.*`` write through one lock."""
         try:
             with self._send_lock:
@@ -277,7 +285,7 @@ class MavlinkConnection(Service):
             self._publish_error(exc)
             raise
 
-    def call_raw(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    def call_raw(self, method_name: str, *args: object, **kwargs: object) -> object:
         """Serialize writes outside the mav object, such as ``set_mode``."""
         try:
             with self._send_lock:
@@ -303,7 +311,7 @@ class MavlinkConnection(Service):
                 raise
             self.connection_changed.publish(False)
 
-    def _create_connection(self) -> Any:
+    def _create_connection(self) -> MavlinkConnectionBackend:
         if self._connection_factory is not None:
             return self._connection_factory(self.endpoint)
         mavutil = self._load_mavutil()
@@ -312,7 +320,7 @@ class MavlinkConnection(Service):
             **self.endpoint.connection_kwargs(),
         )
 
-    def _load_mavutil(self) -> Any:
+    def _load_mavutil(self) -> MavutilModule:
         with self._lifecycle_lock:
             if self._mavutil_module is not None:
                 return self._mavutil_module
@@ -322,8 +330,8 @@ class MavlinkConnection(Service):
                 raise MavlinkUnavailableError(
                     "MAVLink kullanmak için pymavlink kurulmalı"
                 ) from exc
-            self._mavutil_module = mavutil
-            return mavutil
+            self._mavutil_module = cast(MavutilModule, mavutil)
+            return self._mavutil_module
 
     def _publish_error(self, error: Exception) -> None:
         self.errors.publish(error)

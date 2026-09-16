@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import Any
+from collections.abc import Callable
 
 from ..abstracts import Service
 from ..events import Subscription
@@ -9,6 +8,12 @@ from .connection import MavlinkConnection
 from .endpoint import MavlinkEndpoint
 from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
 from .router import MavlinkMessageRouter
+from .protocols import (
+    MavlinkConnectionBackend,
+    MavlinkDialect,
+    MavlinkMessage,
+    MavlinkRouterOptions,
+)
 
 
 class MavlinkClient(Service):
@@ -20,7 +25,7 @@ class MavlinkClient(Service):
         *,
         connection: MavlinkConnection | None = None,
         router: MavlinkMessageRouter | None = None,
-        router_options: Mapping[str, Any] | None = None,
+        router_options: MavlinkRouterOptions | None = None,
     ) -> None:
         if router is not None and router_options:
             raise ValueError("router_options cannot be used with a custom router")
@@ -43,7 +48,7 @@ class MavlinkClient(Service):
         return self.connection.endpoint
 
     @property
-    def raw(self) -> Any:
+    def raw(self) -> MavlinkConnectionBackend:
         return self.connection.raw
 
     @property
@@ -51,7 +56,7 @@ class MavlinkClient(Service):
         return self.connection.is_connected
 
     @property
-    def mavlink(self) -> Any:
+    def mavlink(self) -> MavlinkDialect:
         return self.connection.mavlink
 
     def start(self) -> None:
@@ -70,7 +75,7 @@ class MavlinkClient(Service):
 
     def subscribe(
         self,
-        callback: Callable[[Any], None],
+        callback: Callable[[MavlinkMessage], None],
         message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
     ) -> Subscription:
         return self.router.subscribe(callback, message_filter)
@@ -82,7 +87,7 @@ class MavlinkClient(Service):
         predicate: MessagePredicate | None = None,
         timeout: float = 3.0,
         after_sequence: int | None = None,
-    ) -> Any:
+    ) -> MavlinkMessage:
         return self.router.wait_for(
             message_types,
             predicate=predicate,
@@ -93,13 +98,13 @@ class MavlinkClient(Service):
     def latest(
         self,
         message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
-    ) -> Any | None:
+    ) -> MavlinkMessage | None:
         return self.router.latest(message_filter)
 
-    def send(self, message: Any) -> None:
+    def send(self, message: MavlinkMessage) -> None:
         self.connection.send(message)
 
-    def send_named(self, message_name: str, **parameters: Any) -> None:
+    def send_named(self, message_name: str, **parameters: object) -> None:
         self.connection.send_named(message_name, **parameters)
 
     def request_message_rate(
@@ -117,10 +122,10 @@ class MavlinkClient(Service):
             target_component=target_component,
         )
 
-    def call_mav(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    def call_mav(self, method_name: str, *args: object, **kwargs: object) -> object:
         return self.connection.call_mav(method_name, *args, **kwargs)
 
-    def call_raw(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    def call_raw(self, method_name: str, *args: object, **kwargs: object) -> object:
         return self.connection.call_raw(method_name, *args, **kwargs)
 
     def __enter__(self) -> "MavlinkClient":

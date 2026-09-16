@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import queue
 import threading
-import time
 import unittest
 from typing import Any
 from unittest.mock import Mock
@@ -90,6 +89,14 @@ class _RichMessage:
 
     def get_seq(self) -> int:
         return self._header.seq
+
+
+class _UnaddressedMessage(_RichMessage):
+    def get_srcSystem(self) -> None:
+        return None
+
+    def get_srcComponent(self) -> None:
+        return None
 
 
 class MessageCacheTests(unittest.TestCase):
@@ -369,6 +376,11 @@ class RouterContractTests(unittest.TestCase):
         router = MavlinkMessageRouter(connection, poll_timeout=0.01)
         accepted: list[tuple[int, str]] = []
         errors = []
+        error_seen = threading.Event()
+
+        def record_error(error: object) -> None:
+            errors.append(error)
+            error_seen.set()
 
         @router.add_filter
         def allowed_vehicle(envelope: MavlinkMessageEnvelope) -> bool:
@@ -382,7 +394,7 @@ class RouterContractTests(unittest.TestCase):
                 (message.get_srcSystem(), message.get_type())
             )
         )
-        router.errors.subscribe(errors.append)
+        router.errors.subscribe(record_error)
         router.start()
         try:
             connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=2, component=1))
@@ -398,9 +410,7 @@ class RouterContractTests(unittest.TestCase):
                 lambda _envelope: (_ for _ in ()).throw(ValueError("bad filter"))
             )
             connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=3, component=1))
-            deadline = time.monotonic() + 1
-            while not errors and time.monotonic() < deadline:
-                time.sleep(0.001)
+            self.assertTrue(error_seen.wait(1.0))
             self.assertEqual(errors[-1].phase, "filter")
             self.assertIsInstance(errors[-1].error, ValueError)
             self.assertIsNone(
@@ -424,6 +434,31 @@ class RouterContractTests(unittest.TestCase):
             connection.inbox.put(_RichMessage("HEARTBEAT", message_id=0, system=2, component=1, value=1))
             router.wait_for(MavlinkMessageFilter("HEARTBEAT", source_systems=2), timeout=1)
             self.assertEqual(received, [(1, 2)])
+        finally:
+            router.stop()
+
+    def test_native_conditions_do_not_share_state_between_unaddressed_messages(self) -> None:
+        connection = _RouterConnection()
+        router = MavlinkMessageRouter(connection, poll_timeout=0.01)
+        received: list[str] = []
+        router.subscribe(
+            lambda message: received.append(message.get_type()),
+            MavlinkMessageFilter(message_types="ATTITUDE", condition="value == 2"),
+        )
+        router.start()
+        try:
+            connection.inbox.put(
+                _UnaddressedMessage(
+                    "HEARTBEAT", message_id=0, system=0, component=0, value=2
+                )
+            )
+            connection.inbox.put(
+                _UnaddressedMessage(
+                    "ATTITUDE", message_id=30, system=0, component=0, value=0
+                )
+            )
+            router.wait_for("ATTITUDE", timeout=1)
+            self.assertEqual(received, [])
         finally:
             router.stop()
 
@@ -481,15 +516,21 @@ class RouterContractTests(unittest.TestCase):
             state_capacity=2,
             source_capacity=2,
         )
-        router.add_filter(lambda envelope: envelope.source_system != 9)
+        filtered = threading.Event()
+
+        def filter_system(envelope: MavlinkMessageEnvelope) -> bool:
+            if envelope.source_system == 9:
+                filtered.set()
+                return False
+            return True
+
+        router.add_filter(filter_system)
         router.start()
         for system, kind in ((1, "A"), (2, "B"), (3, "C"), (9, "D")):
             connection.inbox.put(
                 _RichMessage(kind, message_id=1, system=system, component=1)
             )
-        deadline = time.monotonic() + 1.0
-        while router.sequence < 4 and time.monotonic() < deadline:
-            time.sleep(0.005)
+        self.assertTrue(filtered.wait(1.0))
         stats = router.stats
         router.stop()
 
@@ -528,7 +569,6 @@ class RouterContractTests(unittest.TestCase):
                     value=value,
                 )
             )
-            time.sleep(0.002)
         waiter.join(1.0)
         router.stop()
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
-import time
 import unittest
+from unittest.mock import patch
 from collections.abc import Mapping
 
 from src.core.mavlink import application as application_module
@@ -129,12 +129,14 @@ class ApplicationCodecTests(unittest.TestCase):
         packet = MavlinkApplicationPacket("data.large", {"text": "x" * 1_000})
         fragments = MavlinkApplicationCodec.encode(packet)
         assembler = MavlinkApplicationAssembler(fragment_timeout=0.01)
-        assembler.accept(fragments[0])
-        key = (0, 0, packet.packet_id)
-        first_created = assembler._assemblies[key].created_monotonic
-
-        time.sleep(0.02)
-        self.assertIsNone(assembler.accept(fragments[1]))
+        with patch(
+            "src.core.mavlink.application.time.monotonic",
+            side_effect=(10.0, 10.02),
+        ):
+            assembler.accept(fragments[0])
+            key = (0, 0, packet.packet_id)
+            first_created = assembler._assemblies[key].created_monotonic
+            self.assertIsNone(assembler.accept(fragments[1]))
 
         self.assertGreater(assembler._assemblies[key].created_monotonic, first_created)
         self.assertNotIn(0, assembler._assemblies[key].fragments)

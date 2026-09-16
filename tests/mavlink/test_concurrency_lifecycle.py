@@ -505,10 +505,15 @@ class DispatcherLifecycleTests(unittest.TestCase):
         self.assertTrue(entered.wait(1.0))
         self.assertFalse(dispatcher.dispatch(second))
 
-        stopper = threading.Thread(target=dispatcher.stop)
+        stopped = threading.Event()
+
+        def stop_dispatcher() -> None:
+            dispatcher.stop()
+            stopped.set()
+
+        stopper = threading.Thread(target=stop_dispatcher)
         stopper.start()
-        time.sleep(0.02)
-        self.assertTrue(stopper.is_alive())
+        self.assertFalse(stopped.wait(0.02))
         release.set()
         stopper.join(1.0)
 

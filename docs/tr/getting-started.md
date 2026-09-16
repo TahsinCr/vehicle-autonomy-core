@@ -6,6 +6,9 @@
 
 Core, dependency, event ve mission özellikleri için:
 
+Python 3.10'da gereken standart kütüphane backport'ları paket metadata'sı
+üzerinden otomatik kurulur; daha yeni Python sürümleri kendi sınıflarını kullanır.
+
 ```bash
 python -m pip install .
 ```

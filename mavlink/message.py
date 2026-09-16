@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
-
 from .filter import (
     mavlink_message_id,
     mavlink_message_type,
     mavlink_source_component,
     mavlink_source_system,
 )
+from .protocols import JsonValue, MavlinkMessage
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +16,7 @@ class MavlinkMessageEnvelope:
     """Once-extracted routing metadata and the raw pymavlink message."""
 
     sequence: int
-    message: Any
+    message: MavlinkMessage
     message_type: str
     source_system: int | None
     source_component: int | None
@@ -26,7 +25,7 @@ class MavlinkMessageEnvelope:
     received_at: float
 
     @classmethod
-    def wrap(cls, sequence: int, message: Any) -> "MavlinkMessageEnvelope":
+    def wrap(cls, sequence: int, message: MavlinkMessage) -> "MavlinkMessageEnvelope":
         received_at = time.time()
         received_monotonic = time.monotonic()
         return cls(
@@ -40,8 +39,8 @@ class MavlinkMessageEnvelope:
             received_at=received_at,
         )
 
-    def to_dict(self, *, include_payload: bool = False) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def to_dict(self, *, include_payload: bool = False) -> dict[str, JsonValue]:
+        payload: dict[str, JsonValue] = {
             "sequence": self.sequence,
             "message_type": self.message_type,
             "source_system": self.source_system,

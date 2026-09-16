@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from ..abstracts import _copy_model_value, _freeze_model_value
 from ..compatibility import StrEnum
-from typing import Any
+from .protocols import JsonValue
 
 REMOTE_LOG_PACKET_TYPE = "logs.push"
 REMOTE_LOG_PROTOCOL_VERSION = 1
@@ -48,7 +48,7 @@ class MavlinkRemoteLogRecord:
     message: str
     level: MavlinkRemoteLogLevel = MavlinkRemoteLogLevel.INFO
     emitted_at: float = field(default_factory=time.time)
-    details: Mapping[str, Any] = field(default_factory=dict)
+    details: Mapping[str, JsonValue] = field(default_factory=dict)
     device_id: str | None = None
     correlation_id: str | None = None
 
@@ -95,8 +95,8 @@ class MavlinkRemoteLogRecord:
         object.__setattr__(self, "device_id", device_id)
         object.__setattr__(self, "correlation_id", correlation_id)
 
-    def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def to_payload(self) -> dict[str, JsonValue]:
+        payload: dict[str, JsonValue] = {
             "seq": self.sequence,
             "source": self.source,
             "action": self.action,
@@ -112,7 +112,9 @@ class MavlinkRemoteLogRecord:
         return payload
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "MavlinkRemoteLogRecord":
+    def from_payload(
+        cls, payload: Mapping[str, JsonValue]
+    ) -> "MavlinkRemoteLogRecord":
         if not isinstance(payload, Mapping):
             raise ValueError("Remote log record payload must be an object")
         details = payload.get("details", {})
@@ -180,7 +182,7 @@ class MavlinkRemoteLogBatch:
     def last_sequence(self) -> int:
         return self.records[-1].sequence
 
-    def to_payload(self) -> dict[str, Any]:
+    def to_payload(self) -> dict[str, JsonValue]:
         return {
             "version": REMOTE_LOG_PROTOCOL_VERSION,
             "session": self.session_id,
@@ -189,7 +191,9 @@ class MavlinkRemoteLogBatch:
         }
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "MavlinkRemoteLogBatch":
+    def from_payload(
+        cls, payload: Mapping[str, JsonValue]
+    ) -> "MavlinkRemoteLogBatch":
         if not isinstance(payload, Mapping):
             raise ValueError("Remote log batch payload must be an object")
         version = int(payload.get("version", 0))

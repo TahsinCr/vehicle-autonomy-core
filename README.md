@@ -28,7 +28,8 @@ decisions belong in the application using the core.
 
 ## Requirements and installation
 
-Python 3.10 or newer is required. `pymavlink` is optional and is only needed
+Python 3.10 or newer is required. Standard-library backports required by
+Python 3.10 are installed automatically. `pymavlink` is optional and is only needed
 when opening a real MAVLink connection.
 
 ```bash

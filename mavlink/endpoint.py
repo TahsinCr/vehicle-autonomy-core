@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
-
-
 @dataclass(frozen=True, slots=True)
 class MavlinkEndpoint:
     uri: str = "udp:127.0.0.1:14550"
@@ -62,12 +59,50 @@ class MavlinkEndpoint:
         }
 
     @classmethod
-    def tcp(cls, host: str, port: int, **options: Any) -> "MavlinkEndpoint":
-        return cls(uri=cls._network_uri("tcp", host, port), **options)
+    def tcp(
+        cls,
+        host: str,
+        port: int,
+        *,
+        baud: int = 115200,
+        source_system: int = 255,
+        source_component: int = 0,
+        dialect: str = "ardupilotmega",
+        autoreconnect: bool = True,
+        heartbeat_timeout: float = 10.0,
+    ) -> "MavlinkEndpoint":
+        return cls(
+            uri=cls._network_uri("tcp", host, port),
+            baud=baud,
+            source_system=source_system,
+            source_component=source_component,
+            dialect=dialect,
+            autoreconnect=autoreconnect,
+            heartbeat_timeout=heartbeat_timeout,
+        )
 
     @classmethod
-    def udp(cls, host: str, port: int, **options: Any) -> "MavlinkEndpoint":
-        return cls(uri=cls._network_uri("udp", host, port), **options)
+    def udp(
+        cls,
+        host: str,
+        port: int,
+        *,
+        baud: int = 115200,
+        source_system: int = 255,
+        source_component: int = 0,
+        dialect: str = "ardupilotmega",
+        autoreconnect: bool = True,
+        heartbeat_timeout: float = 10.0,
+    ) -> "MavlinkEndpoint":
+        return cls(
+            uri=cls._network_uri("udp", host, port),
+            baud=baud,
+            source_system=source_system,
+            source_component=source_component,
+            dialect=dialect,
+            autoreconnect=autoreconnect,
+            heartbeat_timeout=heartbeat_timeout,
+        )
 
     @classmethod
     def serial(
@@ -75,9 +110,21 @@ class MavlinkEndpoint:
         device: str,
         *,
         baud: int = 115200,
-        **options: Any,
+        source_system: int = 255,
+        source_component: int = 0,
+        dialect: str = "ardupilotmega",
+        autoreconnect: bool = True,
+        heartbeat_timeout: float = 10.0,
     ) -> "MavlinkEndpoint":
-        return cls(uri=device.strip(), baud=baud, **options)
+        return cls(
+            uri=device.strip(),
+            baud=baud,
+            source_system=source_system,
+            source_component=source_component,
+            dialect=dialect,
+            autoreconnect=autoreconnect,
+            heartbeat_timeout=heartbeat_timeout,
+        )
 
     @staticmethod
     def _network_uri(scheme: str, host: str, port: int) -> str:

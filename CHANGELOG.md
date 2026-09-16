@@ -6,6 +6,23 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Replaced local Python 3.10 `StrEnum` and `ExceptionGroup` implementations
+  with conditional, maintained backports while keeping one compatibility import
+  boundary. Python 3.11 and newer continue to use the standard library.
+- Strengthened static analysis for invalid calls, operators and
+  optional-member access without widening the public API.
+- Clarified internal callback, async delivery, runtime lifecycle and
+  normalized mission-node types at their ownership boundaries.
+- Corrected public mission execution forward references so IDEs and static
+  analyzers resolve complete union types. Runtime behavior is unchanged.
+- Added structural MAVLink protocols for messages, source metadata, custom
+  connection backends, dialects and targeted/application messages. Public
+  telemetry callbacks now expose `MavlinkMessage`, and JSON payload APIs use a
+  recursive `JsonValue` contract instead of unbounded `Any`.
+- Typed router, application-channel and peer option dictionaries now expose
+  their supported keys to editors without adding runtime wrapper objects.
+- Replaced open-ended endpoint constructor keyword types with explicit serial,
+  TCP and UDP option signatures.
 - Public API compatibility checks now retain public enum member names and
   serialized values, plus setter/deleter signatures when a property exposes
   them.
@@ -14,12 +31,20 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Keep MAVLink packets without source identifiers out of source-local
+  condition state so unrelated unaddressed packets cannot share condition data.
+- Preserve event-history narrowing across subscription setup and align the
+  application dispatcher callback with the event bus's no-return contract.
 - Keep mission-originated matching terminal commands non-blocking during
   cleanup while making independent engine callers wait for the committed
   terminal snapshot instead of receiving an intermediate `STOPPING` state.
 
 ### Tests
 
+- Replaced timing sleeps with explicit events or mocked monotonic time in
+  dependency initialization, mission retry and MAVLink router/assembler tests.
+- Added regression coverage for condition evaluation across unaddressed
+  MAVLink messages.
 - Added deterministic coverage for matching external terminal commands during
   cleanup and removed the timing sleep from terminal-worker unregister
   verification.

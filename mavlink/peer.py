@@ -5,7 +5,6 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any
 
 from ..abstracts import Service
 from ..events import EventBus, Subscription
@@ -13,10 +12,11 @@ from .application import (
     MavlinkApplicationChannel,
     MavlinkApplicationPacket,
 )
+from .protocols import JsonValue
 
 
 TargetValue = int | Callable[[], int]
-PayloadFactory = Mapping[str, Any] | Callable[[], Mapping[str, Any]]
+PayloadFactory = Mapping[str, JsonValue] | Callable[[], Mapping[str, JsonValue]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +229,7 @@ class MavlinkApplicationPeer(Service):
     def send(
         self,
         packet_type: str,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
         *,
         packet_id: int | None = None,
         target_system: int | None = None,
@@ -276,7 +276,7 @@ class MavlinkApplicationPeer(Service):
     def request(
         self,
         packet_type: str,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
         *,
         response_types: str | tuple[str, ...] | frozenset[str],
         timeout: float,
@@ -387,7 +387,7 @@ class MavlinkApplicationPeer(Service):
                 if packet.packet_type == "system.pong" and response_to is not None
                 else None
             )
-            if probe is not None and (
+            if response_to is not None and probe is not None and (
                 packet.source_system == probe.source_system
                 and packet.source_component == probe.source_component
             ):
@@ -530,12 +530,12 @@ class MavlinkApplicationPeer(Service):
         with self._lock:
             if not self._state.running:
                 return
-        self._update_state(last_error=str(error))
+        self._update_last_error(str(error))
         self.errors.publish(error)
 
-    def _update_state(self, **changes: Any) -> None:
+    def _update_last_error(self, last_error: str) -> None:
         with self._lock:
-            updated = replace(self._state, **changes)
+            updated = replace(self._state, last_error=last_error)
             if updated == self._state:
                 return
             self._state = updated
@@ -549,7 +549,7 @@ class MavlinkApplicationPeer(Service):
                 if packet_id not in self._pending and packet_id not in self._probes:
                     return packet_id
 
-    def _payload(self) -> Mapping[str, Any]:
+    def _payload(self) -> Mapping[str, JsonValue]:
         payload = (
             self._heartbeat_payload()
             if callable(self._heartbeat_payload)

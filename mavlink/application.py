@@ -9,7 +9,7 @@ import time
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import cast
 
 from ..abstracts import Service, _copy_model_value, _freeze_model_value
 from ..events import EventBus, Subscription
@@ -19,6 +19,7 @@ from .filter import (
     mavlink_source_component,
     mavlink_source_system,
 )
+from .protocols import JsonValue, MavlinkMessage, MavlinkV2ExtensionMessage
 
 
 V2_EXTENSION_PAYLOAD_SIZE = 249
@@ -58,7 +59,7 @@ class MavlinkApplicationPacket:
     """Extensible application packet independent from MAVLink transport."""
 
     packet_type: str
-    payload: Mapping[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, JsonValue] = field(default_factory=dict)
     packet_id: int = field(default_factory=lambda: secrets.randbits(32) or 1)
     sent_at: float = field(default_factory=time.time)
     source_system: int | None = None
@@ -98,7 +99,7 @@ class MavlinkApplicationPacket:
         object.__setattr__(self, "source_component", source_component)
         object.__setattr__(self, "expects_response", bool(self.expects_response))
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JsonValue]:
         return {
             "packet_type": self.packet_type,
             "payload": _copy_model_value(self.payload, lists=True),
@@ -460,7 +461,7 @@ class MavlinkApplicationChannel(Service):
     def send(
         self,
         packet_type: str,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
         *,
         packet_id: int | None = None,
         target_system: int | None = None,
@@ -489,24 +490,26 @@ class MavlinkApplicationChannel(Service):
             )
         return packet
 
-    def _matches_channel(self, message: Any) -> bool:
+    def _matches_channel(self, message: MavlinkMessage) -> bool:
+        extension = cast(MavlinkV2ExtensionMessage, message)
         try:
-            if int(message.target_network) != self.network_id:
+            if int(extension.target_network) != self.network_id:
                 return False
-            if int(message.message_type) != self.message_type:
+            if int(extension.message_type) != self.message_type:
                 return False
-            if int(message.target_system) not in {0, self.local_system}:
+            if int(extension.target_system) not in {0, self.local_system}:
                 return False
-            return int(message.target_component) in {0, self.local_component}
+            return int(extension.target_component) in {0, self.local_component}
         except (AttributeError, TypeError, ValueError):
             return False
 
-    def _on_message(self, message: Any) -> None:
+    def _on_message(self, message: MavlinkMessage) -> None:
+        extension = cast(MavlinkV2ExtensionMessage, message)
         try:
             packet = self._assembler.accept(
-                message.payload,
-                source_system=mavlink_source_system(message),
-                source_component=mavlink_source_component(message),
+                extension.payload,
+                source_system=mavlink_source_system(extension),
+                source_component=mavlink_source_component(extension),
             )
         except Exception as exc:
             self.errors.publish(exc)

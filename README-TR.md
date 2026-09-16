@@ -27,7 +27,8 @@ kutusudur. Guidance, navigation, payload mantığı, görüntü işleme, UI ve �
 
 ## Gereksinimler ve kurulum
 
-Python 3.10 veya daha yeni bir sürüm gerekir. `pymavlink` opsiyoneldir ve yalnızca
+Python 3.10 veya daha yeni bir sürüm gerekir. Python 3.10 için gereken standart
+kütüphane backport'ları otomatik kurulur. `pymavlink` opsiyoneldir ve yalnızca
 gerçek bir MAVLink bağlantısı açılırken kullanılır.
 
 ```bash

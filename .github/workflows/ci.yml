@@ -18,13 +18,13 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.10"
           cache: pip
       - run: python -m pip install ".[quality]"
       - name: Ruff correctness checks
         run: ruff check .
       - name: Pyright baseline
-        run: pyright
+        run: pyright --pythonpath "$(command -v python)"
       - name: Enforce patch API compatibility
         shell: bash
         run: |
@@ -50,6 +50,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install project and version-specific dependencies
+        run: python -m pip install .
       - name: Run unit tests
         run: python run_tests.py
       - name: Compile sources

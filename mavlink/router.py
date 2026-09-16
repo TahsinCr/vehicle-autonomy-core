@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ..abstracts import Service
 from ..events import EventBus, Subscription
@@ -19,6 +19,7 @@ from .filter import (
     coerce_message_filter,
 )
 from .message import MavlinkMessageEnvelope
+from .protocols import MavlinkMessage
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +48,7 @@ class MavlinkRouterError:
 @dataclass(slots=True)
 class _Route:
     message_filter: MavlinkMessageFilter
-    callback: Callable[[Any], None]
+    callback: Callable[[MavlinkMessage], None]
 
 
 MavlinkIngressFilter = Callable[[MavlinkMessageEnvelope], bool]
@@ -87,10 +88,10 @@ class MavlinkMessageRouter(Service):
             ):
                 raise ValueError(f"{name} must be a positive integer or None")
         self.connection = connection
-        self.messages = EventBus[Any]()
+        self.messages = EventBus[MavlinkMessage]()
         self.envelopes = EventBus[MavlinkMessageEnvelope]()
         self.errors = EventBus[MavlinkRouterError]()
-        self.cache = MessageCache[Any, str](
+        self.cache = MessageCache[MavlinkMessage, str](
             lambda message: str(message.get_type()).upper(),
             per_key_limit=cache_per_type,
             max_keys=state_capacity,
@@ -120,7 +121,9 @@ class MavlinkMessageRouter(Service):
         self._state_evictions = 0
         self._estimated_dropped_messages = 0
         self._source_sequences: dict[tuple[int, int], int] = {}
-        self._source_message_state: OrderedDict[tuple[int | None, int | None], dict[str, Any]] = OrderedDict()
+        self._source_message_state: OrderedDict[
+            tuple[int, int], dict[str, MavlinkMessage]
+        ] = OrderedDict()
         self._delivery_window: deque[tuple[int, int]] = deque(maxlen=256)
         self._started_monotonic: float | None = None
         self._last_message_monotonic: float | None = None
@@ -229,7 +232,7 @@ class MavlinkMessageRouter(Service):
 
     def subscribe(
         self,
-        callback: Callable[[Any], None],
+        callback: Callable[[MavlinkMessage], None],
         message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
     ) -> Subscription:
         """Bind a callback with type, source, component, ID and condition filters."""
@@ -262,23 +265,35 @@ class MavlinkMessageRouter(Service):
     def latest(
         self,
         message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
-    ) -> Any | None:
+    ) -> MavlinkMessage | None:
         normalized_filter = coerce_message_filter(message_filter)
         self._reject_historical_condition(normalized_filter)
+        message_types = cast(
+            frozenset[str] | None,
+            normalized_filter.message_types,
+        )
+        source_systems = cast(
+            frozenset[int] | None,
+            normalized_filter.source_systems,
+        )
+        source_components = cast(
+            frozenset[int] | None,
+            normalized_filter.source_components,
+        )
         with self._condition:
             if (
-                normalized_filter.message_types is not None
-                and len(normalized_filter.message_types) == 1
-                and normalized_filter.source_systems is not None
-                and len(normalized_filter.source_systems) == 1
-                and normalized_filter.source_components is not None
-                and len(normalized_filter.source_components) == 1
+                message_types is not None
+                and len(message_types) == 1
+                and source_systems is not None
+                and len(source_systems) == 1
+                and source_components is not None
+                and len(source_components) == 1
             ):
                 envelope = self._latest.get(
                     (
-                        next(iter(normalized_filter.source_systems)),
-                        next(iter(normalized_filter.source_components)),
-                        next(iter(normalized_filter.message_types)),
+                        next(iter(source_systems)),
+                        next(iter(source_components)),
+                        next(iter(message_types)),
                     )
                 )
                 candidates = () if envelope is None else (envelope,)
@@ -317,7 +332,7 @@ class MavlinkMessageRouter(Service):
         predicate: MessagePredicate | None = None,
         timeout: float = 3.0,
         after_sequence: int | None = None,
-    ) -> Any:
+    ) -> MavlinkMessage:
         if timeout <= 0:
             raise ValueError("MAVLink wait timeout pozitif olmalı")
         message_filter = coerce_message_filter(message_types)
@@ -395,26 +410,31 @@ class MavlinkMessageRouter(Service):
                         self._state_evictions += 1
                     self._latest[latest_key] = envelope
 
-                    source_key = (envelope.source_system, envelope.source_component)
-                    state = self._source_message_state.get(source_key)
-                    if state is None:
-                        if (
-                            self._source_capacity is not None
-                            and len(self._source_message_state) >= self._source_capacity
-                        ):
-                            expired_source, _ = self._source_message_state.popitem(last=False)
-                            self._source_sequences.pop(expired_source, None)
-                            expired_latest = tuple(
-                                key for key in self._latest if key[:2] == expired_source
-                            )
-                            for key in expired_latest:
-                                self._latest.pop(key, None)
-                            self._state_evictions += 1 + len(expired_latest)
-                        state = {}
-                        self._source_message_state[source_key] = state
-                    else:
-                        self._source_message_state.move_to_end(source_key)
-                    state[envelope.message_type] = envelope.message
+                    source_system = envelope.source_system
+                    source_component = envelope.source_component
+                    if source_system is not None and source_component is not None:
+                        source_key = (source_system, source_component)
+                        state = self._source_message_state.get(source_key)
+                        if state is None:
+                            if (
+                                self._source_capacity is not None
+                                and len(self._source_message_state) >= self._source_capacity
+                            ):
+                                expired_source, _ = self._source_message_state.popitem(
+                                    last=False
+                                )
+                                self._source_sequences.pop(expired_source, None)
+                                expired_latest = tuple(
+                                    key for key in self._latest if key[:2] == expired_source
+                                )
+                                for key in expired_latest:
+                                    self._latest.pop(key, None)
+                                self._state_evictions += 1 + len(expired_latest)
+                            state = {}
+                            self._source_message_state[source_key] = state
+                        else:
+                            self._source_message_state.move_to_end(source_key)
+                        state[envelope.message_type] = envelope.message
                     self._received_messages += 1
                     self._record_delivery(envelope)
                     self._last_message_monotonic = envelope.received_monotonic
@@ -471,11 +491,12 @@ class MavlinkMessageRouter(Service):
         return round(received / total * 100.0) if total else None
 
     @staticmethod
-    def _message_sequence(message: Any) -> int | None:
+    def _message_sequence(message: MavlinkMessage) -> int | None:
         getter = getattr(message, "get_seq", None)
         if callable(getter):
             try:
-                return int(getter()) & 0xFF
+                value: Any = getter()
+                return int(value) & 0xFF
             except (TypeError, ValueError):
                 return None
         header = getattr(message, "_header", None)
@@ -504,17 +525,14 @@ class MavlinkMessageRouter(Service):
         def evaluate(condition: str) -> bool:
             if condition not in condition_results:
                 with self._condition:
-                    state = dict(
-                        self._source_message_state.get(
-                            (envelope.source_system, envelope.source_component), {}
-                        )
-                    )
+                    state = self._source_state_snapshot(envelope)
                 evaluator = getattr(self.connection, "evaluate_condition_for_state", None)
-                condition_results[condition] = (
+                result = (
                     evaluator(condition, state)
                     if callable(evaluator)
                     else self.connection.evaluate_condition(condition)
                 )
+                condition_results[condition] = bool(result)
             return condition_results[condition]
 
         for route in candidates:
@@ -535,11 +553,7 @@ class MavlinkMessageRouter(Service):
     ) -> bool:
         try:
             with self._condition:
-                state = dict(
-                    self._source_message_state.get(
-                        (envelope.source_system, envelope.source_component), {}
-                    )
-                )
+                state = self._source_state_snapshot(envelope)
             return message_filter.matches(
                 envelope.message,
                 condition_evaluator=lambda condition: self._evaluate_condition(
@@ -551,7 +565,19 @@ class MavlinkMessageRouter(Service):
             self._record_dispatch_error(exc, envelope)
             return False
 
-    def _evaluate_condition(self, condition: str, state: dict[str, Any]) -> bool:
+    def _source_state_snapshot(
+        self,
+        envelope: MavlinkMessageEnvelope,
+    ) -> dict[str, MavlinkMessage]:
+        source_system = envelope.source_system
+        source_component = envelope.source_component
+        if source_system is None or source_component is None:
+            return {}
+        return dict(self._source_message_state.get((source_system, source_component), {}))
+
+    def _evaluate_condition(
+        self, condition: str, state: dict[str, MavlinkMessage]
+    ) -> bool:
         evaluator = getattr(self.connection, "evaluate_condition_for_state", None)
         if callable(evaluator):
             return bool(evaluator(condition, state))

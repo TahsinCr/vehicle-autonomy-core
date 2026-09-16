@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from .base import Mission
@@ -48,9 +48,10 @@ class MissionParallelExecutor:
         if not isinstance(group, MissionParallelGroup):
             raise TypeError("Parallel execution requires MissionParallelGroup")
         execution_id = uuid4().hex
+        nodes = cast(tuple[MissionNode, ...], group.nodes)
         missions = tuple(
             (node, self.orchestrator.mission_for(node))
-            for node in group.nodes
+            for node in nodes
         )
         self._validate_conflicts(missions)
         registered: list[Mission] = []

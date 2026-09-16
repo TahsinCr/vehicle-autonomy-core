@@ -3,7 +3,11 @@
 from collections import deque
 from collections.abc import Callable
 import threading
-from typing import Any
+from typing import TypeVar, cast
+
+
+_EventT = TypeVar("_EventT")
+_Callback = Callable[[object], object]
 
 
 class CallbackWorker:
@@ -18,8 +22,8 @@ class CallbackWorker:
         self.on_failure: Callable[[Exception], None] | None = None
         self.dropped = 0
         self._condition = threading.Condition()
-        self._queue: deque[tuple[Callable, Any]] = deque()
-        self._actions: deque[tuple[Callable, Any]] = deque()
+        self._queue: deque[tuple[_Callback, object]] = deque()
+        self._actions: deque[tuple[_Callback, object]] = deque()
         self._thread: threading.Thread | None = None
         self._running = False
         self._busy = False
@@ -40,7 +44,13 @@ class CallbackWorker:
         if self.failure is not None:
             raise RuntimeError("Callback delivery failed; stop before restarting") from self.failure
 
-    def submit(self, callback: Callable, event: Any, *, action: bool = False) -> None:
+    def submit(
+        self,
+        callback: Callable[[_EventT], object],
+        event: _EventT,
+        *,
+        action: bool = False,
+    ) -> None:
         with self._condition:
             if not self._running or self.failure is not None:
                 return
@@ -52,7 +62,7 @@ class CallbackWorker:
                     return
                 queue.popleft()
                 self.dropped += 1
-            queue.append((callback, event))
+            queue.append((cast(_Callback, callback), event))
             self._condition.notify()
 
     def _run(self) -> None:

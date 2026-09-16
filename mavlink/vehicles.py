@@ -9,10 +9,15 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TypeVar, cast
 
 from .actions import MavlinkAction, MavlinkActions
 from .message import MavlinkMessageEnvelope
+from .protocols import TargetedMavlinkMessage
+
+
+_ResultT = TypeVar("_ResultT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +37,7 @@ class MavlinkCollection(MavlinkActions):
         self._worker = getattr(registry.runtime, "_worker", None)
         self._registry = registry
         self._owner = owner
-        self._items: dict[int, Any] = {}
+        self._items: dict[int, MavlinkVehicle | MavlinkComponent] = {}
 
     def __iter__(self):
         with self._registry.condition:
@@ -53,8 +58,10 @@ class MavlinkCollection(MavlinkActions):
         if isinstance(component_id, bool) or not isinstance(component_id, int) or not 1 <= component_id <= 255:
             raise ValueError("Component ID must be an integer from 1 to 255")
         with self._registry.condition:
+            vehicles = cast(tuple[MavlinkVehicle, ...], tuple(self._items.values()))
             return tuple(
-                component for vehicle in self._items.values()
+                component
+                for vehicle in vehicles
                 if (component := vehicle._components._items.get(component_id)) is not None
             )
 
@@ -126,11 +133,13 @@ class _MavlinkNode(MavlinkActions):
         self._component_id = component_id
         self._is_autopilot = False
         self._connected = False
-        self._last_seen = None
-        self._last_observed = None
-        self._history = deque(maxlen=registry.history_capacity)
+        self._last_seen: float | None = None
+        self._last_observed: float | None = None
+        self._history: deque[MavlinkMessageEnvelope] = deque(
+            maxlen=registry.history_capacity
+        )
         self._worker = getattr(registry.runtime, "_worker", None)
-        self._latest = {}
+        self._latest: dict[str, MavlinkMessageEnvelope] = {}
 
     @property
     def vehicle(self):
@@ -153,12 +162,14 @@ class _MavlinkNode(MavlinkActions):
                 self._last_observed,
             )
 
-    def latest(self, message_type: str):
+    def latest(self, message_type: str) -> MavlinkMessageEnvelope | None:
         normalized = message_type.strip().upper()
         with self._registry.condition:
             return self._latest.get(normalized)
 
-    def history(self, message_type: str | None = None):
+    def history(
+        self, message_type: str | None = None
+    ) -> tuple[MavlinkMessageEnvelope, ...]:
         with self._registry.condition:
             result = tuple(self._history)
         if message_type is None:
@@ -175,7 +186,8 @@ class _MavlinkNode(MavlinkActions):
             if self._delivery is not None:
                 self._delivery.raise_if_failed()
             if self.vehicle is self:
-                target = self._components._items.get(self.component_id)
+                vehicle = cast("MavlinkVehicle", self)
+                target = vehicle._components._items.get(self.component_id)
                 if target is None or not target._connected:
                     raise RuntimeError("No live autopilot component has been discovered")
             return self.component_id
@@ -189,7 +201,7 @@ class _MavlinkNode(MavlinkActions):
             target_component=target, **parameters,
         )
 
-    def send(self, message):
+    def send(self, message: TargetedMavlinkMessage) -> None:
         """Send a detached targeted message without changing caller-owned data."""
         target = self._target()
         if not hasattr(message, "target_system") or not hasattr(message, "target_component"):
@@ -395,18 +407,21 @@ class VehicleRegistry:
         self.running = False
         self.waiters = {}
         self.message_waiters = {}
-        self.async_io = None
+        self.async_io: (
+            Callable[[Callable[[], object]], Awaitable[object]] | None
+        ) = None
         self._stop = threading.Event()
         self._monitor = None
         self._subscription = None
 
-    async def run_io(self, operation):
+    async def run_io(self, operation: Callable[[], _ResultT]) -> _ResultT:
         """Run scoped blocking I/O under the async runtime's ownership."""
 
         runner = self.async_io
         if runner is None:
             return await asyncio.to_thread(operation)
-        return await runner(operation)
+        erased = cast(Callable[[], object], operation)
+        return cast(_ResultT, await runner(erased))
 
     def start(self):
         with self.condition:
@@ -521,11 +536,19 @@ class VehicleRegistry:
         with self.condition:
             if not self.running:
                 return
-            for vehicle in self.vehicles._items.values():
+            vehicles = cast(
+                tuple[MavlinkVehicle, ...], tuple(self.vehicles._items.values())
+            )
+            for vehicle in vehicles:
                 for endpoint, collection in ((vehicle, self.vehicles), *(
                     (component, vehicle._components) for component in vehicle._components._items.values()
                 )):
-                    if endpoint._connected and now - endpoint._last_seen >= self.timeout:
+                    last_seen = endpoint._last_seen
+                    if (
+                        endpoint._connected
+                        and last_seen is not None
+                        and now - last_seen >= self.timeout
+                    ):
                         endpoint._connected = False
                         component = None if endpoint is vehicle else endpoint
                         actions.extend((scope, vehicle, component) for scope in (endpoint, collection))

@@ -4,12 +4,12 @@ import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
 
 from ..abstracts import Service, _copy_model_value, _freeze_model_value
 from ..events import EventBus, Subscription
 from .application import MavlinkApplicationPacket
 from .peer import MavlinkApplicationPeer
+from .protocols import JsonValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,7 @@ class MavlinkApplicationResult:
 
     accepted: bool = True
     message: str = ""
-    payload: Mapping[str, Any] = field(default_factory=dict)
+    payload: Mapping[str, JsonValue] = field(default_factory=dict)
     response_type: str = ""
 
     def __post_init__(self) -> None:
@@ -33,7 +33,7 @@ class MavlinkApplicationResult:
     @classmethod
     def success(
         cls,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
         *,
         message: str = "Command accepted",
     ) -> "MavlinkApplicationResult":
@@ -43,7 +43,7 @@ class MavlinkApplicationResult:
     def failure(
         cls,
         message: str,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
     ) -> "MavlinkApplicationResult":
         return cls(False, message, dict(payload or {}))
 
@@ -58,7 +58,7 @@ class MavlinkApplicationDispatch:
 
 MavlinkApplicationHandler = Callable[
     [MavlinkApplicationPacket],
-    MavlinkApplicationResult | Mapping[str, Any] | None,
+    MavlinkApplicationResult | Mapping[str, JsonValue] | None,
 ]
 
 
@@ -179,7 +179,10 @@ class MavlinkApplicationDispatcher(Service):
                 max_workers=self._workers,
                 thread_name_prefix=self._thread_name,
             )
-            self._subscription = self._peer.packets.subscribe(self.dispatch)
+            self._subscription = self._peer.packets.subscribe(self._receive_packet)
+
+    def _receive_packet(self, packet: MavlinkApplicationPacket) -> None:
+        self.dispatch(packet)
 
     def stop(self) -> None:
         with self._lock:

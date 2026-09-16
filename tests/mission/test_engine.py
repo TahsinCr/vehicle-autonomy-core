@@ -888,12 +888,15 @@ class MissionEngineLifecycleTests(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.starts = 0
+                self.restarted = threading.Event()
                 self.cleanup_fails = True
 
             def start(self) -> None:
                 self.starts += 1
                 if self.starts == 1:
                     self.fail("tracking lost", retryable=True)
+                else:
+                    self.restarted.set()
 
             def stop(self) -> None:
                 if self.cleanup_fails:
@@ -906,6 +909,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         queued = self.engine.retry_cleanup(mission)
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
         wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
+        self.assertTrue(mission.restarted.wait(1.0))
         self.assertEqual(mission.starts, 2)
 
     def test_uncaught_exception_intent_survives_cleanup_failure(self) -> None:
@@ -915,12 +919,14 @@ class MissionEngineLifecycleTests(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.starts = 0
+                self.restarted = threading.Event()
                 self.cleanup_fails = True
 
             def start(self) -> None:
                 self.starts += 1
                 if self.starts == 1:
                     raise RuntimeError("pipeline failed")
+                self.restarted.set()
 
             def stop(self) -> None:
                 if self.cleanup_fails:
@@ -934,6 +940,7 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         queued = self.engine.retry_cleanup(mission)
         self.assertEqual(queued.phase, MissionPhase.QUEUED)
         wait_for_phase(self.engine, mission, MissionPhase.RUNNING)
+        self.assertTrue(mission.restarted.wait(1.0))
         self.assertEqual(mission.starts, 2)
 
     def test_tick_exception_intent_survives_cleanup_failure(self) -> None:
@@ -1433,12 +1440,18 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertTrue(mission.tick_entered.wait(1.0))
 
         stopped: list[MissionSnapshot] = []
+        stop_finished = threading.Event()
+
+        def stop_mission() -> None:
+            stopped.append(self.engine.stop_mission(mission))
+            stop_finished.set()
+
         stopper = threading.Thread(
-            target=lambda: stopped.append(self.engine.stop_mission(mission))
+            target=stop_mission
         )
         stopper.start()
-        time.sleep(0.02)
 
+        self.assertFalse(stop_finished.wait(0.02))
         self.assertFalse(mission.stop_entered.is_set())
         mission.release_tick.set()
         stopper.join(1.0)
@@ -1452,10 +1465,16 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertTrue(mission.tick_entered.wait(1.0))
 
         paused: list[MissionSnapshot] = []
-        pauser = threading.Thread(target=lambda: paused.append(self.engine.pause(mission)))
-        pauser.start()
-        time.sleep(0.02)
+        pause_finished = threading.Event()
 
+        def pause_mission() -> None:
+            paused.append(self.engine.pause(mission))
+            pause_finished.set()
+
+        pauser = threading.Thread(target=pause_mission)
+        pauser.start()
+
+        self.assertFalse(pause_finished.wait(0.02))
         self.assertFalse(mission.pause_entered.is_set())
         mission.release_tick.set()
         pauser.join(1.0)

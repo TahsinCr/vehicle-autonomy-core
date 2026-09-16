@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, cast, overload
+from typing import Any, Protocol, cast, overload
 
 from ..abstracts import Service
 from ..compatibility import ExceptionGroup
@@ -23,6 +23,13 @@ from .message import MavlinkMessageEnvelope
 from .delivery import CallbackWorker
 from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
 from .peer import MavlinkApplicationPeer, MavlinkApplicationResponse
+from .protocols import (
+    JsonValue,
+    MavlinkApplicationChannelOptions,
+    MavlinkApplicationPeerOptions,
+    MavlinkMessage,
+    MavlinkRouterOptions,
+)
 from .router import MavlinkIngressFilter, MavlinkRouterStats
 from .actions import MavlinkAction, MavlinkActions
 from .vehicles import VehicleRegistry
@@ -45,6 +52,10 @@ class MavlinkRuntimeState:
     router: MavlinkRouterStats
 
 
+class _Stoppable(Protocol):
+    def stop(self) -> None: ...
+
+
 class MavlinkRuntime(MavlinkActions, Service):
     """Offer one lifecycle and a small API for telemetry and application data."""
 
@@ -55,15 +66,15 @@ class MavlinkRuntime(MavlinkActions, Service):
         endpoint: MavlinkEndpoint | None = None,
         *,
         client: MavlinkClient | None = None,
-        router_options: Mapping[str, Any] | None = None,
+        router_options: MavlinkRouterOptions | None = None,
         application_role: str | None = None,
         channel: MavlinkApplicationChannel | None = None,
         peer: MavlinkApplicationPeer | None = None,
         dispatcher: MavlinkApplicationDispatcher | None = None,
         workers: int = 1,
         max_pending: int = 64,
-        channel_options: Mapping[str, Any] | None = None,
-        peer_options: Mapping[str, Any] | None = None,
+        channel_options: MavlinkApplicationChannelOptions | None = None,
+        peer_options: MavlinkApplicationPeerOptions | None = None,
         heartbeat_timeout: float = 5.0,
         vehicle_history: int = 128,
         vehicle_state_retention: float | None = None,
@@ -155,7 +166,11 @@ class MavlinkRuntime(MavlinkActions, Service):
 
     @property
     def delivery_error(self) -> Exception | None:
-        return self._worker.failure if self._worker is not None else self._delivery.failure
+        if self._worker is not None:
+            return self._worker.failure
+        if self._delivery is not None:
+            return self._delivery.failure
+        return None
 
     def _check_delivery(self) -> None:
         if self._worker is not None:
@@ -165,7 +180,11 @@ class MavlinkRuntime(MavlinkActions, Service):
 
     @property
     def dropped_callbacks(self) -> int:
-        return self._worker.dropped if self._worker is not None else self._delivery.dropped
+        if self._worker is not None:
+            return self._worker.dropped
+        if self._delivery is not None:
+            return self._delivery.dropped
+        return 0
 
     def prune_vehicles(self, *, older_than: float | None = None) -> int:
         """Remove disconnected vehicle/component state eligible for retention cleanup."""
@@ -237,7 +256,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         return self.peer is not None and self.dispatcher is not None
 
     @property
-    def messages(self) -> EventBus[Any]:
+    def messages(self) -> EventBus[MavlinkMessage]:
         return self.router.messages
 
     @property
@@ -290,7 +309,7 @@ class MavlinkRuntime(MavlinkActions, Service):
             if self._running:
                 self._check_delivery()
                 return
-        started: list[Service | VehicleRegistry | ApplicationHandlers] = []
+        started: list[_Stoppable] = []
         try:
             if self._worker is not None:
                 self._worker.start()
@@ -344,7 +363,7 @@ class MavlinkRuntime(MavlinkActions, Service):
                 return
             self._running = False
             self._cleanup_pending = True
-        services: list[Service | VehicleRegistry | ApplicationHandlers] = [
+        services: list[_Stoppable] = [
             self._registry, self._application_handlers,
         ]
         if self.dispatcher is not None:
@@ -429,13 +448,13 @@ class MavlinkRuntime(MavlinkActions, Service):
         predicate: MessagePredicate | None = None,
         once: bool = False,
         **options: Any,
-    ) -> Callable[[Callable[[Any], None]], Subscription]: ...
+    ) -> Callable[[Callable[[MavlinkMessage], None]], Subscription]: ...
 
     @overload
     def subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], None],
+        callback: Callable[[MavlinkMessage], None],
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
@@ -445,12 +464,14 @@ class MavlinkRuntime(MavlinkActions, Service):
     def subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], None] | None = None,
+        callback: Callable[[MavlinkMessage], None] | None = None,
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
         **options: Any,
-    ) -> Subscription | Callable[[Callable[[Any], None]], Subscription]:
+    ) -> Subscription | Callable[
+        [Callable[[MavlinkMessage], None]], Subscription
+    ]:
         if callback is None:
             return lambda function: self._subscribe(
                 message_types,
@@ -470,7 +491,7 @@ class MavlinkRuntime(MavlinkActions, Service):
     def _subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], Any],
+        callback: Callable[[MavlinkMessage], object],
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
@@ -513,7 +534,7 @@ class MavlinkRuntime(MavlinkActions, Service):
     def once(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], None] | None = None,
+        callback: Callable[[MavlinkMessage], None] | None = None,
         *,
         predicate: MessagePredicate | None = None,
     ) -> Subscription:
@@ -531,7 +552,7 @@ class MavlinkRuntime(MavlinkActions, Service):
         predicate: MessagePredicate | None = None,
         timeout: float = 3.0,
         after_sequence: int | None = None,
-    ) -> Any:
+    ) -> MavlinkMessage:
         self._check_delivery()
         result = self.client.wait_for(
             message_types,
@@ -545,14 +566,14 @@ class MavlinkRuntime(MavlinkActions, Service):
     def latest(
         self,
         message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
-    ) -> Any | None:
+    ) -> MavlinkMessage | None:
         return self.client.latest(message_filter)
 
-    def send(self, message: Any) -> None:
+    def send(self, message: MavlinkMessage) -> None:
         self._check_delivery()
         self.client.send(message)
 
-    def send_named(self, message_name: str, **parameters: Any) -> None:
+    def send_named(self, message_name: str, **parameters: object) -> None:
         self._check_delivery()
         self.client.send_named(message_name, **parameters)
 
@@ -571,7 +592,7 @@ class MavlinkRuntime(MavlinkActions, Service):
     def notify(
         self,
         packet_type: str,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
     ) -> MavlinkApplicationPacket:
         self._check_delivery()
         if self.peer is None:
@@ -581,7 +602,7 @@ class MavlinkRuntime(MavlinkActions, Service):
     def request(
         self,
         packet_type: str,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
         *,
         response_types: str | tuple[str, ...] | frozenset[str] = (
             "system.ack",
@@ -614,9 +635,10 @@ class MavlinkRuntime(MavlinkActions, Service):
                 events.subscribe(lambda error, source=name: self._publish_error(source, error))
             )
 
-    def _publish_error(self, source: str, error: Any) -> None:
+    def _publish_error(self, source: str, error: object) -> None:
         if not isinstance(error, Exception):
-            error = getattr(error, "error", RuntimeError(str(error)))
+            nested = getattr(error, "error", None)
+            error = nested if isinstance(nested, Exception) else RuntimeError(str(error))
         if not self.errors.closed:
             self.errors.publish(MavlinkRuntimeError(source, error))
             self._emit("action:error", MavlinkAction(self, error=error))

@@ -375,3 +375,17 @@ messages from a previous session are not delivered.
 The `MavlinkMessage` protocol describes `get_header`, `get_type`, `get_msgId`,
 `get_srcSystem`, `get_srcComponent`, `get_seq`, `get_msgbuf`, `to_dict` and
 `to_json`. A compatible `MavlinkHeader` supplies source/sequence metadata.
+
+The public typing boundary also provides `MavlinkConnectionBackend`,
+`MavlinkSender`, `MavlinkDialect` and `MavutilModule` for custom transports and
+test doubles. `MavlinkMessageMetadata` describes pre-extracted filter fields;
+`TargetedMavlinkMessage` and `MavlinkV2ExtensionMessage` narrow the two message
+shapes that require additional fields. Application payloads use recursive
+`JsonValue` instead of an unbounded `Any` mapping. These are structural
+protocols: implementations do not need to inherit from core classes.
+
+Runtime construction dictionaries are checked through
+`MavlinkRouterOptions`, `MavlinkApplicationChannelOptions` and
+`MavlinkApplicationPeerOptions`. Each is a `TypedDict`: supported keys and
+their value types are visible to editors without allocating configuration
+objects or adding work to the message path.

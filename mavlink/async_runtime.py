@@ -14,6 +14,7 @@ from .runtime import MavlinkRuntime
 from .history import MessageHistory
 from .router import MavlinkIngressFilter
 from .filter import MessagePredicate, MessageTypeInput, MavlinkMessageFilter
+from .protocols import MavlinkMessage
 
 
 class AsyncMavlinkRuntime:
@@ -165,13 +166,13 @@ class AsyncMavlinkRuntime:
         predicate: MessagePredicate | None = None,
         once: bool = False,
         **options: Any,
-    ) -> Callable[[Callable[[Any], Awaitable[None]]], Subscription]: ...
+    ) -> Callable[[Callable[[MavlinkMessage], Awaitable[None]]], Subscription]: ...
 
     @overload
     def subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], Awaitable[None]],
+        callback: Callable[[MavlinkMessage], Awaitable[None]],
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
@@ -181,15 +182,17 @@ class AsyncMavlinkRuntime:
     def subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], Awaitable[None]] | None = None,
+        callback: Callable[[MavlinkMessage], Awaitable[None]] | None = None,
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
         **options: Any,
-    ) -> Subscription | Callable[[Callable[[Any], Awaitable[None]]], Subscription]:
+    ) -> Subscription | Callable[
+        [Callable[[MavlinkMessage], Awaitable[None]]], Subscription
+    ]:
         if callback is None:
             def decorate(
-                function: Callable[[Any], Awaitable[None]],
+                function: Callable[[MavlinkMessage], Awaitable[None]],
             ) -> Subscription:
                 return self.subscribe(message_types, function, predicate=predicate, once=once, **options)
             return decorate

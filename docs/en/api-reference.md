@@ -121,7 +121,8 @@ See [MAVLink](mavlink.md) and [Application protocol](application-protocol.md).
 |---|---|
 | Runtime | `MavlinkRuntime`, `AsyncMavlinkRuntime`, `MavlinkRuntimeState`, `MavlinkRuntimeError`, `MavlinkAction` |
 | Transport | `MavlinkEndpoint`, `MavlinkConnection`, `MavlinkClient`, `MavlinkMessageRouter`, `MavlinkAsyncChannel`, `MavlinkUnavailableError` |
-| Message routing | `MavlinkMessageFilter`, `MavlinkMessageEnvelope`, `MavlinkIngressFilter`, `MavlinkRouterStats`, `MavlinkRouterError`, `MavlinkHeader`, `MavlinkMessage` |
+| Message routing | `MavlinkMessageFilter`, `MavlinkMessageEnvelope`, `MavlinkIngressFilter`, `MavlinkRouterStats`, `MavlinkRouterError`, `MavlinkHeader`, `MavlinkMessage`, `MavlinkMessageMetadata`, `TargetedMavlinkMessage`, `MavlinkV2ExtensionMessage` |
+| Transport typing | `MavlinkConnectionBackend`, `MavlinkSender`, `MavlinkDialect`, `MavutilModule`, `JsonValue`, `MavlinkRouterOptions`, `MavlinkApplicationChannelOptions`, `MavlinkApplicationPeerOptions` |
 | Vehicles | `MavlinkCollection`, `MavlinkVehicle`, `MavlinkComponent`, `MavlinkVehicleState`, `AsyncMavlinkCollection`, `AsyncMavlinkVehicle`, `AsyncMavlinkComponent` |
 | Cache/history | `MessageCache`, `MessageCacheStats`, `MessageHistory`, `SqliteMessageHistory`, `MessageRecord`, `HistoryWriterStats` |
 | Application packets | `MavlinkApplicationPacket`, `MavlinkApplicationCodec`, `MavlinkApplicationAssembler`, `MavlinkApplicationChannel`, `MavlinkApplicationProtocolError` |

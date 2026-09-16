@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import builtins
+import enum
+import importlib
 from pathlib import Path
 
 
@@ -87,10 +90,30 @@ class ProjectMetadataTests(unittest.TestCase):
     def test_python_floor_and_optional_mavlink_metadata(self) -> None:
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('requires-python = ">=3.10"', metadata)
-        self.assertIn("dependencies = []", metadata)
+        self.assertIn(
+            '"backports.strenum>=1.3.1,<2; python_version < \'3.11\'"',
+            metadata,
+        )
+        self.assertIn(
+            '"exceptiongroup>=1.3.1,<2; python_version < \'3.11\'"',
+            metadata,
+        )
         self.assertIn('mavlink = ["pymavlink>=2.4"]', metadata)
         self.assertIn('quality = [', metadata)
         self.assertIn('"ruff>=0.12,<1"', metadata)
+
+    def test_compatibility_exports_standard_or_maintained_backport_types(self) -> None:
+        compatibility = importlib.import_module("src.core.compatibility")
+        if sys.version_info >= (3, 11):
+            self.assertIs(compatibility.StrEnum, enum.StrEnum)
+            self.assertIs(compatibility.ExceptionGroup, builtins.ExceptionGroup)
+        else:
+            self.assertTrue(
+                compatibility.StrEnum.__module__.startswith("backports.strenum")
+            )
+            self.assertTrue(
+                compatibility.ExceptionGroup.__module__.startswith("exceptiongroup")
+            )
 
     def test_development_runners_live_at_repository_root(self) -> None:
         self.assertTrue((ROOT / "run_tests.py").is_file())

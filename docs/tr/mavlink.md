@@ -130,6 +130,20 @@ veri verir.
 `get_srcSystem`, `get_srcComponent`, `get_seq`, `get_msgbuf`, `to_dict`, `to_json`;
 `MavlinkHeader` source/sequence metadata sözleşmesini tarif eder.
 
+Public tip sınırı özel transport ve test doubles için ayrıca
+`MavlinkConnectionBackend`, `MavlinkSender`, `MavlinkDialect` ve
+`MavutilModule` sunar. `MavlinkMessageMetadata` önceden çıkarılmış filtre
+alanlarını; `TargetedMavlinkMessage` ve `MavlinkV2ExtensionMessage` ek alan
+gerektiren iki mesaj biçimini tanımlar. Application payload'ları sınırsız
+`Any` yerine recursive `JsonValue` kullanır. Bunlar yapısal protocol'lerdir;
+uygulamaların core sınıflarından miras alması gerekmez.
+
+Runtime kurulum sözlükleri `MavlinkRouterOptions`,
+`MavlinkApplicationChannelOptions` ve `MavlinkApplicationPeerOptions` ile
+denetlenir. Bu `TypedDict` tipleri desteklenen anahtarları ve değer tiplerini
+editörde gösterir; çalışma zamanında ek nesne ya da mesaj yolunda maliyet
+oluşturmaz.
+
 ## Client
 
 `MavlinkClient(endpoint=None, connection=None, router=None, router_options=None)`;

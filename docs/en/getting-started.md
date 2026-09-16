@@ -6,6 +6,9 @@
 
 For core, dependency, event and mission features:
 
+Python 3.10 receives the required standard-library backports automatically
+through the package metadata; newer Python versions use their built-in classes.
+
 ```bash
 python -m pip install .
 ```

@@ -64,13 +64,15 @@ class _AsyncResource:
 
 class DependencyLifecycleTests(unittest.TestCase):
     def test_default_container_initialization_is_thread_safe(self) -> None:
-        barrier = threading.Barrier(2)
+        constructing = threading.Event()
+        release = threading.Event()
         constructed: list[object] = []
 
         class SlowContainer:
             def __init__(self) -> None:
                 constructed.append(self)
-                time.sleep(0.02)
+                constructing.set()
+                release.wait(1.0)
 
         dependency_context._default_container = None
         results: list[object] = []
@@ -81,15 +83,16 @@ class DependencyLifecycleTests(unittest.TestCase):
         ):
             threads = [
                 threading.Thread(
-                    target=lambda: (
-                        barrier.wait(),
-                        results.append(dependency_context.get_default_container()),
+                    target=lambda: results.append(
+                        dependency_context.get_default_container()
                     )
                 )
                 for _ in range(2)
             ]
-            for thread in threads:
-                thread.start()
+            threads[0].start()
+            self.assertTrue(constructing.wait(1.0))
+            threads[1].start()
+            release.set()
             for thread in threads:
                 thread.join(1.0)
         set_default_container(DependencyContainer())
@@ -592,10 +595,13 @@ class DependencyLifecycleTests(unittest.TestCase):
     def test_scoped_resolution_is_singleton_per_scope_across_threads(self) -> None:
         created = 0
         lock = threading.Lock()
+        started = threading.Event()
+        release = threading.Event()
 
         def factory() -> object:
             nonlocal created
-            time.sleep(0.01)
+            started.set()
+            release.wait(1.0)
             with lock:
                 created += 1
             return object()
@@ -604,7 +610,12 @@ class DependencyLifecycleTests(unittest.TestCase):
         root.scoped("resource", factory=factory)
         scope = root.create_scope()
         with ThreadPoolExecutor(max_workers=8) as executor:
-            instances = tuple(executor.map(lambda _index: scope.resolve("resource"), range(16)))
+            futures = tuple(
+                executor.submit(scope.resolve, "resource") for _index in range(16)
+            )
+            self.assertTrue(started.wait(1.0))
+            release.set()
+            instances = tuple(future.result(1.0) for future in futures)
 
         self.assertEqual(created, 1)
         self.assertTrue(all(item is instances[0] for item in instances))
@@ -782,7 +793,7 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         sync_caller.start()
         self.assertTrue(await asyncio.to_thread(entered.wait, 1.0))
         async_caller = asyncio.create_task(container.unregister_async("resource"))
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0)
         self.assertFalse(async_caller.done())
 
         release.set()
@@ -901,19 +912,26 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_async_scoped_resolution_creates_once(self) -> None:
         created = 0
+        started = asyncio.Event()
+        release = asyncio.Event()
 
         async def factory() -> object:
             nonlocal created
-            await asyncio.sleep(0.01)
+            started.set()
+            await release.wait()
             created += 1
             return object()
 
         root = DependencyContainer()
         root.scoped("resource", factory=factory)
         scope = root.create_scope()
-        instances = await asyncio.gather(
-            *(scope.resolve_async("resource") for _ in range(16))
+        resolutions = tuple(
+            asyncio.create_task(scope.resolve_async("resource")) for _ in range(16)
         )
+        await asyncio.wait_for(started.wait(), 1.0)
+        await asyncio.sleep(0)
+        release.set()
+        instances = await asyncio.gather(*resolutions)
 
         self.assertEqual(created, 1)
         self.assertTrue(all(item is instances[0] for item in instances))

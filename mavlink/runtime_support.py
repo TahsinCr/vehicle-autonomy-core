@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .actions import MavlinkAction
+from .protocols import MavlinkMessage
 
 if TYPE_CHECKING:
     from ..events import Subscription
@@ -23,7 +24,7 @@ class MavlinkRuntimeSupport:
 
     def configure_async_io(
         self,
-        operation: Callable[[Callable[[], Any]], Awaitable[Any]],
+        operation: Callable[[Callable[[], object]], Awaitable[object]],
     ) -> None:
         self._runtime._registry.async_io = operation
 
@@ -33,11 +34,11 @@ class MavlinkRuntimeSupport:
     def subscribe(
         self,
         message_types: MavlinkMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], Any],
+        callback: Callable[[MavlinkMessage], object],
         *,
         predicate: MessagePredicate | None = None,
         once: bool = False,
-        **options: Any,
+        **options: object,
     ) -> Subscription:
         return self._runtime._subscribe(
             message_types,
@@ -53,10 +54,10 @@ class MavlinkRuntimeSupport:
     async def finish_handlers(self) -> None:
         await self._runtime._application_handlers.finish_async()
 
-    async def emit_action(self, name: str, source: Any) -> None:
+    async def emit_action(self, name: str, source: object) -> None:
         await self._runtime._emit_async(f"action:{name}", MavlinkAction(source))
 
-    async def emit_error(self, error: Exception, source: Any) -> None:
+    async def emit_error(self, error: Exception, source: object) -> None:
         await self._runtime._emit_async(
             "action:error",
             MavlinkAction(source, error=error),

@@ -7,18 +7,23 @@ import inspect
 import threading
 from itertools import count
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TypeVar, cast
 
 from ..events.callback import CallbackSubscription
 
 
+_EventT = TypeVar("_EventT")
+AsyncActionCallback = Callable[[object], Awaitable[object]]
+AsyncFailureCallback = Callable[[Exception], Awaitable[None]]
+
+
 @dataclass(frozen=True, slots=True)
 class MavlinkAction:
-    source: Any
-    vehicle: Any = None
-    component: Any = None
+    source: object
+    vehicle: object | None = None
+    component: object | None = None
     error: Exception | None = None
 
 
@@ -45,11 +50,11 @@ class AsyncDelivery:
             raise ValueError("Async delivery concurrency must be a positive integer")
         self.concurrency = concurrency
         self.failure: Exception | None = None
-        self.on_failure = None
+        self.on_failure: AsyncFailureCallback | None = None
         self._fault_pending = False
         self.dropped = 0
-        self._queue: deque[tuple[Callable, Any]] = deque()
-        self._actions: deque[tuple[Callable, Any]] = deque()
+        self._queue: deque[tuple[AsyncActionCallback, object]] = deque()
+        self._actions: deque[tuple[AsyncActionCallback, object]] = deque()
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready: asyncio.Event | None = None
@@ -80,9 +85,17 @@ class AsyncDelivery:
             self._scheduled = False
             self._task = loop.create_task(self._consume())
 
-    def submit(self, callback: Callable, event: Any, *, action: bool = False) -> None:
+    def submit(
+        self,
+        callback: Callable[[_EventT], Awaitable[object]],
+        event: _EventT,
+        *,
+        action: bool = False,
+    ) -> None:
         with self._lock:
-            if self._loop is None:
+            loop = self._loop
+            ready = self._ready
+            if loop is None or ready is None:
                 return
             if self.failure is not None:
                 return
@@ -92,16 +105,18 @@ class AsyncDelivery:
                         BufferError("MAVLink lifecycle delivery capacity exceeded")
                     )
                 else:
-                    self._actions.append((callback, event))
+                    self._actions.append(
+                        (cast(AsyncActionCallback, callback), event)
+                    )
             else:
                 if len(self._queue) == self.capacity:
                     self._queue.popleft()
                     self.dropped += 1
-                self._queue.append((callback, event))
+                self._queue.append((cast(AsyncActionCallback, callback), event))
             if not self._scheduled:
                 self._scheduled = True
                 try:
-                    self._loop.call_soon_threadsafe(self._ready.set)
+                    loop.call_soon_threadsafe(ready.set)
                 except RuntimeError:
                     self._queue.clear()
                     self._actions.clear()
@@ -123,7 +138,10 @@ class AsyncDelivery:
 
     async def _consume(self) -> None:
         while True:
-            await self._ready.wait()
+            ready = self._ready
+            if ready is None:
+                return
+            await ready.wait()
             with self._lock:
                 actions = tuple(self._actions)
                 callbacks = tuple(self._queue)
@@ -132,7 +150,7 @@ class AsyncDelivery:
                 self._actions.clear()
                 self._queue.clear()
                 self._scheduled = False
-                self._ready.clear()
+                ready.clear()
             if fault is not None and self.on_failure is not None:
                 await self.on_failure(fault)
             for callback, event in actions:
@@ -240,7 +258,7 @@ class MavlinkActions:
         self,
         topic: str,
         subscription: CallbackSubscription,
-        event: Any,
+        event: object,
     ) -> None:
         if self._claim(subscription):
             try:
@@ -283,7 +301,7 @@ class MavlinkActions:
             raise ValueError("Message type must not be empty")
         return self._register(f"message:{normalized}", callback, once=once, **options)
 
-    def _emit(self, topic: str, event: Any) -> None:
+    def _emit(self, topic: str, event: object) -> None:
         if self._delivery is None and topic in {"action:start", "action:stop", "action:removed"}:
             self._emit_sync(topic, event)
             return
@@ -323,7 +341,7 @@ class MavlinkActions:
                         if topic != "action:error":
                             self._emit("action:error", MavlinkAction(self, error=exc))
 
-    def _emit_sync(self, topic: str, event: Any, *, entries=None) -> None:
+    def _emit_sync(self, topic: str, event: object, *, entries=None) -> None:
         if entries is None:
             with self._topics_lock:
                 entries = tuple(self._topics.get(topic, {}).values())

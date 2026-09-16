@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-from typing import Any
+from concurrent.futures import Future
 
 from ..events import Subscription
 from .dispatch import MavlinkApplicationResult
@@ -19,8 +19,8 @@ class ApplicationHandlers:
         self._lock = threading.RLock()
         self._entries: dict[tuple, tuple] = {}
         self._routes: dict[str, Subscription] = {}
-        self._futures: set[Any] = set()
-        self._tasks: set[asyncio.Task] = set()
+        self._futures: set[Future[object]] = set()
+        self._tasks: set[asyncio.Task[object]] = set()
         self._running = False
 
     def start(self):
@@ -102,6 +102,8 @@ class ApplicationHandlers:
 
                 async def invoke():
                     task = asyncio.current_task()
+                    if task is None:
+                        raise RuntimeError("Application handler requires an asyncio task")
                     self._tasks.add(task)
                     try:
                         with self._lock:

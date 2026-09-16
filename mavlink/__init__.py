@@ -33,7 +33,21 @@ else:
     from .endpoint import MavlinkEndpoint
     from .filter import MavlinkMessageFilter
     from .message import MavlinkMessageEnvelope
-    from .protocols import MavlinkHeader, MavlinkMessage
+    from .protocols import (
+        JsonValue,
+        MavlinkApplicationChannelOptions,
+        MavlinkApplicationPeerOptions,
+        MavlinkConnectionBackend,
+        MavlinkDialect,
+        MavlinkHeader,
+        MavlinkMessage,
+        MavlinkMessageMetadata,
+        MavlinkRouterOptions,
+        MavlinkSender,
+        MavlinkV2ExtensionMessage,
+        MavutilModule,
+        TargetedMavlinkMessage,
+    )
     from .peer import (
         MavlinkApplicationPeer,
         MavlinkApplicationPeerState,
@@ -100,8 +114,19 @@ else:
         "MavlinkIngressFilter",
         "MavlinkMessageEnvelope",
         "MavlinkMessageFilter",
+        "MavlinkConnectionBackend",
+        "MavlinkApplicationChannelOptions",
+        "MavlinkApplicationPeerOptions",
+        "MavlinkDialect",
         "MavlinkHeader",
         "MavlinkMessage",
+        "MavlinkMessageMetadata",
+        "MavlinkRouterOptions",
+        "MavlinkSender",
+        "MavlinkV2ExtensionMessage",
+        "MavutilModule",
+        "TargetedMavlinkMessage",
+        "JsonValue",
         "MavlinkRouterError",
         "MavlinkRouterStats",
         "MavlinkRuntime",

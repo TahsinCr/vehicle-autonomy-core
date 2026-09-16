@@ -173,6 +173,7 @@ class EventBus(BaseEventBus[T]):
         )
         with self._lock:
             self._ensure_open()
+            history = self._history
             subscription_id = self._next_id
             self._next_id += 1
 
@@ -186,13 +187,13 @@ class EventBus(BaseEventBus[T]):
                 normalized_filter,
                 delivery_limit,
                 subscription,
-                replaying=bool(replay and self._history is not None),
+                replaying=bool(replay and history is not None),
                 pending=deque(maxlen=self._replay_buffer_limit),
             )
             self._subscribers[subscription_id] = subscriber
             replay_snapshot = (
-                self._history.query()
-                if subscriber.replaying
+                history.query()
+                if subscriber.replaying and history is not None
                 else ()
             )
 

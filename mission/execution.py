@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..abstracts import (
     Model,
@@ -139,7 +139,7 @@ def _mission_descriptor(mission: "Mission") -> dict[str, Any]:
 
 
 def _execution_entry_dict(
-    entry: "Mission" | MissionNode | MissionParallelStage,
+    entry: Mission | MissionNode | MissionParallelStage,
 ) -> dict[str, Any]:
     from .base import Mission
 
@@ -149,7 +149,7 @@ def _execution_entry_dict(
 
 
 def _mission_nodes(
-    values: tuple[MissionNode | "Mission", ...],
+    values: tuple[MissionNode | Mission, ...],
 ) -> tuple[MissionNode, ...]:
     from .base import Mission
 
@@ -172,7 +172,7 @@ class MissionParallelStage(Model):
     """A named set of missions launched as one chain stage."""
 
     name: str
-    nodes: tuple[MissionNode | "Mission", ...]
+    nodes: "tuple[MissionNode | Mission, ...]"
     failure_policy: ParallelFailurePolicy = ParallelFailurePolicy.WAIT_ALL
 
     def __post_init__(self) -> None:
@@ -197,7 +197,7 @@ class MissionParallelGroup(Model):
     """Configured mission instances for one controlled parallel execution."""
 
     group_id: str
-    nodes: tuple[MissionNode | "Mission", ...]
+    nodes: "tuple[MissionNode | Mission, ...]"
     failure_policy: ParallelFailurePolicy = ParallelFailurePolicy.WAIT_ALL
 
     def __post_init__(self) -> None:
@@ -210,7 +210,7 @@ class MissionParallelGroup(Model):
 @dataclass(frozen=True, slots=True)
 class MissionChain(Model):
     chain_id: str
-    stages: tuple["Mission" | MissionNode | MissionParallelStage, ...]
+    stages: "tuple[Mission | MissionNode | MissionParallelStage, ...]"
     stop_on_failure: bool = True
 
     def __post_init__(self) -> None:
@@ -234,7 +234,8 @@ class MissionChain(Model):
         for entry in stages:
             if isinstance(entry, MissionParallelStage):
                 node_names.append(entry.name)
-                mission_ids.extend(node.mission.id for node in entry.nodes)
+                nodes = cast(tuple[MissionNode, ...], entry.nodes)
+                mission_ids.extend(node.mission.id for node in nodes)
             elif isinstance(entry, MissionNode):
                 node_names.append(str(entry.name))
                 mission_ids.append(entry.mission.id)
@@ -281,7 +282,7 @@ class MissionChainSnapshot(Model):
     @property
     def current_stage(
         self,
-    ) -> "Mission" | MissionNode | MissionParallelStage | None:
+    ) -> "Mission | MissionNode | MissionParallelStage | None":
         if not self.active or self.current_index >= len(self.chain.stages):
             return None
         return self.chain.stages[self.current_index]
