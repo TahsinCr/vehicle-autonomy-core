@@ -1050,16 +1050,20 @@ def _load_regressions(
         "CPU per message": result.cpu_ns_per_message
         / float(previous["cpu_ns_per_message"]),
     }
-    # Hosted runners can lose wall-clock throughput under unrelated CPU
-    # contention. Process CPU time is the portable signal for actual work, so
-    # require it to corroborate wall-clock throughput and latency regressions.
+    # Hosted runners can lose one wall-clock signal under unrelated scheduling
+    # contention. CPU is the portable signal for extra in-process work, while
+    # concurrent throughput and tail-latency regressions also expose I/O and
+    # lock contention that process CPU time cannot observe.
+    throughput_regression = ratios["throughput"] > factor
+    latency_regression = ratios["latency p99"] > factor
     cpu_regression = ratios["CPU per message"] > factor
+    wall_clock_regression = throughput_regression and latency_regression
     failures: list[str] = []
-    if ratios["throughput"] > factor and cpu_regression:
+    if throughput_regression and (cpu_regression or wall_clock_regression):
         failures.append(
             f"throughput: +{(ratios['throughput'] - 1.0) * 100.0:.1f}%"
         )
-    if ratios["latency p99"] > factor and cpu_regression:
+    if latency_regression and (cpu_regression or wall_clock_regression):
         failures.append(
             f"latency p99: +{(ratios['latency p99'] - 1.0) * 100.0:.1f}%"
         )

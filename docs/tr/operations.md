@@ -165,9 +165,10 @@ atomik olarak `benchmark-logs.json` dosyasına eklenir. Geçici ölçümlerde
 `--no-log` kullanılabilir. Birleşik yük testi SQLite kayıt kaybı veya kalan worker
 thread tespit ederse başarısız olur. `--compare-load previous-load.json`, aynı
 makinedeki önceki çalışmaya göre throughput, p99 gecikme ve mesaj başına CPU
-maliyetini de denetler. Throughput ile CPU bağımsız kapılardır; p99 yalnız bir
-toplam maliyet de gerilediğinde hata üretir. Böylece tek bir kısa scheduling
-sıçraması kararlı bir çalışmayı reddetmez.
+maliyetini de denetler. CPU maliyetindeki aşırı artış tek başına; throughput ve
+p99'un birlikte gerilemesi ise depolama, kilit ve I/O çekişmesini yakalamak için
+hata üretir. Tek başına görülen throughput veya p99 sıçraması, kararlı bir
+çalışmayı tek seferlik scheduling aykırılığıyla reddetmemek için hata üretmez.
 CI hem bir önceki commit'i hem de farklıysa erişilebilen en yüksek kararlı sürüm etiketini
 karşılaştırır. Böylece tek commit'teki ve sürüm boyunca biriken yavaşlamalar ayrı
 ayrı yakalanır. Yük sonucu karşılaştırması profil, storage ve topology

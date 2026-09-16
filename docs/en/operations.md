@@ -161,9 +161,10 @@ CI uses the same calibrated 35% budget. Every run is appended atomically to
 platform and result data. Use `--no-log` only for disposable probes. Combined
 load runs fail when SQLite loses records or leaves worker threads behind.
 `--compare-load previous-load.json` also checks throughput, p99 latency and CPU
-cost per message against a same-host run. Throughput and CPU are independent
-gates; p99 fails only when an aggregate cost also regresses, preventing one
-short scheduling spike from rejecting an otherwise stable run.
+cost per message against a same-host run. It rejects either an excessive CPU
+cost increase or concurrent throughput and p99 regressions, which also catches
+storage, lock and I/O contention. An isolated throughput or p99 spike remains
+non-fatal to avoid rejecting a stable run for one scheduling outlier.
 CI compares both the immediately preceding commit and, when different, the
 highest reachable stable prior release tag. This catches local regressions as well as smaller
 slowdowns accumulated across a release. Load-result comparison also requires

@@ -183,6 +183,33 @@ class BenchmarkToolTests(unittest.TestCase):
                 [],
             )
 
+    def test_load_regression_rejects_concurrent_io_signals_without_cpu_cost(self) -> None:
+        current = run_benchmarks.LoadBenchmarkResult(
+            "test", 1, 1, 1, "sqlite", 50.0, 1.0, 1.0, 160.0,
+            105.0, 1.0, 1.0, 0, 0, 0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "load.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "profile": "test",
+                        "messages": 1,
+                        "vehicles": 1,
+                        "callbacks": 1,
+                        "storage": "sqlite",
+                        "throughput_per_second": 100.0,
+                        "latency_p99_ns": 100.0,
+                        "cpu_ns_per_message": 100.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                run_benchmarks._load_regressions(current, path, 35.0),
+                ["throughput: +100.0%", "latency p99: +60.0%"],
+            )
+
     def test_load_regression_rejects_mismatched_profile_identity(self) -> None:
         current = run_benchmarks.LoadBenchmarkResult(
             "normal", 2_000, 1, 2, "sqlite", 100.0, 1.0, 1.0, 1.0,

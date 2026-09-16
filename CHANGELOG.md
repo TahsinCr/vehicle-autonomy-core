@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject a combined SQLite load regression when throughput and p99 latency both
+  exceed the budget, even if process CPU per message remains stable. Isolated
+  wall-clock spikes remain non-fatal.
+
 ## [v1.9.1] - 2026-09-16
 
 ### Changed
