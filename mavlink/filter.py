@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, TypeAlias, cast
+from typing import Any, TypeAlias
 
 from .protocols import MavlinkMessage, MavlinkMessageMetadata
 
@@ -98,10 +98,14 @@ class MavlinkMessageFilter:
     predicate: MessagePredicate | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "message_types", normalize_message_types(self.message_types))
-        object.__setattr__(self, "source_systems", normalize_source_ids(self.source_systems))
-        object.__setattr__(self, "source_components", normalize_source_ids(self.source_components))
-        object.__setattr__(self, "message_ids", normalize_message_ids(self.message_ids))
+        message_types = normalize_message_types(self.message_types)
+        source_systems = normalize_source_ids(self.source_systems)
+        source_components = normalize_source_ids(self.source_components)
+        message_ids = normalize_message_ids(self.message_ids)
+        object.__setattr__(self, "message_types", message_types)
+        object.__setattr__(self, "source_systems", source_systems)
+        object.__setattr__(self, "source_components", source_components)
+        object.__setattr__(self, "message_ids", message_ids)
         normalized_condition = self.condition.strip() if self.condition else None
         object.__setattr__(self, "condition", normalized_condition or None)
         if self.predicate is not None and not callable(self.predicate):
@@ -133,10 +137,6 @@ class MavlinkMessageFilter:
         condition_evaluator: ConditionEvaluator | None = None,
         metadata: MavlinkMessageMetadata | None = None,
     ) -> bool:
-        message_types = cast(frozenset[str] | None, self.message_types)
-        source_systems = cast(frozenset[int] | None, self.source_systems)
-        source_components = cast(frozenset[int] | None, self.source_components)
-        message_ids = cast(frozenset[int] | None, self.message_ids)
         message_type = (
             metadata.message_type if metadata is not None else mavlink_message_type(message)
         )
@@ -149,13 +149,25 @@ class MavlinkMessageFilter:
             else mavlink_source_component(message)
         )
         message_id = metadata.message_id if metadata is not None else mavlink_message_id(message)
-        if message_types is not None and message_type not in message_types:
+        # ``__post_init__`` normalizes these public constructor unions to sets.
+        # Keeping the original annotations preserves useful constructor typing
+        # without adding casts to this receive-thread hot path.
+        if self.message_types is not None and message_type not in self.message_types:
             return False
-        if source_systems is not None and source_system not in source_systems:
+        if (
+            self.source_systems is not None
+            and source_system not in self.source_systems  # pyright: ignore[reportOperatorIssue]
+        ):
             return False
-        if source_components is not None and source_component not in source_components:
+        if (
+            self.source_components is not None
+            and source_component not in self.source_components  # pyright: ignore[reportOperatorIssue]
+        ):
             return False
-        if message_ids is not None and message_id not in message_ids:
+        if (
+            self.message_ids is not None
+            and message_id not in self.message_ids  # pyright: ignore[reportOperatorIssue]
+        ):
             return False
         if self.condition is not None:
             if condition_evaluator is None:

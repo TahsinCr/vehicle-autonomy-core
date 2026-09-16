@@ -42,11 +42,14 @@ def build_public_api() -> dict[str, str]:
             value = getattr(module, name)
             qualified_name = f"{module.__name__}.{name}"
             signatures[qualified_name] = "<export>"
+            if inspect.isclass(value) and getattr(value, "_is_protocol", False):
+                signatures[qualified_name] = "<protocol>"
             is_project_class = inspect.isclass(value) and getattr(
                 value, "__module__", ""
             ).startswith("src.core")
-            if inspect.isfunction(value) or (
-                is_project_class and "__init__" in vars(value)
+            if signatures[qualified_name] != "<protocol>" and (
+                inspect.isfunction(value)
+                or (is_project_class and "__init__" in vars(value))
             ):
                 try:
                     signatures[qualified_name] = str(inspect.signature(value))
@@ -115,11 +118,18 @@ def incompatible_api_changes(
     return tuple(changes)
 
 
-def _project_version(document: str) -> tuple[int, int, int]:
-    match = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', document, re.MULTILINE)
+def _project_version(document: str) -> tuple[int, int, int, bool]:
+    match = re.search(
+        r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)(\.dev\d*)?"',
+        document,
+        re.MULTILINE,
+    )
     if match is None:
-        raise ValueError("Project version must use major.minor.patch format")
-    return tuple(int(part) for part in match.groups())
+        raise ValueError(
+            "Project version must use major.minor.patch or major.minor.patch.devN format"
+        )
+    major, minor, patch, development = match.groups()
+    return int(major), int(minor), int(patch), development is not None
 
 
 def check_patch_compatibility(tag: str) -> tuple[str, ...]:
@@ -136,6 +146,8 @@ def check_patch_compatibility(tag: str) -> tuple[str, ...]:
         text=True,
     ).stdout
     previous_version = _project_version(previous_project)
+    if current_version[3]:
+        return ()
     if current_version[:2] != previous_version[:2]:
         return ()
     previous_contract = json.loads(
@@ -151,6 +163,11 @@ def check_patch_compatibility(tag: str) -> tuple[str, ...]:
 
 
 class PublicApiContractTests(unittest.TestCase):
+    def test_development_versions_are_recognized_explicitly(self) -> None:
+        self.assertEqual(_project_version('version = "1.8.3"'), (1, 8, 3, False))
+        self.assertEqual(_project_version('version = "1.8.3.dev0"'), (1, 8, 3, True))
+        self.assertEqual(_project_version('version = "1.8.3.dev2"'), (1, 8, 3, True))
+
     def test_patch_compatibility_allows_additions_but_rejects_breakage(self) -> None:
         previous = {"module.call": "(value: int) -> str"}
         self.assertEqual(

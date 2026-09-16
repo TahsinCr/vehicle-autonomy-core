@@ -129,8 +129,9 @@ class ApplicationCodecTests(unittest.TestCase):
         packet = MavlinkApplicationPacket("data.large", {"text": "x" * 1_000})
         fragments = MavlinkApplicationCodec.encode(packet)
         assembler = MavlinkApplicationAssembler(fragment_timeout=0.01)
-        with patch(
-            "src.core.mavlink.application.time.monotonic",
+        with patch.object(
+            application_module.time,
+            "monotonic",
             side_effect=(10.0, 10.02),
         ):
             assembler.accept(fragments[0])

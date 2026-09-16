@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+Development builds use the `1.8.3.devN` sequence until the final release
+version is chosen.
+
 ### Changed
 
 - Replaced local Python 3.10 `StrEnum` and `ExceptionGroup` implementations
@@ -31,6 +34,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Keep public API snapshots stable across supported Python versions by
+  representing structural protocols explicitly instead of relying on their
+  interpreter-specific synthesized constructor signatures.
+- Remove runtime-only typing casts from the MAVLink filter hot path and make
+  mocked assembler time independent of package import layout.
 - Keep MAVLink packets without source identifiers out of source-local
   condition state so unrelated unaddressed packets cannot share condition data.
 - Preserve event-history narrowing across subscription setup and align the
