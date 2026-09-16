@@ -4,8 +4,10 @@ import asyncio
 import unittest
 
 from src.core.events import (
+    AsyncEventBus,
     AsyncEventEngine,
     EventBus,
+    EventBusClosedError,
     EventEngine,
 )
 
@@ -38,6 +40,22 @@ class EventEngineTests(unittest.TestCase):
         engine.stop()
         self.assertTrue(recreated.closed)
         self.assertEqual(engine.channel_names, ())
+
+    def test_validation_context_manager_and_direct_actions(self) -> None:
+        before: list[int] = []
+        with EventEngine(on_before=before.append) as engine:
+            state = engine.channel("state")
+            engine.publish("state", 3)
+            self.assertEqual(before, [3])
+            with self.assertRaises(ValueError):
+                engine.add("state", EventBus())
+            with self.assertRaises(ValueError):
+                engine.channel("   ")
+            with self.assertRaises(TypeError):
+                engine.add("invalid", object())  # type: ignore[arg-type]
+        self.assertFalse(engine.running)
+        with self.assertRaises(EventBusClosedError):
+            state.publish(4)
 
 
 class AsyncEventEngineTests(unittest.IsolatedAsyncioTestCase):
@@ -79,3 +97,15 @@ class AsyncEventEngineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(received, ["tick", "tick"])
         self.assertFalse(schedule.active)
+
+    async def test_async_engine_validation_remove_and_context_manager(self) -> None:
+        async with AsyncEventEngine() as engine:
+            custom = engine.channel("custom")
+            self.assertTrue(await engine.remove("custom"))
+            self.assertFalse(await engine.remove("custom"))
+            self.assertTrue(custom.closed)
+            with self.assertRaises(ValueError):
+                engine.add(" ", AsyncEventBus())
+            with self.assertRaises(TypeError):
+                engine.add("invalid", EventBus())  # type: ignore[arg-type]
+        self.assertFalse(engine.running)

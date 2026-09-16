@@ -1026,10 +1026,17 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     sync_future = executor.submit(container.resolve, "resource")
                     self.assertTrue(await asyncio.to_thread(started.wait, 1.0))
+
+                    async_started = asyncio.Event()
+
+                    async def resolve_async() -> object:
+                        async_started.set()
+                        return await container.resolve_async("resource")
+
                     async_task = asyncio.create_task(
-                        container.resolve_async("resource")
+                        resolve_async()
                     )
-                    await asyncio.sleep(0.01)
+                    await asyncio.wait_for(async_started.wait(), 1.0)
                     self.assertFalse(async_task.done())
                     release.set()
                     sync_value = await asyncio.wrap_future(sync_future)
@@ -1056,8 +1063,14 @@ class AsyncDependencyLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(started.wait(), 1.0)
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            sync_future = executor.submit(container.resolve, "resource")
-            await asyncio.sleep(0.01)
+            sync_started = threading.Event()
+
+            def resolve_sync() -> object:
+                sync_started.set()
+                return container.resolve("resource")
+
+            sync_future = executor.submit(resolve_sync)
+            self.assertTrue(await asyncio.to_thread(sync_started.wait, 1.0))
             self.assertFalse(sync_future.done())
             release.set()
             async_value = await async_task

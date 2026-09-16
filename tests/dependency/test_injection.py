@@ -27,6 +27,35 @@ class _AsyncClient:
 
 
 class DependencyInjectionTests(unittest.TestCase):
+    def test_class_injection_preserves_explicit_values_and_rejects_unused_overrides(self) -> None:
+        container = DependencyContainer(auto_wire=False)
+        container.singleton(_Engine)
+
+        @container.inject
+        class Vehicle:
+            def __init__(self, engine: _Engine) -> None:
+                self.engine = engine
+
+        explicit = _Engine()
+        self.assertIs(Vehicle().engine, container.resolve(_Engine))
+        self.assertIs(Vehicle(explicit).engine, explicit)
+
+        def call() -> None:
+            return None
+
+        with self.assertRaisesRegex(DependencyResolutionError, "override"):
+            container.inject(call, missing=_Engine)()
+
+    def test_positional_only_parameters_are_rejected_before_invocation(self) -> None:
+        container = DependencyContainer(auto_wire=False)
+
+        def call(engine: _Engine, /) -> _Engine:
+            return engine
+
+        decorated = container.inject(call)
+        with self.assertRaisesRegex(DependencyResolutionError, "Pozisyonel-only"):
+            decorated()
+
     def test_autowire_and_explicit_annotation_injection(self) -> None:
         container = DependencyContainer()
         container.singleton(_Engine)

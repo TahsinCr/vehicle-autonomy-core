@@ -22,6 +22,8 @@ from src.core.mission import (
     OwnerTerminationPolicy,
     ParallelFailurePolicy,
 )
+from src.core.mission.background import MissionBackgroundExecutor
+from src.core.mission.execution import MissionBackgroundSnapshot
 
 
 def wait_until(predicate: object, timeout: float = 1.0) -> None:
@@ -46,6 +48,44 @@ class IdleMission(Mission):
 
     def stop(self) -> None:
         self.stopped.set()
+
+
+class _BackgroundOwnerStub:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def fail(self, *arguments: object) -> None:
+        self.calls.append(("fail", arguments))
+
+    def stop(self, *arguments: object) -> None:
+        self.calls.append(("stop", arguments))
+
+
+class _BackgroundOrchestratorStub:
+    def __init__(self) -> None:
+        self.engine = _BackgroundEngineStub()
+        self.chains = _BackgroundOwnerStub()
+        self.parallel = _BackgroundOwnerStub()
+
+    @staticmethod
+    def run_all(
+        operations: list[object],
+        _message: str,
+    ) -> None:
+        for operation in operations:
+            operation()  # type: ignore[operator]
+
+
+class _BackgroundEngineStub:
+    def __init__(self) -> None:
+        self._condition = threading.RLock()
+        self.calls: list[tuple[str, int, str]] = []
+
+    def cancel(self, mission_id: int, *, reason: str) -> None:
+        self.calls.append(("cancel", mission_id, reason))
+
+    def stop_mission(self, mission_id: int, *, reason: str) -> None:
+        self.calls.append(("stop", mission_id, reason))
 
 
 class ProducerMission(Mission):
@@ -175,6 +215,98 @@ class ExclusiveB(IdleMission):
 
 
 class MissionOrchestrationTests(unittest.TestCase):
+    def test_background_failure_policy_routes_chain_and_parallel_owners(self) -> None:
+        orchestrator = _BackgroundOrchestratorStub()
+        executor = MissionBackgroundExecutor(orchestrator)  # type: ignore[arg-type]
+
+        executor._apply_failure(
+            MissionBackgroundSnapshot(
+                1,
+                "chain",
+                "chain-run",
+                failure_policy=BackgroundFailurePolicy.FAIL_OWNER,
+            )
+        )
+        executor._apply_failure(
+            MissionBackgroundSnapshot(
+                2,
+                "chain",
+                "chain-run",
+                failure_policy=BackgroundFailurePolicy.STOP_EXECUTION,
+            )
+        )
+        executor._apply_failure(
+            MissionBackgroundSnapshot(
+                3,
+                "parallel",
+                "parallel-run",
+                failure_policy=BackgroundFailurePolicy.FAIL_OWNER,
+            )
+        )
+        executor._apply_failure(
+            MissionBackgroundSnapshot(
+                4,
+                "parallel",
+                "parallel-run",
+                failure_policy=BackgroundFailurePolicy.STOP_EXECUTION,
+            )
+        )
+
+        self.assertEqual(
+            orchestrator.chains.calls,
+            [
+                ("fail", ("chain-run", "Owned background mission failed")),
+                ("stop", ("chain-run",)),
+            ],
+        )
+        self.assertEqual(
+            orchestrator.parallel.calls,
+            [
+                ("fail", ("parallel-run", "Owned background mission failed")),
+                ("stop", ("parallel-run",)),
+            ],
+        )
+
+    def test_background_owner_termination_applies_each_policy(self) -> None:
+        orchestrator = _BackgroundOrchestratorStub()
+        executor = MissionBackgroundExecutor(orchestrator)  # type: ignore[arg-type]
+        executor._missions = {
+            1: MissionBackgroundSnapshot(
+                1,
+                "mission",
+                "42",
+                termination_policy=OwnerTerminationPolicy.CANCEL_WITH_OWNER,
+            ),
+            2: MissionBackgroundSnapshot(
+                2,
+                "mission",
+                "42",
+                termination_policy=OwnerTerminationPolicy.STOP_WITH_OWNER,
+            ),
+            3: MissionBackgroundSnapshot(
+                3,
+                "mission",
+                "42",
+                termination_policy=OwnerTerminationPolicy.KEEP_RUNNING,
+            ),
+            4: MissionBackgroundSnapshot(4, "mission", "other"),
+        }
+
+        executor.owner_terminated("mission", "42", MissionPhase.CANCELLED)
+
+        self.assertEqual(
+            orchestrator.engine.calls,
+            [
+                ("cancel", 1, "Background owner terminated"),
+                ("stop", 2, "Background owner terminated"),
+            ],
+        )
+        self.assertTrue(executor.contains(3))
+        executor.forget_mission(3)
+        self.assertFalse(executor.contains(3))
+        executor.clear()
+        self.assertFalse(executor.contains(1))
+
     def setUp(self) -> None:
         ProducerMission.contexts.clear()
         ConsumerMission.contexts.clear()
@@ -635,6 +767,29 @@ class MissionOrchestrationTests(unittest.TestCase):
                 background.id,
                 {snapshot.mission_id for snapshot in engine.snapshots()},
             )
+
+    def test_background_rejects_inactive_owner_and_survives_removed_keep_running_owner(self) -> None:
+        with MissionEngine(scheduler_interval=0.001) as engine:
+            with self.assertRaises(MissionConflictError):
+                engine.run_background(IdleMission(), owner=IdleMission())
+
+        owner = IdleMission()
+        background = IdleMission()
+        with MissionEngine(scheduler_interval=0.001) as engine:
+            engine.run(owner)
+            self.assertTrue(owner.started.wait(1.0))
+            engine.run_background(
+                background,
+                owner=owner,
+                termination_policy=OwnerTerminationPolicy.KEEP_RUNNING,
+                failure_policy=BackgroundFailurePolicy.FAIL_OWNER,
+            )
+            self.assertTrue(background.started.wait(1.0))
+            engine.complete(owner)
+            self.assertTrue(engine.unregister(owner))
+            engine.fail(background, "expected failure")
+            self.assertIs(engine.snapshot(background).phase, MissionPhase.FAILED)
+            self.assertTrue(engine.background_snapshot(background.id).phase.terminal)
 
     def test_background_cancel_policy_and_engine_shutdown(self) -> None:
         owner = IdleMission()

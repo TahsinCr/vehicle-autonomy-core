@@ -4,8 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-Development builds use the `1.8.3.devN` sequence until the final release
-version is chosen.
+## [v1.8.4] - 2026-09-16
 
 ### Changed
 
@@ -56,6 +55,10 @@ version is chosen.
 - Added deterministic coverage for matching external terminal commands during
   cleanup and removed the timing sleep from terminal-worker unregister
   verification.
+- Expanded lifecycle and error-path coverage for the dependency facade and
+  injection helpers, sync and async event engines, MAVLink application channels
+  and dispatch, and background mission owner policies. Replaced the remaining
+  dependency initialization coordination sleeps with explicit readiness signals.
 
 ## [v1.8.3] - 2026-09-15
 
@@ -894,7 +897,8 @@ version is chosen.
 - Corrected project naming and repository links so the legacy misspelling is no
   longer present in source, metadata or documentation.
 
-[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.3...HEAD
+[Unreleased]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.4...HEAD
+[v1.8.4]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.3...v1.8.4
 [v1.8.3]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.2...v1.8.3
 [v1.8.2]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8.1...v1.8.2
 [v1.8.1]: https://github.com/TahsinCr/vehicle-autonomy-core/compare/v1.8...v1.8.1

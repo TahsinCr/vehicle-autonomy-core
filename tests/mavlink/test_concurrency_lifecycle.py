@@ -10,7 +10,10 @@ from typing import Any
 from src.core.events import EventBus
 from src.core.mavlink.application import MavlinkApplicationPacket
 from src.core.mavlink.channel import MavlinkAsyncChannel
-from src.core.mavlink.dispatch import MavlinkApplicationDispatcher
+from src.core.mavlink.dispatch import (
+    MavlinkApplicationDispatcher,
+    MavlinkApplicationHandlerRegistry,
+)
 from src.core.mavlink.peer import MavlinkApplicationPeer
 from src.core.mavlink.router import MavlinkMessageRouter
 
@@ -446,6 +449,51 @@ class _PeerStub:
 
 
 class DispatcherLifecycleTests(unittest.TestCase):
+    def test_registry_replacement_cancellation_and_dispatch_error_paths(self) -> None:
+        registry = MavlinkApplicationHandlerRegistry()
+        first = registry.register("camera.capture", lambda _packet: None)
+        with self.assertRaises(ValueError):
+            registry.register("camera.capture", lambda _packet: None)
+        replacement = registry.register(
+            "camera.capture",
+            lambda _packet: "invalid",  # type: ignore[return-value]
+            replace=True,
+        )
+        first.cancel()
+        self.assertIsNotNone(registry.resolve("CAMERA.CAPTURE"))
+        replacement.cancel()
+        self.assertIsNone(registry.resolve("camera.capture"))
+        with self.assertRaises(ValueError):
+            registry.register("system.ack", lambda _packet: None)
+        with self.assertRaises(TypeError):
+            registry.register("camera.capture", object())  # type: ignore[arg-type]
+
+        peer = _PeerStub()
+        dispatcher = MavlinkApplicationDispatcher(peer)  # type: ignore[arg-type]
+        errors: list[Exception] = []
+        dispatcher.errors.subscribe(errors.append)
+        self.assertFalse(dispatcher.dispatch(MavlinkApplicationPacket("camera.capture")))
+        self.assertIsInstance(errors[-1], RuntimeError)
+
+        dispatcher.register("camera.capture", lambda _packet: "invalid")  # type: ignore[arg-type]
+        handled = threading.Event()
+        dispatcher.handled.subscribe(lambda _event: handled.set())
+        dispatcher.start()
+        self.assertTrue(
+            dispatcher.dispatch(
+                MavlinkApplicationPacket(
+                    "camera.capture",
+                    packet_id=77,
+                    expects_response=True,
+                )
+            )
+        )
+        self.assertTrue(handled.wait(1.0))
+        dispatcher.stop()
+        self.assertIsInstance(errors[-1], TypeError)
+        self.assertEqual(peer.sent[-1][0], "system.error")
+        self.assertEqual(peer.sent[-1][1]["request_id"], 77)
+
     def test_handler_can_stop_dispatcher_without_joining_itself(self) -> None:
         peer = _PeerStub()
         dispatcher = MavlinkApplicationDispatcher(peer)  # type: ignore[arg-type]
