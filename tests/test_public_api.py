@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import unittest
+from enum import Enum
 from functools import cached_property
 from pathlib import Path
 
@@ -53,6 +54,11 @@ def build_public_api() -> dict[str, str]:
                     pass
             if not is_project_class:
                 continue
+            if issubclass(value, Enum):
+                for member_name, member in value.__members__.items():
+                    signatures[f"{qualified_name}.{member_name}"] = (
+                        f"<enum> {member.value!r}"
+                    )
             members: dict[str, object] = {}
             for base in reversed(value.__mro__):
                 if getattr(base, "__module__", "").startswith("src.core"):
@@ -69,6 +75,15 @@ def build_public_api() -> dict[str, str]:
                     signatures[f"{qualified_name}.{member_name}"] = (
                         f"<{type(member).__name__}> {signature}"
                     )
+                    if isinstance(member, property):
+                        if member.fset is not None:
+                            signatures[f"{qualified_name}.{member_name}.setter"] = str(
+                                inspect.signature(member.fset)
+                            )
+                        if member.fdel is not None:
+                            signatures[f"{qualified_name}.{member_name}.deleter"] = str(
+                                inspect.signature(member.fdel)
+                            )
                     continue
                 if isinstance(member, (classmethod, staticmethod)):
                     member = member.__func__
@@ -171,6 +186,13 @@ class PublicApiContractTests(unittest.TestCase):
             contract["src.core.mavlink.MavlinkVehicle.state"].startswith(
                 "<property>"
             )
+        )
+
+    def test_public_enum_members_and_values_are_part_of_the_contract(self) -> None:
+        contract = build_public_api()
+        self.assertEqual(
+            contract["src.core.mission.MissionPhase.RUNNING"],
+            "<enum> 'running'",
         )
 
 

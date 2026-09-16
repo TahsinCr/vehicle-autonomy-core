@@ -6,7 +6,9 @@ import math
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, Iterator
 
 from ..abstracts import _freeze_model_value
 from .enums import (
@@ -27,6 +29,12 @@ from .runtime import MissionRuntime, PendingTerminalIntent
 
 if TYPE_CHECKING:
     from .engine import MissionEngine
+
+
+_mission_terminal_origin: ContextVar[tuple[int, int] | None] = ContextVar(
+    "mission_terminal_origin",
+    default=None,
+)
 
 
 class _MissionExit(BaseException):
@@ -66,6 +74,14 @@ class MissionLifecycle:
             raise RuntimeError("Mission lifecycle is already bound to another engine")
         self._engine = engine
         return self
+
+    @contextmanager
+    def _mission_command(self, mission_id: int) -> Iterator[None]:
+        token = _mission_terminal_origin.set((id(self), mission_id))
+        try:
+            yield
+        finally:
+            _mission_terminal_origin.reset(token)
 
     def pause(
         self,
@@ -185,25 +201,30 @@ class MissionLifecycle:
     ) -> MissionSnapshot:
         runtime = self.engine._runtime(mission)
         stopping_transition: MissionTransition | None = None
+        intent: PendingTerminalIntent | None = None
         with self.engine._condition:
             if runtime.snapshot.phase is MissionPhase.SUCCEEDED:
                 return runtime.snapshot
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
-            if self._is_cleanup_reentry(runtime, MissionPhase.SUCCEEDED):
-                return runtime.snapshot
-            if (
-                runtime.snapshot.phase is MissionPhase.STOPPING
-                and runtime.cleanup_error is not None
+            if self._is_mission_cleanup_reentry(
+                runtime,
+                MissionPhase.SUCCEEDED,
             ):
+                return runtime.snapshot
+            if runtime.snapshot.phase is MissionPhase.STOPPING:
+                if runtime.pending_terminal is None:
+                    raise MissionTransitionError(
+                        "Only a running mission can complete"
+                    )
                 if (
-                    runtime.pending_terminal is not None
-                    and runtime.pending_terminal.phase is not MissionPhase.SUCCEEDED
+                    runtime.pending_terminal.phase is not MissionPhase.SUCCEEDED
                 ):
                     raise MissionTransitionError(
                         "Mission already has a different terminal intent"
                     )
-                retry_cleanup = True
+                intent = runtime.pending_terminal
+                retry_cleanup = runtime.cleanup_error is not None
             elif runtime.snapshot.phase is not MissionPhase.RUNNING:
                 raise MissionTransitionError(
                     "Only a running mission can complete"
@@ -211,7 +232,7 @@ class MissionLifecycle:
             else:
                 retry_cleanup = False
             runtime.stop_event.set()
-            if not retry_cleanup:
+            if intent is None and not retry_cleanup:
                 _, stopping_transition = self._transition_locked(
                     runtime,
                     MissionPhase.STOPPING,
@@ -279,7 +300,10 @@ class MissionLifecycle:
         with self.engine._condition:
             if runtime.snapshot.phase.terminal:
                 return runtime.snapshot
-            if self._is_cleanup_reentry(runtime, MissionPhase.FAILED):
+            if self._is_mission_cleanup_reentry(
+                runtime,
+                MissionPhase.FAILED,
+            ):
                 return runtime.snapshot
             if runtime.snapshot.phase is MissionPhase.STOPPING and runtime.pending_terminal is not None:
                 if runtime.pending_terminal.phase is not MissionPhase.FAILED:
@@ -708,7 +732,7 @@ class MissionLifecycle:
                 return runtime.snapshot
             if current.terminal:
                 return runtime.snapshot
-            if self._is_cleanup_reentry(runtime, terminal):
+            if self._is_mission_cleanup_reentry(runtime, terminal):
                 return runtime.snapshot
             if runtime.pending_terminal is not None:
                 intent = runtime.pending_terminal
@@ -773,6 +797,16 @@ class MissionLifecycle:
             runtime.pending_terminal is not None
             and runtime.cleanup_owner_thread_id is not None
             and runtime.pending_terminal.phase is terminal
+        )
+
+    def _is_mission_cleanup_reentry(
+        self,
+        runtime: MissionRuntime,
+        terminal: MissionPhase,
+    ) -> bool:
+        return (
+            _mission_terminal_origin.get() == (id(self), runtime.mission.id)
+            and MissionLifecycle._is_cleanup_reentry(runtime, terminal)
         )
 
     def _join_worker(self, runtime: MissionRuntime) -> None:

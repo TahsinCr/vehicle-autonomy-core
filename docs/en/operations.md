@@ -108,9 +108,12 @@ also installs optional `pymavlink`, so the real UDP loopback contract runs on
 both architectures. Tests cover standalone checkout loading and the intended
 `src/core` submodule layout.
 
-CI also compares the callable contract with the nearest release tag. Existing
-exports and signatures must remain intact on a patch line, while additive APIs
-are allowed. Minor versions may intentionally establish a new contract.
+CI also compares the callable contract with the highest stable semantic-version
+tag reachable from the previous commit. Existing exports, signatures, public
+enum names/values and property accessors must remain intact on a patch line,
+while additive APIs are allowed. Minor versions may intentionally establish a
+new contract. Workflow Actions are pinned to immutable commit SHAs; their
+version comments remain available to Dependabot and reviewers.
 `pip-audit` checks the optional MAVLink dependency set in an isolated job,
 Dependabot checks Python and GitHub Actions dependencies weekly, and CodeQL runs
 extended Python security queries on changes and on a weekly schedule.
@@ -155,7 +158,7 @@ cost per message against a same-host run. Throughput and CPU are independent
 gates; p99 fails only when an aggregate cost also regresses, preventing one
 short scheduling spike from rejecting an otherwise stable run.
 CI compares both the immediately preceding commit and, when different, the
-nearest prior release tag. This catches local regressions as well as smaller
+highest reachable stable prior release tag. This catches local regressions as well as smaller
 slowdowns accumulated across a release. Load-result comparison also requires
 matching profile, storage and topology metadata. CI microbenchmarks use longer
 nine-sample medians than the interactive `--quick` health check.

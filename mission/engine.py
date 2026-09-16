@@ -437,6 +437,21 @@ class MissionEngine(Service):
             reason=reason,
         )
 
+    def _stop_from_mission(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        mission_id = self._mission_id(mission)
+        with self.lifecycle._mission_command(mission_id):
+            return self.stop_mission(
+                mission_id,
+                requester_id=requester_id,
+                reason=reason,
+            )
+
     def cancel(
         self,
         mission: MissionReference,
@@ -450,12 +465,36 @@ class MissionEngine(Service):
             reason=reason,
         )
 
+    def _cancel_from_mission(
+        self,
+        mission: MissionReference,
+        *,
+        requester_id: int,
+        reason: str = "",
+    ) -> MissionSnapshot:
+        mission_id = self._mission_id(mission)
+        with self.lifecycle._mission_command(mission_id):
+            return self.cancel(
+                mission_id,
+                requester_id=requester_id,
+                reason=reason,
+            )
+
     def complete(
         self,
         mission: MissionReference,
         result: Mapping[str, Any] | None = None,
     ) -> MissionSnapshot:
         return self.lifecycle.complete(mission, result)
+
+    def _complete_from_mission(
+        self,
+        mission: MissionReference,
+        result: Mapping[str, Any] | None = None,
+    ) -> MissionSnapshot:
+        mission_id = self._mission_id(mission)
+        with self.lifecycle._mission_command(mission_id):
+            return self.complete(mission_id, result)
 
     def retry_cleanup(self, mission: MissionReference) -> MissionSnapshot:
         """Retry failed cleanup without losing the requested terminal result."""
@@ -470,6 +509,17 @@ class MissionEngine(Service):
         retryable: bool = False,
     ) -> MissionSnapshot:
         return self.lifecycle.fail(mission, reason, retryable=retryable)
+
+    def _fail_from_mission(
+        self,
+        mission: MissionReference,
+        reason: str,
+        *,
+        retryable: bool = False,
+    ) -> MissionSnapshot:
+        mission_id = self._mission_id(mission)
+        with self.lifecycle._mission_command(mission_id):
+            return self.fail(mission_id, reason, retryable=retryable)
 
     def progress(
         self,

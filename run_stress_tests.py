@@ -67,6 +67,8 @@ STRESS_TESTS = (
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_cleanup_child_thread_cannot_reenter_terminalization",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
+    "test_external_matching_terminal_commands_wait_for_cleanup",
+    "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_cleanup_retry_cannot_reenter_matching_completion",
     "tests.mission.test_engine.MissionEngineLifecycleTests."
     "test_pause_and_resume_can_request_terminal_commands",

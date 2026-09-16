@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from collections.abc import Callable, Mapping
 
 from src.core.compatibility import ExceptionGroup
 from src.core.mission import (
@@ -214,6 +215,15 @@ class RecordingLifecycle(MissionLifecycle):
     def __init__(self) -> None:
         super().__init__()
         self.progress_values: list[float] = []
+        self.completions = 0
+
+    def complete(
+        self,
+        mission: Mission | int,
+        result: Mapping[str, object] | None = None,
+    ) -> MissionSnapshot:
+        self.completions += 1
+        return super().complete(mission, result)
 
     def progress(
         self,
@@ -271,6 +281,7 @@ class MissionComponentTests(unittest.TestCase):
             self.assertEqual(result.phase, MissionPhase.SUCCEEDED)
             self.assertEqual(scheduler.launched, [mission.id])
             self.assertEqual(lifecycle.progress_values, [0.5])
+            self.assertEqual(lifecycle.completions, 1)
         finally:
             engine.close()
 
@@ -698,6 +709,89 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         self.assertEqual(snapshot.phase, MissionPhase.FAILED)
         self.assertEqual(snapshot.reason, "original failure")
 
+    def test_external_matching_terminal_commands_wait_for_cleanup(self) -> None:
+        class BlockingCleanupMission(BlockingMission):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cleanup_entered = threading.Event()
+                self.release_cleanup = threading.Event()
+
+            def stop(self) -> None:
+                self.cleanup_entered.set()
+                self.release_cleanup.wait(1.0)
+
+        commands: tuple[
+            tuple[str, Callable[[Mission], MissionSnapshot], MissionPhase],
+            ...,
+        ] = (
+            (
+                "complete",
+                lambda mission: self.engine.complete(mission, {"safe": True}),
+                MissionPhase.SUCCEEDED,
+            ),
+            (
+                "fail",
+                lambda mission: self.engine.fail(mission, "sensor failure"),
+                MissionPhase.FAILED,
+            ),
+            (
+                "stop",
+                lambda mission: self.engine.stop_mission(mission),
+                MissionPhase.STOPPED,
+            ),
+            (
+                "cancel",
+                lambda mission: self.engine.cancel(mission),
+                MissionPhase.CANCELLED,
+            ),
+        )
+
+        for name, command, terminal in commands:
+            with self.subTest(command=name):
+                mission = BlockingCleanupMission()
+                self.engine.run(mission)
+                self.assertTrue(mission.started.wait(1.0))
+                results: list[MissionSnapshot] = []
+                second_finalize_entered = threading.Event()
+                second_finished = threading.Event()
+                original_finalize = self.engine.lifecycle._finalize_pending_terminal
+                second_threads: list[threading.Thread] = []
+
+                def observe_finalize(
+                    *args: object,
+                    **kwargs: object,
+                ) -> MissionSnapshot:
+                    if (
+                        second_threads
+                        and threading.current_thread() is second_threads[0]
+                    ):
+                        second_finalize_entered.set()
+                    return original_finalize(*args, **kwargs)  # type: ignore[arg-type]
+
+                self.engine.lifecycle._finalize_pending_terminal = observe_finalize  # type: ignore[method-assign]
+                first = threading.Thread(target=lambda: results.append(command(mission)))
+                first.start()
+                try:
+                    self.assertTrue(mission.cleanup_entered.wait(1.0))
+
+                    def repeat_command() -> None:
+                        results.append(command(mission))
+                        second_finished.set()
+
+                    second_thread = threading.Thread(target=repeat_command)
+                    second_threads.append(second_thread)
+                    second_thread.start()
+                    self.assertTrue(second_finalize_entered.wait(1.0))
+                    self.assertFalse(second_finished.is_set())
+                finally:
+                    mission.release_cleanup.set()
+                first.join(1.0)
+                second_threads[0].join(1.0)
+                self.engine.lifecycle._finalize_pending_terminal = original_finalize  # type: ignore[method-assign]
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second_threads[0].is_alive())
+                self.assertEqual([result.phase for result in results], [terminal, terminal])
+
     def test_unregister_waits_for_terminal_worker_finalization(self) -> None:
         mission = CompletingMission()
         finalization_entered = threading.Event()
@@ -717,8 +811,20 @@ class MissionEngineLifecycleTests(unittest.TestCase):
         unregister = threading.Thread(
             target=lambda: result.append(self.engine.unregister(mission))
         )
+        runtime = self.engine._runtime(mission)
+        worker = runtime.worker
+        self.assertIsNotNone(worker)
+        assert worker is not None
+        join_entered = threading.Event()
+        original_join = worker.join
+
+        def observed_join(timeout: float | None = None) -> None:
+            join_entered.set()
+            original_join(timeout)
+
+        worker.join = observed_join  # type: ignore[method-assign]
         unregister.start()
-        time.sleep(0.02)
+        self.assertTrue(join_entered.wait(1.0))
         self.assertTrue(unregister.is_alive())
 
         release_finalization.set()

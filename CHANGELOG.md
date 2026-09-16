@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Public API compatibility checks now retain public enum member names and
+  serialized values, plus setter/deleter signatures when a property exposes
+  them.
+- CI selects the highest reachable stable semantic-version tag for release
+  comparisons and pins every GitHub Action to an immutable commit SHA.
+
+### Fixed
+
+- Keep mission-originated matching terminal commands non-blocking during
+  cleanup while making independent engine callers wait for the committed
+  terminal snapshot instead of receiving an intermediate `STOPPING` state.
+
+### Tests
+
+- Added deterministic coverage for matching external terminal commands during
+  cleanup and removed the timing sleep from terminal-worker unregister
+  verification.
+
 ## [v1.8.3] - 2026-09-15
 
 ### Added

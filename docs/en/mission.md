@@ -173,7 +173,9 @@ mission is admitted.
 Terminal cleanup keeps the first accepted outcome authoritative across threads.
 A cleanup callback may issue the matching terminal command directly or through
 a joined helper thread without re-entering finalization; a competing terminal
-command is still rejected.
+command is still rejected. An independent caller repeating the matching command
+waits for cleanup and receives the committed terminal snapshot rather than the
+intermediate `STOPPING` state.
 
 Multiple inputs are independent and admitted in argument order. If a later
 mission is rejected, earlier missions keep running and later inputs are not

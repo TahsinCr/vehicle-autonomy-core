@@ -110,9 +110,12 @@ ARM64 işi de opsiyonel `pymavlink` paketini kurduğu için gerçek UDP loopback
 kontratı iki mimaride çalışır. Testler hem bağımsız checkout'u hem amaçlanan
 `src/core` submodule yerleşimini kapsar.
 
-CI callable API sözleşmesini en yakın yayın tag'iyle de karşılaştırır. Patch
-serisinde mevcut export ve imzalar korunurken yeni API eklenebilir; minor sürüm
-bilinçli olarak yeni bir sözleşme oluşturabilir. İzole bir job opsiyonel MAVLink
+CI callable API sözleşmesini önceki commit'ten erişilebilen en yüksek kararlı
+semantic-version tag'iyle karşılaştırır. Patch serisinde mevcut export, imza,
+public enum adı/değeri ve property accessor'ları korunurken yeni API eklenebilir;
+minor sürüm bilinçli olarak yeni bir sözleşme oluşturabilir. Workflow Action'ları
+değişmez commit SHA'larına sabitlenir; sürüm yorumları Dependabot ve inceleyenler
+için korunur. İzole bir job opsiyonel MAVLink
 bağımlılıklarını `pip-audit` ile tarar. Dependabot Python ve GitHub Actions
 bağımlılıklarını haftalık kontrol eder; CodeQL genişletilmiş Python güvenlik
 sorgularını değişikliklerde ve haftalık zamanlamada çalıştırır.
@@ -157,7 +160,7 @@ makinedeki önceki çalışmaya göre throughput, p99 gecikme ve mesaj başına 
 maliyetini de denetler. Throughput ile CPU bağımsız kapılardır; p99 yalnız bir
 toplam maliyet de gerilediğinde hata üretir. Böylece tek bir kısa scheduling
 sıçraması kararlı bir çalışmayı reddetmez.
-CI hem bir önceki commit'i hem de farklıysa en yakın önceki sürüm etiketini
+CI hem bir önceki commit'i hem de farklıysa erişilebilen en yüksek kararlı sürüm etiketini
 karşılaştırır. Böylece tek commit'teki ve sürüm boyunca biriken yavaşlamalar ayrı
 ayrı yakalanır. Yük sonucu karşılaştırması profil, storage ve topology
 bilgilerinin de eşleşmesini zorunlu tutar. CI microbenchmark'ları etkileşimli

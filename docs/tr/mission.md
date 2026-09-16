@@ -156,7 +156,9 @@ denenmez. Reddedilen mission gözlem veya sonraki bir deneme için kayıtlı kal
 Terminal cleanup sırasında ilk kabul edilen sonuç thread'ler arasında da
 belirleyicidir. Cleanup callback'i aynı terminal komutu doğrudan veya beklediği
 bir yardımcı thread üzerinden verebilir; finalization yeniden başlatılmaz.
-Çelişen terminal komutlar reddedilmeye devam eder.
+Çelişen terminal komutlar reddedilmeye devam eder. Aynı komutu tekrarlayan
+bağımsız bir çağıran cleanup'ın tamamlanmasını bekler ve ara `STOPPING` durumu
+yerine kesinleşmiş terminal snapshot'ı alır.
 
 Lifecycle: `pause`, `resume`, `stop_mission`, `cancel` requester/reason alır;
 `complete`, `fail`, `progress`, `checkpoint` seçilen mission'ı günceller.

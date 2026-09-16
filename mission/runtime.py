@@ -108,6 +108,12 @@ class BoundMissionController(MissionController):
         )
 
     def stop(self, mission_id: int, *, reason: str = "") -> MissionSnapshot:
+        if mission_id == self._mission_id:
+            return self._engine._stop_from_mission(
+                mission_id,
+                requester_id=self._mission_id,
+                reason=reason,
+            )
         return self._engine.stop_mission(
             mission_id,
             requester_id=self._mission_id,
@@ -115,6 +121,12 @@ class BoundMissionController(MissionController):
         )
 
     def cancel(self, mission_id: int, *, reason: str = "") -> MissionSnapshot:
+        if mission_id == self._mission_id:
+            return self._engine._cancel_from_mission(
+                mission_id,
+                requester_id=self._mission_id,
+                reason=reason,
+            )
         return self._engine.cancel(
             mission_id,
             requester_id=self._mission_id,
@@ -137,10 +149,10 @@ class BoundMissionController(MissionController):
         self,
         result: Mapping[str, Any] | None = None,
     ) -> MissionSnapshot:
-        return self._engine.complete(self._mission_id, result)
+        return self._engine._complete_from_mission(self._mission_id, result)
 
     def fail(self, reason: str, *, retryable: bool = False) -> MissionSnapshot:
-        return self._engine.fail(
+        return self._engine._fail_from_mission(
             self._mission_id,
             reason,
             retryable=retryable,
