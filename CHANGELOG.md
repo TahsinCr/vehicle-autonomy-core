@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Require process CPU-cost regression to corroborate SQLite load throughput or
+  p99 latency regressions before rejecting a hosted CI benchmark run. Data loss
+  and writer-thread leak checks remain unconditional.
+
 ## [v1.9] - 2026-09-16
 
 ### Changed

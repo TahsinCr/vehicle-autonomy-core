@@ -1050,15 +1050,24 @@ def _load_regressions(
         "CPU per message": result.cpu_ns_per_message
         / float(previous["cpu_ns_per_message"]),
     }
-    corroborated_latency = (
-        ratios["latency p99"] > factor
-        and max(ratios["throughput"], ratios["CPU per message"]) > factor
-    )
-    return [
-        f"{name}: +{(ratio - 1.0) * 100.0:.1f}%"
-        for name, ratio in ratios.items()
-        if ratio > factor and (name != "latency p99" or corroborated_latency)
-    ]
+    # Hosted runners can lose wall-clock throughput under unrelated CPU
+    # contention. Process CPU time is the portable signal for actual work, so
+    # require it to corroborate wall-clock throughput and latency regressions.
+    cpu_regression = ratios["CPU per message"] > factor
+    failures: list[str] = []
+    if ratios["throughput"] > factor and cpu_regression:
+        failures.append(
+            f"throughput: +{(ratios['throughput'] - 1.0) * 100.0:.1f}%"
+        )
+    if ratios["latency p99"] > factor and cpu_regression:
+        failures.append(
+            f"latency p99: +{(ratios['latency p99'] - 1.0) * 100.0:.1f}%"
+        )
+    if cpu_regression:
+        failures.append(
+            f"CPU per message: +{(ratios['CPU per message'] - 1.0) * 100.0:.1f}%"
+        )
+    return failures
 
 
 def _print_table(results: list[BenchmarkResult]) -> None:
