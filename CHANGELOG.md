@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Allow an in-progress MAVLink heartbeat wait to be cancelled promptly during
+  shutdown, while keeping the connection backend structurally typed.
+
 - Reject a combined SQLite load regression when throughput and p99 latency both
   exceed the budget, even if process CPU per message remains stable. Isolated
   wall-clock spikes remain non-fatal.
