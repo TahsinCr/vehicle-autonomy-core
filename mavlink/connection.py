@@ -44,6 +44,7 @@ class MavlinkConnection(Service):
         self._connection_factory = connection_factory
         self._mavutil_module = mavutil_module
         self._lifecycle_lock = threading.RLock()
+        self._connection_state_lock = threading.RLock()
         self._receive_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._sent_messages = 0
@@ -101,11 +102,14 @@ class MavlinkConnection(Service):
             heartbeat = self._wait_vehicle_heartbeat(connection)
             if heartbeat is None:
                 raise TimeoutError("MAVLink heartbeat zaman aşımı")
-            with self._lifecycle_lock:
-                if self._connect_cancel.is_set():
-                    raise ConnectionAbortedError("MAVLink bağlantısı iptal edildi")
-                self._connection = connection
-                self.initial_heartbeat = heartbeat
+            with self._connection_state_lock:
+                with self._lifecycle_lock:
+                    if self._connect_cancel.is_set():
+                        raise ConnectionAbortedError("MAVLink bağlantısı iptal edildi")
+                    self._connection = connection
+                    self.initial_heartbeat = heartbeat
+                    self._connecting = False
+                self.connection_changed.publish(True)
         except Exception as exc:
             if connection is not None:
                 try:
@@ -118,7 +122,6 @@ class MavlinkConnection(Service):
         finally:
             with self._lifecycle_lock:
                 self._connecting = False
-        self.connection_changed.publish(True)
 
     def _wait_vehicle_heartbeat(
         self, connection: MavlinkConnectionBackend
@@ -134,7 +137,7 @@ class MavlinkConnection(Service):
             now = time.monotonic()
             remaining = deadline - now
             if remaining <= 0:
-                raise TimeoutError("MAVLink uçuş cihazı heartbeat zaman aşımı")
+                raise TimeoutError("MAVLink araç denetleyicisi heartbeat zaman aşımı")
 
             if requires_probe and now >= next_probe:
                 self._send_discovery_heartbeat(connection)
@@ -242,7 +245,7 @@ class MavlinkConnection(Service):
     ) -> int:
         """Send the standard command requesting a MAVLink message rate.
 
-        The return value is the period sent to the flight controller in
+        The return value is the period sent to the vehicle controller in
         microseconds. Sending is thread-safe; the vehicle layer can monitor
         command acceptance.
         """
@@ -322,16 +325,17 @@ class MavlinkConnection(Service):
         # a valid vehicle heartbeat.  Set cancellation before acquiring I/O
         # locks so shutdown can interrupt that wait promptly.
         self._connect_cancel.set()
-        with self._send_lock, self._receive_lock, self._lifecycle_lock:
-            connection = self._connection
-            self._connection = None
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception as exc:
-                self._publish_error(exc)
-                raise
-            self.connection_changed.publish(False)
+        with self._connection_state_lock:
+            with self._send_lock, self._receive_lock, self._lifecycle_lock:
+                connection = self._connection
+                self._connection = None
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception as exc:
+                    self._publish_error(exc)
+                    raise
+                self.connection_changed.publish(False)
 
     def _create_connection(self) -> MavlinkConnectionBackend:
         if self._connection_factory is not None:

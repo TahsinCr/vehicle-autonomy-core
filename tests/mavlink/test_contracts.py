@@ -4,6 +4,7 @@ import math
 import queue
 import threading
 import unittest
+import time
 from typing import Any
 from unittest.mock import Mock
 
@@ -212,6 +213,42 @@ class _MavutilStub:
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_concurrent_stop_cannot_publish_disconnect_before_connect(self) -> None:
+        raw = _RawConnection(["vehicle"])
+        connection = MavlinkConnection(
+            MavlinkEndpoint(heartbeat_timeout=0.1),
+            connection_factory=lambda _endpoint: raw,
+            mavutil_module=_MavutilStub(),
+        )
+        entering_connected = threading.Event()
+        release_connected = threading.Event()
+        changes: list[bool] = []
+
+        def record_change(connected: bool) -> None:
+            if connected:
+                entering_connected.set()
+                if not release_connected.wait(1.0):
+                    raise TimeoutError("test did not release connection notification")
+            changes.append(connected)
+
+        connection.connection_changed.subscribe(record_change)
+        connecting = threading.Thread(target=connection.start)
+        connecting.start()
+        self.assertTrue(entering_connected.wait(1.0))
+
+        stopping = threading.Thread(target=connection.stop)
+        stopping.start()
+        time.sleep(0.02)
+        self.assertTrue(stopping.is_alive())
+        release_connected.set()
+        connecting.join(timeout=1.0)
+        stopping.join(timeout=1.0)
+
+        self.assertFalse(connecting.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(changes, [True, False])
+        self.assertFalse(connection.is_connected)
+
     def test_connection_lifecycle_filters_nonvehicle_heartbeat_and_serializes_calls(self) -> None:
         raw = _RawConnection(["companion", "vehicle"])
         connection = MavlinkConnection(
