@@ -169,6 +169,9 @@ class MavlinkMessageRouter(Service):
             self.connection.start()
             self._stop_event.clear()
             with self._condition:
+                self._history.clear()
+                self._latest.clear()
+                self.cache.clear()
                 self._source_sequences.clear()
                 self._source_message_state.clear()
                 self._delivery_window.clear()

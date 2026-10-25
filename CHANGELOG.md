@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Clear router message state, cache and history when a stopped MAVLink router
+  starts a new connection session, preventing data from the previous vehicle
+  from being exposed after reconnect.
 - Allow an in-progress MAVLink heartbeat wait to be cancelled promptly during
   shutdown, while keeping the connection backend structurally typed.
 

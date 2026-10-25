@@ -73,8 +73,14 @@ class RouterLifecycleTests(unittest.TestCase):
         )
 
         router.start()
+        connection.inbox.put(_Message("HEARTBEAT", 8))
+        old_message = router.wait_for("HEARTBEAT", timeout=1.0)
+        self.assertEqual(old_message.value, 8)
         router.stop()
         router.start()
+        self.assertIsNone(router.latest("HEARTBEAT"))
+        self.assertEqual(router.history(), ())
+        self.assertIsNone(router.cache.latest("HEARTBEAT"))
         boundary = router.sequence
         connection.inbox.put(_Message("HEARTBEAT", 9))
         message = router.wait_for("HEARTBEAT", timeout=1.0, after_sequence=boundary)
